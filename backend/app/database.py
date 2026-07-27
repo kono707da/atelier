@@ -162,6 +162,74 @@ class DatabaseManager:
 
                 CREATE INDEX IF NOT EXISTS idx_large_scenes_chapter_sort
                     ON large_scenes(chapter_id, sort_order);
+
+                CREATE TABLE IF NOT EXISTS characters (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    sort_order INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (project_id)
+                        REFERENCES projects(id) ON DELETE CASCADE,
+                    UNIQUE (project_id, name)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_characters_project_sort
+                    ON characters(project_id, sort_order);
+
+                CREATE TABLE IF NOT EXISTS character_variants (
+                    id TEXT PRIMARY KEY,
+                    character_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    is_default INTEGER NOT NULL DEFAULT 0,
+                    sort_order INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (character_id)
+                        REFERENCES characters(id) ON DELETE CASCADE,
+                    UNIQUE (character_id, name)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_character_variants_character_sort
+                    ON character_variants(character_id, sort_order);
+
+                CREATE TABLE IF NOT EXISTS project_specs (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    spec_type TEXT NOT NULL,
+                    custom_label TEXT NOT NULL DEFAULT '',
+                    sort_order INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (project_id)
+                        REFERENCES projects(id) ON DELETE CASCADE,
+                    UNIQUE (project_id, spec_type, custom_label)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_project_specs_project_sort
+                    ON project_specs(project_id, sort_order);
+
+                CREATE TABLE IF NOT EXISTS character_spec_values (
+                    id TEXT PRIMARY KEY,
+                    variant_id TEXT NOT NULL,
+                    project_spec_id TEXT NOT NULL,
+                    prompt TEXT NOT NULL DEFAULT '',
+                    lora_name TEXT NOT NULL DEFAULT '',
+                    lora_weight REAL,
+                    model_override TEXT NOT NULL DEFAULT '',
+                    notes TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (variant_id)
+                        REFERENCES character_variants(id) ON DELETE CASCADE,
+                    FOREIGN KEY (project_spec_id)
+                        REFERENCES project_specs(id) ON DELETE CASCADE,
+                    UNIQUE (variant_id, project_spec_id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_character_spec_values_variant
+                    ON character_spec_values(variant_id);
                 """
             )
             marker = connection.execute(
@@ -565,6 +633,579 @@ class DatabaseManager:
                 "DELETE FROM large_scenes WHERE id = ?", (large_scene_id,)
             )
         return dict(large_scene)
+
+    # ── Characters ──────────────────────────────────────────────
+
+    def list_characters(
+        self,
+        project_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> list[dict[str, object]]:
+        target_environment = environment or self._active_environment
+        with self.connection(target_environment) as connection:
+            rows = connection.execute(
+                """
+                SELECT id, project_id, name, sort_order, created_at, updated_at
+                FROM characters
+                WHERE project_id = ?
+                ORDER BY sort_order ASC, created_at ASC
+                """,
+                (project_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_character(
+        self,
+        character_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        target_environment = environment or self._active_environment
+        with self.connection(target_environment) as connection:
+            row = connection.execute(
+                """
+                SELECT id, project_id, name, sort_order, created_at, updated_at
+                FROM characters
+                WHERE id = ?
+                """,
+                (character_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def create_character(
+        self,
+        project_id: str,
+        name: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        target_environment = environment or self._active_environment
+        clean_name = " ".join(name.split())
+        if not clean_name:
+            raise ValueError("人物名称不能为空。")
+        if len(clean_name) > 80:
+            raise ValueError("人物名称不能超过 80 个字符。")
+        if self.get_project(project_id, target_environment) is None:
+            raise ValueError("项目不存在。")
+        now = datetime.now(timezone.utc).isoformat()
+        character_id = str(uuid4())
+        character = {
+            "id": character_id,
+            "project_id": project_id,
+            "name": clean_name,
+            "created_at": now,
+            "updated_at": now,
+        }
+        try:
+            with self._lock, self.connection(target_environment) as connection:
+                row = connection.execute(
+                    """
+                    SELECT COALESCE(MAX(sort_order), 0) AS max_sort
+                    FROM characters
+                    WHERE project_id = ?
+                    """,
+                    (project_id,),
+                ).fetchone()
+                next_sort = int(row["max_sort"]) + 1
+                character["sort_order"] = next_sort
+                connection.execute(
+                    """
+                    INSERT INTO characters(
+                        id, project_id, name, sort_order, created_at, updated_at
+                    )
+                    VALUES(:id, :project_id, :name, :sort_order, :created_at, :updated_at)
+                    """,
+                    character,
+                )
+                variant_id = str(uuid4())
+                connection.execute(
+                    """
+                    INSERT INTO character_variants(
+                        id, character_id, name, is_default, sort_order, created_at, updated_at
+                    )
+                    VALUES(?, ?, '默认', 1, 1, ?, ?)
+                    """,
+                    (variant_id, character_id, now, now),
+                )
+                spec_rows = connection.execute(
+                    """
+                    SELECT id, spec_type, custom_label, sort_order
+                    FROM project_specs
+                    WHERE project_id = ?
+                    ORDER BY sort_order ASC
+                    """,
+                    (project_id,),
+                ).fetchall()
+                for spec in spec_rows:
+                    connection.execute(
+                        """
+                        INSERT INTO character_spec_values(
+                            id, variant_id, project_spec_id,
+                            prompt, lora_name, lora_weight, model_override, notes,
+                            created_at, updated_at
+                        )
+                        VALUES(?, ?, ?, '', '', NULL, '', '', ?, ?)
+                        """,
+                        (str(uuid4()), variant_id, spec["id"], now, now),
+                    )
+        except sqlite3.IntegrityError as error:
+            raise ValueError("该项目下已经存在同名人物。") from error
+        return self.get_character(character_id, target_environment)  # type: ignore[return-value]
+
+    def rename_character(
+        self,
+        character_id: str,
+        name: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        target_environment = environment or self._active_environment
+        clean_name = " ".join(name.split())
+        if not clean_name:
+            raise ValueError("人物名称不能为空。")
+        if len(clean_name) > 80:
+            raise ValueError("人物名称不能超过 80 个字符。")
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            with self._lock, self.connection(target_environment) as connection:
+                cursor = connection.execute(
+                    """
+                    UPDATE characters
+                    SET name = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (clean_name, now, character_id),
+                )
+                if cursor.rowcount == 0:
+                    raise ValueError("人物不存在。")
+        except sqlite3.IntegrityError as error:
+            raise ValueError("该项目下已经存在同名人物。") from error
+        character = self.get_character(character_id, target_environment)
+        if character is None:
+            raise ValueError("人物不存在。")
+        return character
+
+    def delete_character(
+        self,
+        character_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        target_environment = environment or self._active_environment
+        with self._lock, self.connection(target_environment) as connection:
+            character = connection.execute(
+                """
+                SELECT id, project_id, name, sort_order, created_at, updated_at
+                FROM characters
+                WHERE id = ?
+                """,
+                (character_id,),
+            ).fetchone()
+            if character is None:
+                raise ValueError("人物不存在。")
+            connection.execute("DELETE FROM characters WHERE id = ?", (character_id,))
+        return dict(character)
+
+    # ── Character Variants ──────────────────────────────────────
+
+    def list_character_variants(
+        self,
+        character_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> list[dict[str, object]]:
+        target_environment = environment or self._active_environment
+        with self.connection(target_environment) as connection:
+            rows = connection.execute(
+                """
+                SELECT id, character_id, name, is_default, sort_order, created_at, updated_at
+                FROM character_variants
+                WHERE character_id = ?
+                ORDER BY sort_order ASC, created_at ASC
+                """,
+                (character_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_character_variant(
+        self,
+        variant_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        target_environment = environment or self._active_environment
+        with self.connection(target_environment) as connection:
+            row = connection.execute(
+                """
+                SELECT id, character_id, name, is_default, sort_order, created_at, updated_at
+                FROM character_variants
+                WHERE id = ?
+                """,
+                (variant_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def create_character_variant(
+        self,
+        character_id: str,
+        name: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        target_environment = environment or self._active_environment
+        clean_name = " ".join(name.split())
+        if not clean_name:
+            raise ValueError("形象变体名称不能为空。")
+        if len(clean_name) > 80:
+            raise ValueError("形象变体名称不能超过 80 个字符。")
+        character = self.get_character(character_id, target_environment)
+        if character is None:
+            raise ValueError("人物不存在。")
+        now = datetime.now(timezone.utc).isoformat()
+        variant_id = str(uuid4())
+        try:
+            with self._lock, self.connection(target_environment) as connection:
+                row = connection.execute(
+                    """
+                    SELECT COALESCE(MAX(sort_order), 0) AS max_sort
+                    FROM character_variants
+                    WHERE character_id = ?
+                    """,
+                    (character_id,),
+                ).fetchone()
+                next_sort = int(row["max_sort"]) + 1
+                connection.execute(
+                    """
+                    INSERT INTO character_variants(
+                        id, character_id, name, is_default, sort_order, created_at, updated_at
+                    )
+                    VALUES(?, ?, ?, 0, ?, ?, ?)
+                    """,
+                    (variant_id, character_id, clean_name, next_sort, now, now),
+                )
+                spec_rows = connection.execute(
+                    """
+                    SELECT id, spec_type, custom_label, sort_order
+                    FROM project_specs
+                    WHERE project_id = ?
+                    ORDER BY sort_order ASC
+                    """,
+                    (character["project_id"],),
+                ).fetchall()
+                for spec in spec_rows:
+                    connection.execute(
+                        """
+                        INSERT INTO character_spec_values(
+                            id, variant_id, project_spec_id,
+                            prompt, lora_name, lora_weight, model_override, notes,
+                            created_at, updated_at
+                        )
+                        VALUES(?, ?, ?, '', '', NULL, '', '', ?, ?)
+                        """,
+                        (str(uuid4()), variant_id, spec["id"], now, now),
+                    )
+        except sqlite3.IntegrityError as error:
+            raise ValueError("该人物下已经存在同名形象变体。") from error
+        return self.get_character_variant(variant_id, target_environment)  # type: ignore[return-value]
+
+    def rename_character_variant(
+        self,
+        variant_id: str,
+        name: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        target_environment = environment or self._active_environment
+        clean_name = " ".join(name.split())
+        if not clean_name:
+            raise ValueError("形象变体名称不能为空。")
+        if len(clean_name) > 80:
+            raise ValueError("形象变体名称不能超过 80 个字符。")
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            with self._lock, self.connection(target_environment) as connection:
+                cursor = connection.execute(
+                    """
+                    UPDATE character_variants
+                    SET name = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (clean_name, now, variant_id),
+                )
+                if cursor.rowcount == 0:
+                    raise ValueError("形象变体不存在。")
+        except sqlite3.IntegrityError as error:
+            raise ValueError("该人物下已经存在同名形象变体。") from error
+        variant = self.get_character_variant(variant_id, target_environment)
+        if variant is None:
+            raise ValueError("形象变体不存在。")
+        return variant
+
+    def delete_character_variant(
+        self,
+        variant_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        target_environment = environment or self._active_environment
+        with self._lock, self.connection(target_environment) as connection:
+            variant = connection.execute(
+                """
+                SELECT id, character_id, name, is_default, sort_order, created_at, updated_at
+                FROM character_variants
+                WHERE id = ?
+                """,
+                (variant_id,),
+            ).fetchone()
+            if variant is None:
+                raise ValueError("形象变体不存在。")
+            connection.execute(
+                "DELETE FROM character_variants WHERE id = ?", (variant_id,)
+            )
+        return dict(variant)
+
+    # ── Project Specs ───────────────────────────────────────────
+
+    def list_project_specs(
+        self,
+        project_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> list[dict[str, object]]:
+        target_environment = environment or self._active_environment
+        with self.connection(target_environment) as connection:
+            rows = connection.execute(
+                """
+                SELECT id, project_id, spec_type, custom_label, sort_order, created_at, updated_at
+                FROM project_specs
+                WHERE project_id = ?
+                ORDER BY sort_order ASC, created_at ASC
+                """,
+                (project_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_project_spec(
+        self,
+        spec_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        target_environment = environment or self._active_environment
+        with self.connection(target_environment) as connection:
+            row = connection.execute(
+                """
+                SELECT id, project_id, spec_type, custom_label, sort_order, created_at, updated_at
+                FROM project_specs
+                WHERE id = ?
+                """,
+                (spec_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def create_project_spec(
+        self,
+        project_id: str,
+        spec_type: str,
+        custom_label: str = "",
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        target_environment = environment or self._active_environment
+        valid_types = ("full_body", "half_body", "close_up", "custom")
+        if spec_type not in valid_types:
+            raise ValueError(f"规格类型必须是 {', '.join(valid_types)} 之一。")
+        if spec_type == "custom" and not custom_label.strip():
+            raise ValueError("自定义规格必须提供标签名称。")
+        if spec_type != "custom":
+            custom_label = ""
+        if self.get_project(project_id, target_environment) is None:
+            raise ValueError("项目不存在。")
+        now = datetime.now(timezone.utc).isoformat()
+        spec_id = str(uuid4())
+        try:
+            with self._lock, self.connection(target_environment) as connection:
+                row = connection.execute(
+                    """
+                    SELECT COALESCE(MAX(sort_order), 0) AS max_sort
+                    FROM project_specs
+                    WHERE project_id = ?
+                    """,
+                    (project_id,),
+                ).fetchone()
+                next_sort = int(row["max_sort"]) + 1
+                connection.execute(
+                    """
+                    INSERT INTO project_specs(
+                        id, project_id, spec_type, custom_label, sort_order, created_at, updated_at
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (spec_id, project_id, spec_type, custom_label, next_sort, now, now),
+                )
+                variant_rows = connection.execute(
+                    """
+                    SELECT cv.id
+                    FROM character_variants cv
+                    JOIN characters c ON c.id = cv.character_id
+                    WHERE c.project_id = ?
+                    """,
+                    (project_id,),
+                ).fetchall()
+                for variant in variant_rows:
+                    connection.execute(
+                        """
+                        INSERT INTO character_spec_values(
+                            id, variant_id, project_spec_id,
+                            prompt, lora_name, lora_weight, model_override, notes,
+                            created_at, updated_at
+                        )
+                        VALUES(?, ?, ?, '', '', NULL, '', '', ?, ?)
+                        """,
+                        (str(uuid4()), variant["id"], spec_id, now, now),
+                    )
+        except sqlite3.IntegrityError as error:
+            raise ValueError("该项目下已经存在相同类型和标签的规格。") from error
+        return self.get_project_spec(spec_id, target_environment)  # type: ignore[return-value]
+
+    def update_project_spec(
+        self,
+        spec_id: str,
+        custom_label: str | None = None,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        target_environment = environment or self._active_environment
+        spec = self.get_project_spec(spec_id, target_environment)
+        if spec is None:
+            raise ValueError("规格不存在。")
+        if spec["spec_type"] != "custom":
+            raise ValueError("只有自定义规格可以修改标签。")
+        now = datetime.now(timezone.utc).isoformat()
+        clean_label = " ".join((custom_label or "").split())
+        if not clean_label:
+            raise ValueError("自定义规格标签不能为空。")
+        if len(clean_label) > 80:
+            raise ValueError("自定义规格标签不能超过 80 个字符。")
+        try:
+            with self._lock, self.connection(target_environment) as connection:
+                cursor = connection.execute(
+                    """
+                    UPDATE project_specs
+                    SET custom_label = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (clean_label, now, spec_id),
+                )
+                if cursor.rowcount == 0:
+                    raise ValueError("规格不存在。")
+        except sqlite3.IntegrityError as error:
+            raise ValueError("该项目下已经存在相同标签的规格。") from error
+        return self.get_project_spec(spec_id, target_environment)  # type: ignore[return-value]
+
+    def delete_project_spec(
+        self,
+        spec_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        target_environment = environment or self._active_environment
+        with self._lock, self.connection(target_environment) as connection:
+            spec = connection.execute(
+                """
+                SELECT id, project_id, spec_type, custom_label, sort_order, created_at, updated_at
+                FROM project_specs
+                WHERE id = ?
+                """,
+                (spec_id,),
+            ).fetchone()
+            if spec is None:
+                raise ValueError("规格不存在。")
+            connection.execute("DELETE FROM project_specs WHERE id = ?", (spec_id,))
+        return dict(spec)
+
+    # ── Character Spec Values ───────────────────────────────────
+
+    def get_character_spec_value(
+        self,
+        spec_value_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        target_environment = environment or self._active_environment
+        with self.connection(target_environment) as connection:
+            row = connection.execute(
+                """
+                SELECT id, variant_id, project_spec_id,
+                       prompt, lora_name, lora_weight, model_override, notes,
+                       created_at, updated_at
+                FROM character_spec_values
+                WHERE id = ?
+                """,
+                (spec_value_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def update_character_spec_value(
+        self,
+        spec_value_id: str,
+        *,
+        prompt: str | None = None,
+        lora_name: str | None = None,
+        lora_weight: float | None = None,
+        model_override: str | None = None,
+        notes: str | None = None,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        target_environment = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self.connection(target_environment) as connection:
+            existing = connection.execute(
+                "SELECT id FROM character_spec_values WHERE id = ?",
+                (spec_value_id,),
+            ).fetchone()
+            if existing is None:
+                raise ValueError("规格值不存在。")
+            sets: list[str] = []
+            params: list[object] = []
+            if prompt is not None:
+                sets.append("prompt = ?")
+                params.append(prompt)
+            if lora_name is not None:
+                sets.append("lora_name = ?")
+                params.append(lora_name)
+            if lora_weight is not None:
+                if lora_weight < 0 or lora_weight > 2:
+                    raise ValueError("LoRA 权重必须在 0 到 2 之间。")
+                sets.append("lora_weight = ?")
+                params.append(lora_weight)
+            if model_override is not None:
+                sets.append("model_override = ?")
+                params.append(model_override)
+            if notes is not None:
+                sets.append("notes = ?")
+                params.append(notes)
+            if not sets:
+                raise ValueError("至少需要提供一个更新字段。")
+            sets.append("updated_at = ?")
+            params.append(now)
+            params.append(spec_value_id)
+            connection.execute(
+                f"UPDATE character_spec_values SET {', '.join(sets)} WHERE id = ?",
+                params,
+            )
+        result = self.get_character_spec_value(spec_value_id, target_environment)
+        if result is None:
+            raise ValueError("规格值不存在。")
+        return result
+
+    def list_spec_values_for_variant(
+        self,
+        variant_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> list[dict[str, object]]:
+        target_environment = environment or self._active_environment
+        with self.connection(target_environment) as connection:
+            rows = connection.execute(
+                """
+                SELECT csv.id, csv.variant_id, csv.project_spec_id,
+                       csv.prompt, csv.lora_name, csv.lora_weight,
+                       csv.model_override, csv.notes,
+                       csv.created_at, csv.updated_at,
+                       ps.spec_type, ps.custom_label
+                FROM character_spec_values csv
+                JOIN project_specs ps ON ps.id = csv.project_spec_id
+                WHERE csv.variant_id = ?
+                ORDER BY ps.sort_order ASC
+                """,
+                (variant_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def database_info(self, environment: DatabaseEnvironment) -> dict[str, object]:
         descriptor = self.descriptor(environment)

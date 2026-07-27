@@ -394,6 +394,216 @@
     );
   }
 
+  const specTypeLabels = {
+    full_body: "全身",
+    half_body: "半身",
+    close_up: "特写",
+    custom: "自定义",
+  };
+
+  const specTypeOrder = ["full_body", "half_body", "close_up", "custom"];
+
+  function specLabel(spec) {
+    if (spec.spec_type === "custom") {
+      return spec.custom_label || "自定义";
+    }
+    return specTypeLabels[spec.spec_type] || spec.spec_type;
+  }
+
+  function characterEmptyState() {
+    return `
+      <section class="production-empty-state">
+        <span class="production-empty-icon">CH</span>
+        <h2>还没有人物</h2>
+        <p>创建人物后，可以为其管理多套形象变体与景别规格。</p>
+        <button class="btn primary" data-api-action="open-character-modal">新建人物</button>
+        <small>当前项目未创建任何人物</small>
+      </section>
+    `;
+  }
+
+  function characterCard(character, variantCount, specCount) {
+    const initial = escapeHtml((character.name || "？").slice(0, 1).toUpperCase());
+    return `
+      <article
+        class="character-block"
+        data-character-id="${escapeHtml(character.id)}"
+        data-context-menu="character"
+        data-name="${escapeHtml(character.name)}"
+      >
+        <div class="character-block-thumb">${initial}</div>
+        <div class="character-block-body">
+          <div class="character-block-name">${escapeHtml(character.name)}</div>
+          <div class="character-block-meta">${variantCount} 个形象变体 · ${specCount} 个项目规格</div>
+          <div class="character-block-actions">
+            <button
+              class="btn small soft"
+              type="button"
+              data-api-action="toggle-character"
+              data-character-id="${escapeHtml(character.id)}"
+            >展开管理</button>
+          </div>
+        </div>
+      </article>
+    `;
+  }
+
+  function variantRow(variant) {
+    const isDefault = Number(variant.is_default) === 1;
+    return `
+      <li
+        class="character-variant-row"
+        data-variant-id="${escapeHtml(variant.id)}"
+        data-context-menu="character-variant"
+        data-name="${escapeHtml(variant.name)}"
+        data-is-default="${isDefault ? "1" : "0"}"
+      >
+        <span class="character-variant-name">${escapeHtml(variant.name)}</span>
+        ${isDefault ? '<span class="character-variant-default">默认</span>' : ""}
+        <span class="character-variant-order">序 ${variant.sort_order}</span>
+      </li>
+    `;
+  }
+
+  function specRow(spec) {
+    const isCustom = spec.spec_type === "custom";
+    return `
+      <li
+        class="character-spec-row"
+        data-spec-id="${escapeHtml(spec.id)}"
+        data-context-menu="project-spec"
+        data-name="${escapeHtml(specLabel(spec))}"
+        data-spec-type="${escapeHtml(spec.spec_type)}"
+      >
+        <span class="character-spec-name">${escapeHtml(specLabel(spec))}</span>
+        <span class="character-spec-type">${escapeHtml(specTypeLabels[spec.spec_type] || spec.spec_type)}</span>
+        <span class="character-spec-order">序 ${spec.sort_order}</span>
+      </li>
+    `;
+  }
+
+  function characterExpandedPanel(character, variants, specs) {
+    return `
+      <section class="character-expanded" data-character-id="${escapeHtml(character.id)}">
+        <div class="character-expanded-column">
+          <div class="character-expanded-head">
+            <div>
+              <div class="character-expanded-title">形象变体</div>
+              <div class="character-expanded-sub">${variants.length} 个变体 · 第一个为默认</div>
+            </div>
+            <button class="btn small soft" type="button" data-api-action="add-variant" data-character-id="${escapeHtml(character.id)}">添加变体</button>
+          </div>
+          <ul class="character-variant-list">
+            ${variants.map(variantRow).join("")}
+          </ul>
+          <form class="character-inline-form" data-inline-action="create-variant" data-character-id="${escapeHtml(character.id)}" hidden>
+            <input class="modal-input" name="name" maxlength="80" autocomplete="off" placeholder="例如：裙装" required />
+            <button class="btn small primary" type="submit">创建</button>
+            <button class="btn small" type="button" data-api-action="cancel-add-variant">取消</button>
+          </form>
+        </div>
+        <div class="character-expanded-column">
+          <div class="character-expanded-head">
+            <div>
+              <div class="character-expanded-title">项目规格</div>
+              <div class="character-expanded-sub">${specs.length} 个规格 · 全项目共享</div>
+            </div>
+            <button class="btn small soft" type="button" data-api-action="add-spec" data-project-id="${escapeHtml(character.project_id)}">添加规格</button>
+          </div>
+          <ul class="character-spec-list">
+            ${specs.map(specRow).join("")}
+          </ul>
+          <form class="character-inline-form" data-inline-action="create-spec" data-project-id="${escapeHtml(character.project_id)}" hidden>
+            <label class="label">类型</label>
+            <select class="modal-input" name="spec_type">
+              <option value="full_body">全身</option>
+              <option value="half_body">半身</option>
+              <option value="close_up">特写</option>
+              <option value="custom">自定义</option>
+            </select>
+            <label class="label">自定义标签（仅自定义类型需要）</label>
+            <input class="modal-input" name="custom_label" maxlength="80" autocomplete="off" placeholder="例如：近景特写" />
+            <button class="btn small primary" type="submit">创建</button>
+            <button class="btn small" type="button" data-api-action="cancel-add-spec">取消</button>
+          </form>
+        </div>
+      </section>
+    `;
+  }
+
+  async function renderProductionCharacters(project) {
+    const page = document.querySelector(".page-scroll");
+    if (!page || !project) return;
+    const header = page.querySelector(".page-header");
+    [...page.children].forEach((child) => {
+      if (child !== header) child.remove();
+    });
+    const title = header.querySelector(".page-title");
+    const subtitle = header.querySelector(".page-subtitle");
+    const actions = header.querySelector(".header-actions");
+    if (title) title.textContent = "人物库";
+    if (subtitle) subtitle.textContent = `项目：${project.name}`;
+    if (actions) {
+      actions.innerHTML = '<button class="btn primary" data-api-action="open-character-modal">新建人物</button>';
+    }
+    const [charactersPayload, specsPayload] = await Promise.all([
+      request(`/api/projects/${project.id}/characters`),
+      request(`/api/projects/${project.id}/specs`),
+    ]);
+    if (!charactersPayload.total) {
+      page.insertAdjacentHTML("beforeend", characterEmptyState());
+      return;
+    }
+    const variantsByCharacter = await Promise.all(
+      charactersPayload.items.map(async (character) => {
+        const variants = await request(`/api/characters/${character.id}/variants`);
+        return { character, variants: variants.items };
+      })
+    );
+    page.insertAdjacentHTML(
+      "beforeend",
+      `
+        <section class="panel real-character-panel">
+          <div class="panel-header">
+            <div>
+              <div class="panel-title">项目人物</div>
+              <div class="panel-sub">${charactersPayload.total} 个人物 · ${specsPayload.total} 个项目规格</div>
+            </div>
+          </div>
+          <div class="character-grid">
+            ${variantsByCharacter
+              .map((entry) =>
+                characterCard(entry.character, entry.variants.length, specsPayload.total)
+              )
+              .join("")}
+          </div>
+        </section>
+      `
+    );
+  }
+
+  async function refreshCharacterExpanded(card) {
+    const characterId = card.dataset.characterId;
+    if (!characterId) return;
+    const projectId = document.body.dataset.projectId;
+    if (!projectId) return;
+    const [variantsPayload, specsPayload] = await Promise.all([
+      request(`/api/characters/${characterId}/variants`),
+      request(`/api/projects/${projectId}/specs`),
+    ]);
+    const existing = card.querySelector(".character-expanded");
+    if (existing) existing.remove();
+    const character = {
+      id: characterId,
+      project_id: projectId,
+      name: card.dataset.name || "",
+    };
+    card.insertAdjacentHTML(
+      "beforeend",
+      characterExpandedPanel(character, variantsPayload.items, specsPayload.items)
+    );
+  }
+
   function ensureProjectModal() {
     let modal = document.getElementById("new-project-modal");
     if (modal) return modal;
@@ -665,6 +875,156 @@
     }
   }
 
+  function ensureCharacterModal() {
+    let modal = document.getElementById("new-character-modal");
+    if (modal) return modal;
+    modal = document.createElement("div");
+    modal.id = "new-character-modal";
+    modal.className = "atelier-modal-backdrop";
+    modal.hidden = true;
+    modal.innerHTML = `
+      <section class="atelier-modal" role="dialog" aria-modal="true" aria-labelledby="new-character-title">
+        <div class="atelier-modal-icon">CH</div>
+        <h2 id="new-character-title">新建人物</h2>
+        <p>输入人物名称。人物创建后会自动附带「默认」形象变体。</p>
+        <form id="new-character-form">
+          <label class="label" for="new-character-name">人物名称</label>
+          <input id="new-character-name" class="modal-input" name="name" maxlength="80" autocomplete="off" placeholder="例如：角色 A" required />
+          <div class="modal-error" id="new-character-error" role="alert"></div>
+          <div class="modal-actions">
+            <button class="btn" type="button" data-api-action="close-character-modal">取消</button>
+            <button class="btn primary" type="submit">创建人物</button>
+          </div>
+        </form>
+      </section>
+    `;
+    document.body.appendChild(modal);
+    modal.addEventListener("click", (event) => {
+      if (event.target === modal) closeCharacterModal();
+    });
+    modal.querySelector("form").addEventListener("submit", submitCharacter);
+    return modal;
+  }
+
+  function openCharacterModal() {
+    const modal = ensureCharacterModal();
+    const error = modal.querySelector(".modal-error");
+    const input = modal.querySelector("input");
+    error.textContent = "";
+    input.value = "";
+    modal.hidden = false;
+    requestAnimationFrame(() => {
+      modal.classList.add("show");
+      input.focus();
+    });
+  }
+
+  function closeCharacterModal() {
+    const modal = document.getElementById("new-character-modal");
+    if (!modal) return;
+    modal.classList.remove("show");
+    window.setTimeout(() => {
+      modal.hidden = true;
+    }, 150);
+  }
+
+  async function submitCharacter(event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const input = form.querySelector("input");
+    const submit = form.querySelector('button[type="submit"]');
+    const error = form.querySelector(".modal-error");
+    const name = input.value.trim().replace(/\s+/g, " ");
+    const projectId = document.body.dataset.projectId;
+    if (!name) {
+      error.textContent = "请输入人物名称。";
+      input.focus();
+      return;
+    }
+    if (!projectId) {
+      error.textContent = "当前项目不可用。";
+      return;
+    }
+    submit.disabled = true;
+    submit.textContent = "正在创建…";
+    error.textContent = "";
+    try {
+      await request(`/api/projects/${projectId}/characters`, {
+        method: "POST",
+        body: JSON.stringify({ name }),
+      });
+      closeCharacterModal();
+      const project = await resolveCurrentProject();
+      await renderProductionCharacters(project);
+      if (typeof showToast === "function") showToast(`人物「${name}」已创建`);
+    } catch (requestError) {
+      error.textContent = requestError.message;
+      input.focus();
+    } finally {
+      submit.disabled = false;
+      submit.textContent = "创建人物";
+    }
+  }
+
+  async function deleteCharacter(characterId, name) {
+    if (!window.confirm(`确定删除人物「${name}」吗？该人物的所有形象变体与规格值也会一并删除，此操作无法撤销。`)) {
+      return;
+    }
+    try {
+      await request(`/api/characters/${characterId}`, { method: "DELETE" });
+      const project = await resolveCurrentProject();
+      await renderProductionCharacters(project);
+      if (typeof showToast === "function") showToast(`人物「${name}」已删除`);
+    } catch (requestError) {
+      if (typeof showToast === "function") showToast(requestError.message);
+    }
+  }
+
+  async function deleteCharacterVariant(variantId, name, isDefault) {
+    if (isDefault) {
+      if (typeof showToast === "function") showToast("默认形象变体不可删除");
+      return;
+    }
+    if (!window.confirm(`确定删除形象变体「${name}」吗？此操作无法撤销。`)) {
+      return;
+    }
+    try {
+      await request(`/api/character-variants/${variantId}`, { method: "DELETE" });
+      await refreshExpandedOrAll();
+      if (typeof showToast === "function") showToast(`形象变体「${name}」已删除`);
+    } catch (requestError) {
+      if (typeof showToast === "function") showToast(requestError.message);
+    }
+  }
+
+  async function refreshExpandedOrAll() {
+    const card = document.querySelector(".character-block.expanded");
+    if (card) {
+      await refreshCharacterExpanded(card);
+      return;
+    }
+    const project = await resolveCurrentProject();
+    await renderProductionCharacters(project);
+  }
+
+  async function deleteProjectSpec(specId, name) {
+    if (!window.confirm(`确定删除项目规格「${name}」吗？所有变体下对应的规格值也会一并删除，此操作无法撤销。`)) {
+      return;
+    }
+    try {
+      await request(`/api/project-specs/${specId}`, { method: "DELETE" });
+      await refreshExpandedOrAll();
+      if (typeof showToast === "function") showToast(`项目规格「${name}」已删除`);
+    } catch (requestError) {
+      if (typeof showToast === "function") showToast(requestError.message);
+    }
+  }
+
+  function cssEscape(value) {
+    if (typeof CSS !== "undefined" && CSS.escape) return CSS.escape(value);
+    return String(value).replace(/[^a-zA-Z0-9_-]/g, (ch) => `\\${ch}`);
+  }
+
   function ensureRenameModal() {
     let modal = document.getElementById("rename-structure-modal");
     if (modal) return modal;
@@ -696,9 +1056,17 @@
     return modal;
   }
 
+  const renameTypeNames = {
+    chapter: "章节",
+    "large-scene": "大场景",
+    character: "人物",
+    "character-variant": "形象变体",
+    "project-spec": "自定义规格标签",
+  };
+
   function openRenameModal(type, id, currentName) {
     const modal = ensureRenameModal();
-    const typeName = type === "chapter" ? "章节" : "大场景";
+    const typeName = renameTypeNames[type] || "项目";
     const input = modal.querySelector("input");
     modal.dataset.structureType = type;
     modal.dataset.structureId = id;
@@ -725,6 +1093,23 @@
     }, 150);
   }
 
+  function renameRequestPath(type, id) {
+    switch (type) {
+      case "chapter":
+        return `/api/chapters/${id}`;
+      case "large-scene":
+        return `/api/large-scenes/${id}`;
+      case "character":
+        return `/api/characters/${id}`;
+      case "character-variant":
+        return `/api/character-variants/${id}`;
+      case "project-spec":
+        return `/api/project-specs/${id}`;
+      default:
+        return null;
+    }
+  }
+
   async function submitRename(event) {
     event.preventDefault();
     const form = event.currentTarget;
@@ -735,7 +1120,7 @@
     const name = input.value.trim().replace(/\s+/g, " ");
     const type = modal.dataset.structureType;
     const id = modal.dataset.structureId;
-    const typeName = type === "chapter" ? "章节" : "大场景";
+    const typeName = renameTypeNames[type] || "项目";
     if (!name) {
       error.textContent = `请输入${typeName}名称。`;
       input.focus();
@@ -745,16 +1130,17 @@
     submit.textContent = "正在保存…";
     error.textContent = "";
     try {
-      const path = type === "chapter"
-        ? `/api/chapters/${id}`
-        : `/api/large-scenes/${id}`;
+      const path = renameRequestPath(type, id);
+      if (!path) throw new Error("未知的改名目标。");
+      const body = type === "project-spec"
+        ? { custom_label: name }
+        : { name };
       await request(path, {
         method: "PATCH",
-        body: JSON.stringify({ name }),
+        body: JSON.stringify(body),
       });
       closeRenameModal();
-      const project = await resolveCurrentProject();
-      await renderProductionStoryCanvas(project);
+      await refreshAfterRename(type);
       if (typeof showToast === "function") showToast(`${typeName}已改名为「${name}」`);
     } catch (requestError) {
       error.textContent = requestError.message;
@@ -763,6 +1149,20 @@
       submit.disabled = false;
       submit.textContent = "保存名称";
     }
+  }
+
+  async function refreshAfterRename(type) {
+    if (type === "chapter" || type === "large-scene") {
+      const project = await resolveCurrentProject();
+      await renderProductionStoryCanvas(project);
+      return;
+    }
+    if (type === "character") {
+      const project = await resolveCurrentProject();
+      await renderProductionCharacters(project);
+      return;
+    }
+    await refreshExpandedOrAll();
   }
 
   async function deleteChapter(chapterId, name, largeSceneCount) {
@@ -821,6 +1221,9 @@
     menu.dataset.contextName = data.name;
     menu.dataset.contextExtra =
       data.largeSceneCount != null ? String(data.largeSceneCount) : "";
+    menu.dataset.contextIsDefault =
+      data.isDefault ? "1" : "";
+    menu.dataset.contextSpecType = data.specType || "";
     const menuWidth = 168;
     const menuHeight = 88;
     const safeX = Math.min(x, window.innerWidth - menuWidth - 8);
@@ -845,6 +1248,8 @@
       menu.dataset.contextId = "";
       menu.dataset.contextName = "";
       menu.dataset.contextExtra = "";
+      menu.dataset.contextIsDefault = "";
+      menu.dataset.contextSpecType = "";
       menu.style.left = "";
       menu.style.top = "";
     }, 140);
@@ -873,6 +1278,44 @@
         {
           id: trigger.dataset.largeSceneId,
           name: trigger.dataset.name,
+        },
+        x,
+        y
+      );
+      return true;
+    }
+    if (type === "character") {
+      showContextMenu(
+        "character",
+        {
+          id: trigger.dataset.characterId,
+          name: trigger.dataset.name,
+        },
+        x,
+        y
+      );
+      return true;
+    }
+    if (type === "character-variant") {
+      showContextMenu(
+        "character-variant",
+        {
+          id: trigger.dataset.variantId,
+          name: trigger.dataset.name,
+          isDefault: trigger.dataset.isDefault === "1",
+        },
+        x,
+        y
+      );
+      return true;
+    }
+    if (type === "project-spec") {
+      showContextMenu(
+        "project-spec",
+        {
+          id: trigger.dataset.specId,
+          name: trigger.dataset.name,
+          specType: trigger.dataset.specType,
         },
         x,
         y
@@ -988,6 +1431,7 @@
         applyProjectHeader(project, pageKey);
         if (pageKey === "overview") await renderProductionOverview(project);
         else if (pageKey === "story-canvas") await renderProductionStoryCanvas(project);
+        else if (pageKey === "characters") await renderProductionCharacters(project);
         else applyProductionEmptyState();
       }
       const safety = document.getElementById("database-safety-status");
@@ -1020,14 +1464,29 @@
       const id = menu.dataset.contextId;
       const name = menu.dataset.contextName;
       const largeSceneCount = Number(menu.dataset.contextExtra || 0);
+      const isDefault = menu.dataset.contextIsDefault === "1";
+      const specType = menu.dataset.contextSpecType;
       hideContextMenu();
       if (action === "rename") {
+        if (type === "project-spec" && specType !== "custom") {
+          if (typeof showToast === "function") showToast("仅自定义规格可改标签");
+          return;
+        }
+        if (type === "character-variant" && isDefault) {
+          if (typeof showToast === "function") showToast("默认变体可改名但不会取消默认");
+        }
         openRenameModal(type, id, name);
       } else if (action === "delete") {
         if (type === "chapter") {
           await deleteChapter(id, name, largeSceneCount);
         } else if (type === "large-scene") {
           await deleteLargeScene(id, name);
+        } else if (type === "character") {
+          await deleteCharacter(id, name);
+        } else if (type === "character-variant") {
+          await deleteCharacterVariant(id, name, isDefault);
+        } else if (type === "project-spec") {
+          await deleteProjectSpec(id, name);
         }
       }
       return;
@@ -1068,6 +1527,68 @@
 
     if (button.dataset.apiAction === "close-large-scene-modal") {
       closeLargeSceneModal();
+      return;
+    }
+
+    if (button.dataset.apiAction === "open-character-modal") {
+      openCharacterModal();
+      return;
+    }
+
+    if (button.dataset.apiAction === "close-character-modal") {
+      closeCharacterModal();
+      return;
+    }
+
+    if (button.dataset.apiAction === "toggle-character") {
+      const card = button.closest(".character-block");
+      if (!card) return;
+      const expanded = card.classList.toggle("expanded");
+      button.textContent = expanded ? "收起管理" : "展开管理";
+      const panel = card.querySelector(".character-expanded");
+      if (expanded && !panel) {
+        refreshCharacterExpanded(card);
+      } else if (!expanded && panel) {
+        panel.remove();
+      }
+      return;
+    }
+
+    if (button.dataset.apiAction === "add-variant") {
+      const card = button.closest(".character-block");
+      const form = card && card.querySelector('form[data-inline-action="create-variant"]');
+      if (form) {
+        form.hidden = false;
+        form.querySelector("input").focus();
+      }
+      return;
+    }
+
+    if (button.dataset.apiAction === "cancel-add-variant") {
+      const form = button.closest('form[data-inline-action="create-variant"]');
+      if (form) {
+        form.hidden = true;
+        form.reset();
+      }
+      return;
+    }
+
+    if (button.dataset.apiAction === "add-spec") {
+      const card = button.closest(".character-block");
+      const form = card && card.querySelector('form[data-inline-action="create-spec"]');
+      if (form) {
+        form.hidden = false;
+        form.querySelector("select").focus();
+      }
+      return;
+    }
+
+    if (button.dataset.apiAction === "cancel-add-spec") {
+      const form = button.closest('form[data-inline-action="create-spec"]');
+      if (form) {
+        form.hidden = true;
+        form.reset();
+      }
       return;
     }
 
@@ -1147,9 +1668,101 @@
       closeProjectModal();
       closeChapterModal();
       closeLargeSceneModal();
+      closeCharacterModal();
       closeRenameModal();
     }
   });
+
+  document.addEventListener("submit", async (event) => {
+    const form = event.target.closest("form[data-inline-action]");
+    if (!form) return;
+    const action = form.dataset.inlineAction;
+    if (action === "create-variant") {
+      event.preventDefault();
+      await submitInlineVariant(form);
+    } else if (action === "create-spec") {
+      event.preventDefault();
+      await submitInlineSpec(form);
+    }
+  });
+
+  async function submitInlineVariant(form) {
+    const characterId = form.dataset.characterId;
+    const input = form.querySelector("input");
+    const submit = form.querySelector('button[type="submit"]');
+    const error = submitInlineError(form);
+    const name = input.value.trim().replace(/\s+/g, " ");
+    if (!name) {
+      error.textContent = "请输入变体名称。";
+      input.focus();
+      return;
+    }
+    submit.disabled = true;
+    submit.textContent = "正在创建…";
+    error.textContent = "";
+    try {
+      await request(`/api/characters/${characterId}/variants`, {
+        method: "POST",
+        body: JSON.stringify({ name }),
+      });
+      form.hidden = true;
+      form.reset();
+      const card = form.closest(".character-block");
+      if (card) await refreshCharacterExpanded(card);
+      if (typeof showToast === "function") showToast(`形象变体「${name}」已创建`);
+    } catch (requestError) {
+      error.textContent = requestError.message;
+      input.focus();
+    } finally {
+      submit.disabled = false;
+      submit.textContent = "创建";
+    }
+  }
+
+  async function submitInlineSpec(form) {
+    const projectId = form.dataset.projectId;
+    const select = form.querySelector("select");
+    const labelInput = form.querySelector('input[name="custom_label"]');
+    const submit = form.querySelector('button[type="submit"]');
+    const error = submitInlineError(form);
+    const specType = select.value;
+    const customLabel = (labelInput.value || "").trim().replace(/\s+/g, " ");
+    if (specType === "custom" && !customLabel) {
+      error.textContent = "自定义规格必须填写标签。";
+      labelInput.focus();
+      return;
+    }
+    submit.disabled = true;
+    submit.textContent = "正在创建…";
+    error.textContent = "";
+    try {
+      await request(`/api/projects/${projectId}/specs`, {
+        method: "POST",
+        body: JSON.stringify({ spec_type: specType, custom_label: customLabel }),
+      });
+      form.hidden = true;
+      form.reset();
+      const card = form.closest(".character-block");
+      if (card) await refreshCharacterExpanded(card);
+      if (typeof showToast === "function") showToast("项目规格已创建");
+    } catch (requestError) {
+      error.textContent = requestError.message;
+      select.focus();
+    } finally {
+      submit.disabled = false;
+      submit.textContent = "创建";
+    }
+  }
+
+  function submitInlineError(form) {
+    let error = form.querySelector(".modal-error");
+    if (!error) {
+      error = document.createElement("div");
+      error.className = "modal-error";
+      form.insertBefore(error, form.firstChild);
+    }
+    return error;
+  }
 
   refreshDatabaseState();
 })();
