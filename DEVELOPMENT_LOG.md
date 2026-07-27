@@ -344,3 +344,105 @@
 ### 后端变更
 
 - 无。本次仅前端 UI 重构，未触及任何后端接口或数据库结构，因此 `version` 字段保持不变。
+
+## 大场景右键触发区扩展（GLM 分支）
+
+更新日期：2026-07-27
+
+分支：`dev-260727-glm-context-menu`（基于 `main` 继续）
+
+### 需求
+
+剧本画布中大场景右键菜单的触发区域从 `.large-scene-name`（仅名称文字）调整为 `.large-scene-block`（整张卡片），与章节卡片保持一致的交互范围。
+
+### 实施
+
+- `largeSceneBlock()` 将 `data-context-menu="large-scene"` 等数据属性从 `.large-scene-name` 子元素上移到 `.large-scene-block` 父元素，其余 DOM 结构与样式不变。
+- `openMenuFromElement()` 已经使用 `target.closest("[data-context-menu]")`，无需改动逻辑。
+- 不再受限于卡片内文字区域，触摸长按和鼠标右键在大场景卡片任意位置都能触发。
+
+### 后端变更
+
+- 无。
+
+## 人物库基础功能接入真实 API（GLM 分支）
+
+更新日期：2026-07-27
+
+分支：`dev-260727-glm-character-api`（从 `main` 拉取新建）
+
+### 需求
+
+人物库页面（`page=characters`）此前使用 mock 数据展示「角色 A/B/C/D」，本次将其接入后端真实 API，覆盖人物/形象变体/项目规格三组接口（规格值编辑不在本期范围）。
+
+### 实施
+
+前端 `design/ui-preview/`：
+
+- `runtime-api.js`
+  - 新增 `renderProductionCharacters(project)`：拉取 `GET /api/projects/{id}/characters` 与 `GET /api/projects/{id}/specs`，对每个人物并发拉取 `GET /api/characters/{id}/variants`，渲染为 `character-grid` 卡片网格。卡片显示人物名、形象变体数 · 项目规格数。空项目显示「还没有人物」空状态。
+  - 新增 `characterCard()`：卡片挂在 `.character-block` 上，带 `data-context-menu="character"`、`data-character-id`、`data-name`，可右键改名/删除。
+  - 新增 `characterEmptyState()`、`characterExpandedPanel()`、`variantRow()`、`specRow()`、`specLabel()` 等渲染辅助。
+  - 新增 `ensureCharacterModal()` / `openCharacterModal()` / `closeCharacterModal()` / `submitCharacter()`：新建人物弹窗，调用 `POST /api/projects/{id}/characters`。
+  - 新增 `deleteCharacter()`：调用 `DELETE /api/characters/{id}`，二次确认提示级联删除变体与规格值。
+  - 新增 `deleteCharacterVariant()`：调用 `DELETE /api/character-variants/{id}`，默认变体拒绝删除。
+  - 新增 `deleteProjectSpec()`：调用 `DELETE /api/project-specs/{id}`，二次确认提示级联删除规格值。
+  - 新增 `refreshCharacterExpanded()` / `refreshExpandedOrAll()`：展开区局部刷新，保留卡片展开状态。
+  - 新增 `submitInlineVariant()` / `submitInlineSpec()`：展开区内嵌表单提交，分别调用 `POST /api/characters/{id}/variants` 与 `POST /api/projects/{id}/specs`。
+  - 扩展 `openRenameModal()` / `submitRename()` / `renameRequestPath()` / `refreshAfterRename()` 支持 `character`、`character-variant`、`project-spec` 三种类型。`project-spec` 改名仅 `custom` 类型允许，请求体为 `{custom_label: name}`。
+  - 扩展 `openMenuFromElement()` 处理 `character`、`character-variant`、`project-spec` 三种触发源。
+  - 扩展 `showContextMenu()` / `hideContextMenu()` 额外保存 `contextIsDefault` 与 `contextSpecType`，用于菜单项行为判定。
+  - 扩展全局 `click` 监听新增 `open-character-modal` / `close-character-modal` / `toggle-character` / `add-variant` / `cancel-add-variant` / `add-spec` / `cancel-add-spec` 七个分支。
+  - 新增全局 `submit` 监听，按 `form[data-inline-action]` 分发到 `submitInlineVariant` / `submitInlineSpec`。
+  - `refreshDatabaseState()` 新增 `pageKey === "characters"` 路由分支。
+  - `ESC` 关键字监听新增 `closeCharacterModal()`。
+- `styles.css`
+  - 新增 `.character-grid` / `.character-block` / `.character-block.expanded` / `.character-block-thumb` / `.character-block-name` / `.character-block-meta` / `.character-block-actions` / `.character-expanded` / `.character-expanded-column` / `.character-expanded-head` / `.character-expanded-title` / `.character-expanded-sub` / `.character-variant-list` / `.character-spec-list` / `.character-variant-row` / `.character-spec-row` / `.character-variant-name` / `.character-spec-name` / `.character-variant-default` / `.character-variant-order` / `.character-spec-order` / `.character-spec-type` / `.character-inline-form` / `.real-character-panel` 等样式，复用既有 `--line` / `--line-strong` / `--green-soft` / `--blue-soft` 等配色与圆角规范。
+  - 卡片展开时隐藏 thumb 与 body，只展示展开区，避免视觉重复。
+- `index.html`
+  - 静态资源版本号 `v=20260727-edit-delete` → `v=20260727-character-api`，强制浏览器刷新缓存。
+
+后端：
+
+- `backend/app/database.py`：新增 `characters` / `character_variants` / `project_specs` / `character_spec_values` 四张表与 18 个数据库方法，覆盖四组资源的 CRUD 与交叉表自动维护。
+- `backend/app/app_factory.py`：新增 7 个请求模型与 16 个路由；`CreateProjectSpecRequest` 使用 `model_validator(mode="after")` 校验自定义规格必须提供标签，未提供时返回 422。
+- `backend/tests/test_characters.py`（新增）：35 个单元测试，覆盖人物/变体/规格/规格值四组接口的 CRUD、重名拒绝、跨项目隔离、级联删除、默认变体保护、规格值范围校验、双数据库隔离。
+
+### 交互模式
+
+- 人物卡片：右键弹出「改名 / 删除」菜单，与章节/大场景保持一致。
+- 卡片「展开管理」按钮：点击切换展开/收起。展开后显示形象变体与项目规格两栏，每栏可独立增删。
+- 形象变体：底部「添加变体」按钮展开内嵌输入框；列表项右键可改名/删除（默认变体拒绝删除）。
+- 项目规格：底部「添加规格」按钮展开内嵌下拉+标签输入；列表项右键可删除；`custom` 类型可改标签，其他类型拒绝改名。
+- 触摸设备：长按 500ms 同样触发右键菜单。
+
+### 测试用例与结果
+
+测试环境：本地 `start-test.bat` 启动于 `http://127.0.0.1:8111`，使用浏览器子代理执行。
+
+| 用例 | 结果 |
+|------|------|
+| 项目中心创建项目并进入人物库页面 | 通过，显示「还没有人物」空状态 |
+| 点击「新建人物」弹出模态框并创建 | 通过，`POST /api/projects/{id}/characters` 返回 201，卡片显示「1 个形象变体 · 0 个项目规格」 |
+| 点击「展开管理」展开卡片 | 通过，显示变体与规格两栏，变体栏含「默认」一项带「默认」标签 |
+| 添加形象变体「裙装」 | 通过，`POST /api/characters/{id}/variants` 返回 201，列表新增一项 |
+| 添加项目规格「全身」 | 通过，`POST /api/projects/{id}/specs` 返回 201，列表新增一项带「全身」类型标签 |
+| 添加自定义规格「近景特写」 | 通过，列表新增一项，名称显示为自定义标签 |
+| 人物卡片右键菜单 | 通过，弹出「改名 / 删除」菜单，样式与章节一致 |
+| 人物改名 | 通过，`PATCH /api/characters/{id}` 返回 200，卡片名更新 |
+| 变体行右键菜单 | 通过，弹出菜单 |
+| 删除非默认变体 | 通过，`DELETE /api/character-variants/{id}` 返回 200，列表移除 |
+| 非自定义规格拒绝改名 | 通过，提示「仅自定义规格可改标签」 |
+| 删除自定义规格 | 通过，`DELETE /api/project-specs/{id}` 返回 200，列表移除 |
+| 浏览器 Console JavaScript 报错检查 | 通过，无 JS 异常 |
+
+### 后端变更
+
+- `backend/app/database.py`：新增 `characters` / `character_variants` / `project_specs` / `character_spec_values` 四张表（含外键级联、唯一约束、排序索引）与 18 个数据库方法。
+- `backend/app/app_factory.py`：新增 7 个请求模型与 16 个路由；`CreateProjectSpecRequest` 使用 `model_validator(mode="after")` 校验自定义规格必须提供标签，未提供时返回 422（Pydantic `field_validator` 在字段使用默认值时不触发，改用模型级校验器解决）。
+- `backend/tests/test_characters.py`（新增）：35 个单元测试，覆盖四组接口的 CRUD、重名拒绝、跨项目隔离、级联删除、默认变体保护、规格值范围校验、双数据库隔离。
+
+### 测试修复记录
+
+- `test_custom_spec_without_label_rejected` 最初失败（409 != 422）：原因是 `CreateProjectSpecRequest.custom_label` 字段有 `default=""`，Pydantic `field_validator` 在字段未提供时不会触发。改用 `model_validator(mode="after")` 在模型层校验，确保请求 `{"spec_type": "custom"}`（不带 `custom_label`）返回 422。
+- 修复后运行 `python -m unittest discover -s backend/tests`，82 个测试全部通过。
