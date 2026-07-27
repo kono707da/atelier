@@ -286,14 +286,14 @@
 
   function largeSceneBlock(largeScene) {
     return `
-      <article class="large-scene-block" data-large-scene-id="${escapeHtml(largeScene.id)}">
+      <article
+        class="large-scene-block"
+        data-large-scene-id="${escapeHtml(largeScene.id)}"
+        data-context-menu="large-scene"
+        data-name="${escapeHtml(largeScene.name)}"
+      >
         <div class="large-scene-kicker">大场景 ${String(largeScene.sort_order).padStart(2, "0")}</div>
-        <div
-          class="large-scene-name"
-          data-context-menu="large-scene"
-          data-large-scene-id="${escapeHtml(largeScene.id)}"
-          data-name="${escapeHtml(largeScene.name)}"
-        >${escapeHtml(largeScene.name)}</div>
+        <div class="large-scene-name">${escapeHtml(largeScene.name)}</div>
         <div class="large-scene-meta">尚未添加小场景</div>
       </article>
     `;
