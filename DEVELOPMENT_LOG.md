@@ -284,3 +284,63 @@
 
 - 该待办属于下一阶段功能开发范围，将另起 `dev-260727-glm-*` 分支实现，不在 ChatGPT 基线分支上开发业务功能。
 - 本次提交不涉及后端 `version` 字段调整，因为没有任何代码或接口变更。
+
+## 剧本画布右键菜单（GLM 分支）
+
+更新日期：2026-07-27
+
+分支：`dev-260727-glm-context-menu`（从 `main` 拉取新建）
+
+### 需求
+
+剧本画布中章节卡片（`.real-chapter-block`）与大场景名称（`.large-scene-name`）的原"改名"和"删除"按钮改为右键菜单触发，简化卡片视觉、统一操作入口。
+
+### 实施内容
+
+前端 `design/ui-preview/`：
+
+- `runtime-api.js`
+  - `chapterBlock()` 移除章节卡片的改名/删除按钮，改为在 `.real-chapter-block` 元素上挂载 `data-context-menu="chapter"` 及 `data-chapter-id` / `data-name` / `data-large-scene-count` 数据属性。
+  - `largeSceneBlock()` 移除大场景卡片的改名/删除按钮，改为在 `.large-scene-name` 元素上挂载 `data-context-menu="large-scene"` 及 `data-large-scene-id` / `data-name` 数据属性。
+  - 新增 `ensureContextMenu()` / `showContextMenu()` / `hideContextMenu()` / `openMenuFromElement()` / `initContextMenu()`，统一管理右键菜单 DOM 与事件。
+  - 菜单项通过 `data-menu-action="rename" | "delete"` 标识，点击后根据 `data-context-type` 调用对应处理函数。
+  - `deleteChapter(button)` / `deleteLargeScene(button)` 重构为 `deleteChapter(chapterId, name, largeSceneCount)` / `deleteLargeScene(largeSceneId, name)`，移除对按钮元素的依赖。
+  - 全局 `click` 监听移除原 `rename-chapter` / `rename-large-scene` / `delete-chapter` / `delete-large-scene` 四个按钮分支，改为先处理菜单项点击、再处理点击外部关闭菜单。
+  - 新增事件监听：`contextmenu`（桌面右键）、`touchstart` + 500ms 长按 + `touchmove` 移动取消（触摸设备）、`keydown` ESC 关闭、`scroll` / `resize` 关闭。
+  - 菜单定位自动避让窗口边界，避免越界。
+
+- `styles.css`
+  - 移除 `.structure-actions` / `.structure-action` / `.structure-action.danger:hover` / `.structure-action:disabled` 等旧按钮样式。
+  - 新增 `.structure-context-menu` / `.structure-context-menu[hidden]` / `.structure-context-menu.show` / `.structure-context-menu-list` / `.structure-context-menu-item` / `.structure-context-menu-item.danger:hover` 等右键菜单样式，复用页面既有配色（`--line-strong` / `--blue-soft` / `--red-soft` 等）。
+
+### 触发区域
+
+- 章节卡片：`.real-chapter-block` 任意位置右键 → 章节改名/删除菜单。
+- 大场景名称：`.large-scene-name` 文字上右键 → 大场景改名/删除菜单。
+
+### 触摸设备
+
+- 在章节卡片或大场景名称上长按 500ms 触发右键菜单；移动超过 10px 自动取消，避免影响滚动。
+
+### 视觉提示
+
+- 按需求不加任何 hover 提示或首次提示横幅，用户自行发现可右键。
+
+### 测试用例与结果
+
+测试环境：本地 `uvicorn` 启动于 `http://127.0.0.1:8113`，使用浏览器子代理执行。
+
+| 用例 | 结果 |
+|------|------|
+| 章节卡片右键弹出"改名/删除"菜单 | 通过，菜单样式正常 |
+| 点击菜单外区域关闭菜单 | 通过 |
+| 按 ESC 关闭菜单 | 通过 |
+| 大场景名称右键弹出"改名/删除"菜单 | 通过，样式与章节一致 |
+| 点击"改名"弹出重命名模态框并保存 | 通过，后端 `PATCH /api/large-scenes/{id}` 返回 200，名称更新 |
+| 点击"删除"触发浏览器确认对话框 | 通过，后端 `DELETE /api/large-scenes/{id}` 返回 200 |
+| 章节卡片与大场景卡片上旧按钮残留检查 | 通过，DOM 中已无 `.structure-action` 按钮 |
+| 浏览器 Console JavaScript 报错检查 | 通过，无 JS 异常 |
+
+### 后端变更
+
+- 无。本次仅前端 UI 重构，未触及任何后端接口或数据库结构，因此 `version` 字段保持不变。

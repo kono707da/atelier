@@ -288,22 +288,13 @@
     return `
       <article class="large-scene-block" data-large-scene-id="${escapeHtml(largeScene.id)}">
         <div class="large-scene-kicker">大场景 ${String(largeScene.sort_order).padStart(2, "0")}</div>
-        <div class="large-scene-name">${escapeHtml(largeScene.name)}</div>
+        <div
+          class="large-scene-name"
+          data-context-menu="large-scene"
+          data-large-scene-id="${escapeHtml(largeScene.id)}"
+          data-name="${escapeHtml(largeScene.name)}"
+        >${escapeHtml(largeScene.name)}</div>
         <div class="large-scene-meta">尚未添加小场景</div>
-        <div class="structure-actions">
-          <button
-            class="structure-action"
-            data-api-action="rename-large-scene"
-            data-large-scene-id="${escapeHtml(largeScene.id)}"
-            data-name="${escapeHtml(largeScene.name)}"
-          >改名</button>
-          <button
-            class="structure-action danger"
-            data-api-action="delete-large-scene"
-            data-large-scene-id="${escapeHtml(largeScene.id)}"
-            data-name="${escapeHtml(largeScene.name)}"
-          >删除</button>
-        </div>
       </article>
     `;
   }
@@ -320,25 +311,16 @@
     `;
     return `
       <section class="real-chapter-section" data-chapter-id="${escapeHtml(chapter.id)}">
-        <article class="real-chapter-block">
+        <article
+          class="real-chapter-block"
+          data-context-menu="chapter"
+          data-chapter-id="${escapeHtml(chapter.id)}"
+          data-name="${escapeHtml(chapter.name)}"
+          data-large-scene-count="${largeScenes.length}"
+        >
           <div class="real-chapter-kicker">章节 ${String(chapter.sort_order).padStart(2, "0")}</div>
           <div class="real-chapter-name">${escapeHtml(chapter.name)}</div>
           <div class="real-chapter-meta">${largeScenes.length} 个大场景</div>
-          <div class="structure-actions">
-            <button
-              class="structure-action"
-              data-api-action="rename-chapter"
-              data-chapter-id="${escapeHtml(chapter.id)}"
-              data-name="${escapeHtml(chapter.name)}"
-            >改名</button>
-            <button
-              class="structure-action danger"
-              data-api-action="delete-chapter"
-              data-chapter-id="${escapeHtml(chapter.id)}"
-              data-name="${escapeHtml(chapter.name)}"
-              data-large-scene-count="${largeScenes.length}"
-            >删除</button>
-          </div>
         </article>
         <div class="chapter-scene-connector" aria-hidden="true"></div>
         <div class="large-scene-lane">
@@ -783,45 +765,183 @@
     }
   }
 
-  async function deleteChapter(button) {
-    const chapterId = button.dataset.chapterId;
-    const name = button.dataset.name;
-    const largeSceneCount = Number(button.dataset.largeSceneCount || 0);
+  async function deleteChapter(chapterId, name, largeSceneCount) {
     const sceneWarning = largeSceneCount
       ? `，其中 ${largeSceneCount} 个大场景也会一并删除`
       : "";
     if (!window.confirm(`确定删除章节「${name}」吗${sceneWarning}？此操作无法撤销。`)) {
       return;
     }
-    button.disabled = true;
     try {
       await request(`/api/chapters/${chapterId}`, { method: "DELETE" });
       const project = await resolveCurrentProject();
       await renderProductionStoryCanvas(project);
       if (typeof showToast === "function") showToast(`章节「${name}」已删除`);
     } catch (requestError) {
-      button.disabled = false;
       if (typeof showToast === "function") showToast(requestError.message);
     }
   }
 
-  async function deleteLargeScene(button) {
-    const largeSceneId = button.dataset.largeSceneId;
-    const name = button.dataset.name;
+  async function deleteLargeScene(largeSceneId, name) {
     if (!window.confirm(`确定删除大场景「${name}」吗？此操作无法撤销。`)) {
       return;
     }
-    button.disabled = true;
     try {
       await request(`/api/large-scenes/${largeSceneId}`, { method: "DELETE" });
       const project = await resolveCurrentProject();
       await renderProductionStoryCanvas(project);
       if (typeof showToast === "function") showToast(`大场景「${name}」已删除`);
     } catch (requestError) {
-      button.disabled = false;
       if (typeof showToast === "function") showToast(requestError.message);
     }
   }
+
+  function ensureContextMenu() {
+    let menu = document.getElementById("structure-context-menu");
+    if (menu) return menu;
+    menu = document.createElement("div");
+    menu.id = "structure-context-menu";
+    menu.className = "structure-context-menu";
+    menu.setAttribute("role", "menu");
+    menu.innerHTML = `
+      <ul class="structure-context-menu-list">
+        <li class="structure-context-menu-item" data-menu-action="rename" role="menuitem" tabindex="0">改名</li>
+        <li class="structure-context-menu-item danger" data-menu-action="delete" role="menuitem" tabindex="0">删除</li>
+      </ul>
+    `;
+    menu.hidden = true;
+    document.body.appendChild(menu);
+    return menu;
+  }
+
+  function showContextMenu(type, data, x, y) {
+    const menu = ensureContextMenu();
+    menu.dataset.contextType = type;
+    menu.dataset.contextId = data.id;
+    menu.dataset.contextName = data.name;
+    menu.dataset.contextExtra =
+      data.largeSceneCount != null ? String(data.largeSceneCount) : "";
+    const menuWidth = 168;
+    const menuHeight = 88;
+    const safeX = Math.min(x, window.innerWidth - menuWidth - 8);
+    const safeY = Math.min(y, window.innerHeight - menuHeight - 8);
+    menu.style.left = `${Math.max(8, safeX)}px`;
+    menu.style.top = `${Math.max(8, safeY)}px`;
+    menu.hidden = false;
+    requestAnimationFrame(() => {
+      menu.classList.add("show");
+      const firstItem = menu.querySelector(".structure-context-menu-item");
+      if (firstItem) firstItem.focus();
+    });
+  }
+
+  function hideContextMenu() {
+    const menu = document.getElementById("structure-context-menu");
+    if (!menu || menu.hidden) return;
+    menu.classList.remove("show");
+    window.setTimeout(() => {
+      menu.hidden = true;
+      menu.dataset.contextType = "";
+      menu.dataset.contextId = "";
+      menu.dataset.contextName = "";
+      menu.dataset.contextExtra = "";
+      menu.style.left = "";
+      menu.style.top = "";
+    }, 140);
+  }
+
+  function openMenuFromElement(target, x, y) {
+    const trigger = target.closest("[data-context-menu]");
+    if (!trigger) return false;
+    const type = trigger.dataset.contextMenu;
+    if (type === "chapter") {
+      showContextMenu(
+        "chapter",
+        {
+          id: trigger.dataset.chapterId,
+          name: trigger.dataset.name,
+          largeSceneCount: Number(trigger.dataset.largeSceneCount || 0),
+        },
+        x,
+        y
+      );
+      return true;
+    }
+    if (type === "large-scene") {
+      showContextMenu(
+        "large-scene",
+        {
+          id: trigger.dataset.largeSceneId,
+          name: trigger.dataset.name,
+        },
+        x,
+        y
+      );
+      return true;
+    }
+    return false;
+  }
+
+  function initContextMenu() {
+    document.addEventListener("contextmenu", (event) => {
+      if (openMenuFromElement(event.target, event.clientX, event.clientY)) {
+        event.preventDefault();
+      }
+    });
+
+    let longPressTimer = null;
+    let longPressStart = null;
+    document.addEventListener(
+      "touchstart",
+      (event) => {
+        const touch = event.touches[0];
+        if (!touch) return;
+        const target = document.elementFromPoint(touch.clientX, touch.clientY);
+        if (!target || !target.closest("[data-context-menu]")) return;
+        longPressStart = { x: touch.clientX, y: touch.clientY };
+        longPressTimer = window.setTimeout(() => {
+          if (!longPressStart) return;
+          openMenuFromElement(target, longPressStart.x, longPressStart.y);
+        }, 500);
+      },
+      { passive: true }
+    );
+    document.addEventListener(
+      "touchmove",
+      (event) => {
+        const touch = event.touches[0];
+        if (!touch || !longPressStart) return;
+        const dx = touch.clientX - longPressStart.x;
+        const dy = touch.clientY - longPressStart.y;
+        if (Math.hypot(dx, dy) > 10) {
+          if (longPressTimer) {
+            window.clearTimeout(longPressTimer);
+            longPressTimer = null;
+          }
+          longPressStart = null;
+        }
+      },
+      { passive: true }
+    );
+    const cancelLongPress = () => {
+      if (longPressTimer) {
+        window.clearTimeout(longPressTimer);
+        longPressTimer = null;
+      }
+      longPressStart = null;
+    };
+    document.addEventListener("touchend", cancelLongPress, { passive: true });
+    document.addEventListener("touchcancel", cancelLongPress, { passive: true });
+
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") hideContextMenu();
+    });
+
+    window.addEventListener("scroll", hideContextMenu, true);
+    window.addEventListener("resize", hideContextMenu);
+  }
+
+  initContextMenu();
 
   function renderDatabaseCard(database) {
     const card = document.getElementById(`database-${database.environment}`);
@@ -888,6 +1008,36 @@
   }
 
   document.addEventListener("click", async (event) => {
+    // 右键菜单项点击优先处理
+    const menuItem = event.target.closest(".structure-context-menu-item");
+    if (menuItem) {
+      event.preventDefault();
+      event.stopPropagation();
+      const menu = menuItem.closest("#structure-context-menu");
+      if (!menu || menu.hidden) return;
+      const action = menuItem.dataset.menuAction;
+      const type = menu.dataset.contextType;
+      const id = menu.dataset.contextId;
+      const name = menu.dataset.contextName;
+      const largeSceneCount = Number(menu.dataset.contextExtra || 0);
+      hideContextMenu();
+      if (action === "rename") {
+        openRenameModal(type, id, name);
+      } else if (action === "delete") {
+        if (type === "chapter") {
+          await deleteChapter(id, name, largeSceneCount);
+        } else if (type === "large-scene") {
+          await deleteLargeScene(id, name);
+        }
+      }
+      return;
+    }
+
+    // 点击菜单以外区域关闭菜单
+    if (!event.target.closest("#structure-context-menu")) {
+      hideContextMenu();
+    }
+
     const button = event.target.closest("[data-api-action]");
     if (!button || button.disabled) return;
 
@@ -921,32 +1071,8 @@
       return;
     }
 
-    if (button.dataset.apiAction === "rename-chapter") {
-      openRenameModal("chapter", button.dataset.chapterId, button.dataset.name);
-      return;
-    }
-
-    if (button.dataset.apiAction === "rename-large-scene") {
-      openRenameModal(
-        "large-scene",
-        button.dataset.largeSceneId,
-        button.dataset.name
-      );
-      return;
-    }
-
     if (button.dataset.apiAction === "close-rename-modal") {
       closeRenameModal();
-      return;
-    }
-
-    if (button.dataset.apiAction === "delete-chapter") {
-      await deleteChapter(button);
-      return;
-    }
-
-    if (button.dataset.apiAction === "delete-large-scene") {
-      await deleteLargeScene(button);
       return;
     }
 
