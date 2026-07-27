@@ -1,0 +1,8 @@
+.venv/
+.venv.broken.*/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+data/databases/*.sqlite3
+data/databases/*.sqlite3-shm
+data/databases/*.sqlite3-wal

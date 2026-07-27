@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Atelier 全部页面 UI 预览</title>
+  <style>
+    :root {
+      font-family: Inter, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      color: #182033;
+      background: #eef1f7;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 38px; }
+    header {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      margin-bottom: 26px;
+    }
+    h1 { margin: 0; font-size: 32px; letter-spacing: -1px; }
+    p { margin: 8px 0 0; color: #747d91; font-size: 13px; }
+    .badge {
+      padding: 8px 12px;
+      border-radius: 999px;
+      color: #5265d6;
+      font-size: 11px;
+      font-weight: 700;
+      background: #e6eaff;
+    }
+    main {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 22px;
+    }
+    figure {
+      margin: 0;
+      overflow: hidden;
+      border: 1px solid #dfe4ed;
+      border-radius: 18px;
+      background: #fff;
+      box-shadow: 0 12px 28px rgba(48, 60, 88, 0.08);
+    }
+    img {
+      display: block;
+      width: 100%;
+      aspect-ratio: 16 / 10;
+      object-fit: cover;
+      object-position: top left;
+      background: #f7f8fb;
+    }
+    figcaption {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      height: 44px;
+      padding: 0 13px;
+      border-top: 1px solid #e8ebf1;
+      font-size: 11px;
+      font-weight: 680;
+    }
+    .no {
+      display: grid;
+      place-items: center;
+      width: 24px;
+      height: 24px;
+      border-radius: 8px;
+      color: #fff;
+      font-size: 9px;
+      background: linear-gradient(145deg, #5f79f7, #7665ef);
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div><h1>Atelier · 全部页面 UI 预览</h1><p>明亮苹果风 · 双画布 · 项目化 ComfyUI 视觉生产工作台</p></div>
+    <span class="badge">19 PAGES · DESIGN v1.0</span>
+  </header>
+  <main>
+    <figure><img src="./screenshots/01-projects.png" /><figcaption><span class="no">01</span>项目中心</figcaption></figure>
+    <figure><img src="./screenshots/02-overview.png" /><figcaption><span class="no">02</span>项目概览</figcaption></figure>
+    <figure><img src="./screenshots/03-story-canvas.png" /><figcaption><span class="no">03</span>剧本画布</figcaption></figure>
+    <figure><img src="./screenshots/04-scene-editor.png" /><figcaption><span class="no">04</span>场景编辑</figcaption></figure>
+    <figure><img src="./screenshots/05-shot-inspector.png" /><figcaption><span class="no">05</span>分镜检查器</figcaption></figure>
+    <figure><img src="./screenshots/06-materials.png" /><figcaption><span class="no">06</span>素材库</figcaption></figure>
+    <figure><img src="./screenshots/07-material-detail.png" /><figcaption><span class="no">07</span>素材详情</figcaption></figure>
+    <figure><img src="./screenshots/08-characters.png" /><figcaption><span class="no">08</span>人物库</figcaption></figure>
+    <figure><img src="./screenshots/09-character-matrix.png" /><figcaption><span class="no">09</span>人物替换矩阵</figcaption></figure>
+    <figure><img src="./screenshots/10-workflows.png" /><figcaption><span class="no">10</span>工作流库</figcaption></figure>
+    <figure><img src="./screenshots/11-workflow-canvas.png" /><figcaption><span class="no">11</span>工作流画布</figcaption></figure>
+    <figure><img src="./screenshots/12-batch.png" /><figcaption><span class="no">12</span>批量配置</figcaption></figure>
+    <figure><img src="./screenshots/13-tasks.png" /><figcaption><span class="no">13</span>任务中心</figcaption></figure>
+    <figure><img src="./screenshots/14-review.png" /><figcaption><span class="no">14</span>项目审片图库</figcaption></figure>
+    <figure><img src="./screenshots/15-assembly.png" /><figcaption><span class="no">15</span>最终作品装配</figcaption></figure>
+    <figure><img src="./screenshots/16-library.png" /><figcaption><span class="no">16</span>全局图库</figcaption></figure>
+    <figure><img src="./screenshots/17-image-detail.png" /><figcaption><span class="no">17</span>图片详情</figcaption></figure>
+    <figure><img src="./screenshots/18-export.png" /><figcaption><span class="no">18</span>导出中心</figcaption></figure>
+    <figure><img src="./screenshots/19-settings.png" /><figcaption><span class="no">19</span>设置与 ComfyUI</figcaption></figure>
+  </main>
+</body>
+</html>
