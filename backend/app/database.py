@@ -654,6 +654,32 @@ class DatabaseManager:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def get_character_stats(
+        self,
+        character_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, int]:
+        target_environment = environment or self._active_environment
+        with self.connection(target_environment) as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    COUNT(DISTINCT cv.id) AS variant_count,
+                    COUNT(csv.id) AS spec_total,
+                    COUNT(CASE WHEN csv.prompt != '' THEN 1 END) AS spec_filled
+                FROM characters c
+                LEFT JOIN character_variants cv ON cv.character_id = c.id
+                LEFT JOIN character_spec_values csv ON csv.variant_id = cv.id
+                WHERE c.id = ?
+                """,
+                (character_id,),
+            ).fetchone()
+        return {
+            "variant_count": int(row["variant_count"] or 0),
+            "spec_total": int(row["spec_total"] or 0),
+            "spec_filled": int(row["spec_filled"] or 0),
+        }
+
     def get_character(
         self,
         character_id: str,

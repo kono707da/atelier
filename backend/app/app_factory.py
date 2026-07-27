@@ -392,6 +392,8 @@ def create_app(
         if manager.get_project(project_id) is None:
             raise HTTPException(status_code=404, detail="项目不存在。")
         characters = manager.list_characters(project_id)
+        for character in characters:
+            character["stats"] = manager.get_character_stats(str(character["id"]))
         return {
             "database_environment": manager.active_environment,
             "project_id": project_id,
@@ -412,6 +414,17 @@ def create_app(
             character = manager.create_character(project_id, request.name)
         except ValueError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
+        return {
+            "database_environment": manager.active_environment,
+            "character": character,
+        }
+
+    @app.get("/api/characters/{character_id}")
+    def get_character(character_id: str) -> dict[str, object]:
+        character = manager.get_character(character_id)
+        if character is None:
+            raise HTTPException(status_code=404, detail="人物不存在。")
+        character["stats"] = manager.get_character_stats(character_id)
         return {
             "database_environment": manager.active_environment,
             "character": character,

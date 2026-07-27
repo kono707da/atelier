@@ -446,3 +446,41 @@
 
 - `test_custom_spec_without_label_rejected` 最初失败（409 != 422）：原因是 `CreateProjectSpecRequest.custom_label` 字段有 `default=""`，Pydantic `field_validator` 在字段未提供时不会触发。改用 `model_validator(mode="after")` 在模型层校验，确保请求 `{"spec_type": "custom"}`（不带 `custom_label`）返回 422。
 - 修复后运行 `python -m unittest discover -s backend/tests`，82 个测试全部通过。
+
+## 人物库布局重构：左右分栏 + 卡片紧凑化（GLM 分支）
+
+更新日期：2026-07-27
+
+分支：`dev-260727-glm-character-layout`（从 `main` 拉取新建）
+
+### 需求
+
+用户反馈：character-block 卡片面积太大，3080p 宽度一行只显示 2 个；character-block expanded 展开方式无法容纳未来十多种配置。
+
+### 实施
+
+前端 `design/ui-preview/`：
+
+- `styles.css`
+  - `.character-grid` 改为 `repeat(auto-fill, minmax(200px, 1fr))`，宽屏一行可容纳多个卡片。
+  - `.character-block` 改为纵向 flex，padding 10px，去掉 `.expanded` 状态。
+  - `.character-block-thumb` 改为 100%×72 纯色占位条（不用首字母，留给未来人物图片）。
+  - 新增 `.character-block-stats` 显示规格完整度标签。
+  - 新增 `.character-workspace` 左右分栏布局，右侧 `.character-detail-pane` sticky 可独立滚动。
+  - 新增 `.character-detail-empty` / `.character-detail-card` / `.character-detail-header` 等右侧详情面板样式。
+- `runtime-api.js`
+  - `characterCard()` 紧凑化，去掉首字母和展开按钮，新增规格完整度，卡片整体可点击。
+  - `renderProductionCharacters()` 改为左右分栏布局。
+  - 新增 `renderCharacterDetail(characterId)` 渲染右侧详情面板。
+  - 移除 `refreshCharacterExpanded()`，改为 `refreshCharacterDetail()`。
+
+后端：
+
+- `backend/app/database.py`：新增 `get_character_stats(character_id)` 聚合方法。
+- `backend/app/app_factory.py`：列表接口附加 stats；新增 `GET /api/characters/{id}` 单人物接口。
+
+### 测试
+
+- 新增 `test_list_characters_includes_stats_aggregate`。
+- `python -m unittest discover`：83 个测试全部通过。
+- 浏览器 JS evaluate 确认卡片点击正常触发右侧详情面板渲染。

@@ -422,27 +422,24 @@
     `;
   }
 
-  function characterCard(character, variantCount, specCount) {
-    const initial = escapeHtml((character.name || "？").slice(0, 1).toUpperCase());
+  function characterCard(character, stats, specCount) {
+    const filled = stats ? stats.spec_filled : 0;
+    const total = stats ? stats.spec_total : 0;
+    const variantCount = stats ? stats.variant_count : 0;
+    const completeness = total > 0 ? `${filled}/${total}` : "0/0";
     return `
       <article
         class="character-block"
         data-character-id="${escapeHtml(character.id)}"
+        data-api-action="select-character"
         data-context-menu="character"
         data-name="${escapeHtml(character.name)}"
       >
-        <div class="character-block-thumb">${initial}</div>
-        <div class="character-block-body">
-          <div class="character-block-name">${escapeHtml(character.name)}</div>
-          <div class="character-block-meta">${variantCount} 个形象变体 · ${specCount} 个项目规格</div>
-          <div class="character-block-actions">
-            <button
-              class="btn small soft"
-              type="button"
-              data-api-action="toggle-character"
-              data-character-id="${escapeHtml(character.id)}"
-            >展开管理</button>
-          </div>
+        <div class="character-block-thumb"></div>
+        <div class="character-block-name">${escapeHtml(character.name)}</div>
+        <div class="character-block-meta">${variantCount} 个变体 · ${specCount} 个规格</div>
+        <div class="character-block-stats">
+          <span class="stats-pill ${filled > 0 ? "" : "muted"}">规格 ${completeness}</span>
         </div>
       </article>
     `;
@@ -554,12 +551,6 @@
       page.insertAdjacentHTML("beforeend", characterEmptyState());
       return;
     }
-    const variantsByCharacter = await Promise.all(
-      charactersPayload.items.map(async (character) => {
-        const variants = await request(`/api/characters/${character.id}/variants`);
-        return { character, variants: variants.items };
-      })
-    );
     page.insertAdjacentHTML(
       "beforeend",
       `
@@ -570,38 +561,63 @@
               <div class="panel-sub">${charactersPayload.total} 个人物 · ${specsPayload.total} 个项目规格</div>
             </div>
           </div>
-          <div class="character-grid">
-            ${variantsByCharacter
-              .map((entry) =>
-                characterCard(entry.character, entry.variants.length, specsPayload.total)
-              )
-              .join("")}
+          <div class="character-workspace">
+            <div class="character-list-pane">
+              <div class="character-grid" id="character-grid-list">
+                ${charactersPayload.items
+                  .map((character) =>
+                    characterCard(character, character.stats, specsPayload.total)
+                  )
+                  .join("")}
+              </div>
+            </div>
+            <div class="character-detail-pane" id="character-detail-pane">
+              <div class="character-detail-empty">
+                <div class="empty-icon">CH</div>
+                <div class="empty-text">点击左侧人物卡片<br>查看与管理形象变体和规格</div>
+              </div>
+            </div>
           </div>
         </section>
       `
     );
   }
 
-  async function refreshCharacterExpanded(card) {
-    const characterId = card.dataset.characterId;
-    if (!characterId) return;
+  async function renderCharacterDetail(characterId) {
+    const pane = document.getElementById("character-detail-pane");
+    if (!pane) return;
     const projectId = document.body.dataset.projectId;
     if (!projectId) return;
-    const [variantsPayload, specsPayload] = await Promise.all([
+    document.querySelectorAll(".character-block.active").forEach((el) => el.classList.remove("active"));
+    const card = document.querySelector(`.character-block[data-character-id="${characterId}"]`);
+    if (card) card.classList.add("active");
+    const [character, variantsPayload, specsPayload] = await Promise.all([
+      request(`/api/characters/${characterId}`),
       request(`/api/characters/${characterId}/variants`),
       request(`/api/projects/${projectId}/specs`),
     ]);
-    const existing = card.querySelector(".character-expanded");
-    if (existing) existing.remove();
-    const character = {
-      id: characterId,
-      project_id: projectId,
-      name: card.dataset.name || "",
-    };
-    card.insertAdjacentHTML(
-      "beforeend",
-      characterExpandedPanel(character, variantsPayload.items, specsPayload.items)
-    );
+    const stats = character.stats || { variant_count: variantsPayload.items.length, spec_total: 0, spec_filled: 0 };
+    pane.innerHTML = `
+      <div class="character-detail-card">
+        <div class="character-detail-header">
+          <div class="header-thumb"></div>
+          <div class="header-name">
+            <div class="header-name-text">${escapeHtml(character.name)}</div>
+            <div class="header-name-sub">${stats.variant_count} 个变体 · ${specsPayload.total} 个项目规格 · 规格 ${stats.spec_filled}/${stats.spec_total}</div>
+          </div>
+        </div>
+        <div class="character-detail-body">
+          ${characterExpandedPanel(character, variantsPayload.items, specsPayload.items)}
+        </div>
+      </div>
+    `;
+  }
+
+  async function refreshCharacterDetail() {
+    const activeCard = document.querySelector(".character-block.active");
+    if (activeCard && activeCard.dataset.characterId) {
+      await renderCharacterDetail(activeCard.dataset.characterId);
+    }
   }
 
   function ensureProjectModal() {
@@ -998,9 +1014,9 @@
   }
 
   async function refreshExpandedOrAll() {
-    const card = document.querySelector(".character-block.expanded");
-    if (card) {
-      await refreshCharacterExpanded(card);
+    const activeCard = document.querySelector(".character-block.active");
+    if (activeCard && activeCard.dataset.characterId) {
+      await renderCharacterDetail(activeCard.dataset.characterId);
       return;
     }
     const project = await resolveCurrentProject();
@@ -1140,7 +1156,7 @@
         body: JSON.stringify(body),
       });
       closeRenameModal();
-      await refreshAfterRename(type);
+      await refreshAfterRename(type, id);
       if (typeof showToast === "function") showToast(`${typeName}已改名为「${name}」`);
     } catch (requestError) {
       error.textContent = requestError.message;
@@ -1151,7 +1167,7 @@
     }
   }
 
-  async function refreshAfterRename(type) {
+  async function refreshAfterRename(type, id) {
     if (type === "chapter" || type === "large-scene") {
       const project = await resolveCurrentProject();
       await renderProductionStoryCanvas(project);
@@ -1160,6 +1176,7 @@
     if (type === "character") {
       const project = await resolveCurrentProject();
       await renderProductionCharacters(project);
+      if (id) await renderCharacterDetail(id);
       return;
     }
     await refreshExpandedOrAll();
@@ -1540,23 +1557,17 @@
       return;
     }
 
-    if (button.dataset.apiAction === "toggle-character") {
+    if (button.dataset.apiAction === "select-character") {
       const card = button.closest(".character-block");
-      if (!card) return;
-      const expanded = card.classList.toggle("expanded");
-      button.textContent = expanded ? "收起管理" : "展开管理";
-      const panel = card.querySelector(".character-expanded");
-      if (expanded && !panel) {
-        refreshCharacterExpanded(card);
-      } else if (!expanded && panel) {
-        panel.remove();
+      if (card && card.dataset.characterId) {
+        renderCharacterDetail(card.dataset.characterId);
       }
       return;
     }
 
     if (button.dataset.apiAction === "add-variant") {
-      const card = button.closest(".character-block");
-      const form = card && card.querySelector('form[data-inline-action="create-variant"]');
+      const detailPane = document.getElementById("character-detail-pane");
+      const form = detailPane && detailPane.querySelector('form[data-inline-action="create-variant"]');
       if (form) {
         form.hidden = false;
         form.querySelector("input").focus();
@@ -1574,8 +1585,8 @@
     }
 
     if (button.dataset.apiAction === "add-spec") {
-      const card = button.closest(".character-block");
-      const form = card && card.querySelector('form[data-inline-action="create-spec"]');
+      const detailPane = document.getElementById("character-detail-pane");
+      const form = detailPane && detailPane.querySelector('form[data-inline-action="create-spec"]');
       if (form) {
         form.hidden = false;
         form.querySelector("select").focus();
@@ -1707,8 +1718,7 @@
       });
       form.hidden = true;
       form.reset();
-      const card = form.closest(".character-block");
-      if (card) await refreshCharacterExpanded(card);
+      await refreshCharacterDetail();
       if (typeof showToast === "function") showToast(`形象变体「${name}」已创建`);
     } catch (requestError) {
       error.textContent = requestError.message;
@@ -1742,8 +1752,7 @@
       });
       form.hidden = true;
       form.reset();
-      const card = form.closest(".character-block");
-      if (card) await refreshCharacterExpanded(card);
+      await refreshCharacterDetail();
       if (typeof showToast === "function") showToast("项目规格已创建");
     } catch (requestError) {
       error.textContent = requestError.message;

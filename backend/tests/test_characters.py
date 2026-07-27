@@ -30,6 +30,21 @@ class CharacterApiTests(unittest.TestCase):
         self.assertEqual(body["items"], [])
         self.assertEqual(body["total"], 0)
 
+    def test_list_characters_includes_stats_aggregate(self) -> None:
+        self.manager.create_project_spec(str(self.project["id"]), "full_body")
+        self.manager.create_project_spec(str(self.project["id"]), "half_body")
+        char = self.manager.create_character(str(self.project["id"]), "角色A")
+        self.manager.create_character_variant(str(char["id"]), "裙装")
+        response = self.client.get(
+            f"/api/projects/{self.project['id']}/characters"
+        )
+        self.assertEqual(response.status_code, 200)
+        item = response.json()["items"][0]
+        stats = item["stats"]
+        self.assertEqual(stats["variant_count"], 2)
+        self.assertEqual(stats["spec_total"], 4)
+        self.assertEqual(stats["spec_filled"], 0)
+
     def test_create_character_returns_full_shape(self) -> None:
         response = self.client.post(
             f"/api/projects/{self.project['id']}/characters",
