@@ -385,6 +385,42 @@ class DatabaseManager:
 
                 CREATE INDEX IF NOT EXISTS idx_shot_page_materials_material
                     ON shot_page_materials(material_id, shot_page_id);
+
+                CREATE TABLE IF NOT EXISTS material_pages (
+                    id TEXT PRIMARY KEY,
+                    material_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    content TEXT NOT NULL DEFAULT '',
+                    prompt_text TEXT NOT NULL DEFAULT '',
+                    negative_prompt TEXT NOT NULL DEFAULT '',
+                    sort_order INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (material_id)
+                        REFERENCES materials(id) ON DELETE CASCADE,
+                    UNIQUE (material_id, name)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_material_pages_material_sort
+                    ON material_pages(material_id, sort_order);
+
+                CREATE TABLE IF NOT EXISTS small_scene_page_mappings (
+                    id TEXT PRIMARY KEY,
+                    scene_page_id TEXT NOT NULL,
+                    material_page_id TEXT NOT NULL,
+                    material_type TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (scene_page_id)
+                        REFERENCES shot_pages(id) ON DELETE CASCADE,
+                    FOREIGN KEY (material_page_id)
+                        REFERENCES material_pages(id) ON DELETE CASCADE,
+                    UNIQUE (scene_page_id, material_type)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_small_scene_page_mappings_material_page
+                    ON small_scene_page_mappings(material_page_id, scene_page_id);
                 """
             )
             # Migrate legacy tables if they exist (pre-v0.1.7 schema)
@@ -392,6 +428,8 @@ class DatabaseManager:
             # Add scene_type column to large_scenes for pre-v0.2.0 databases
             self._migrate_large_scenes_scene_type(connection)
             self._migrate_v040_tables(connection)
+            self._migrate_v041_tables(connection)
+            self._migrate_default_material_pages(connection)
             marker = connection.execute(
                 "SELECT value FROM atelier_meta WHERE key = 'environment'"
             ).fetchone()
@@ -701,6 +739,96 @@ class DatabaseManager:
                     )
                 """)
                 connection.execute("CREATE INDEX IF NOT EXISTS idx_shot_page_materials_material ON shot_page_materials(material_id, shot_page_id)")
+
+    def _migrate_v041_tables(self, connection) -> None:
+        """v0.4.1 migration: add material_pages, small_scene_page_mappings, and id column to small_scene_materials."""
+        # material_pages table
+        exists = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='material_pages'"
+        ).fetchone()
+        if not exists:
+            connection.execute("""
+                CREATE TABLE IF NOT EXISTS material_pages (
+                    id TEXT PRIMARY KEY,
+                    material_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    content TEXT NOT NULL DEFAULT '',
+                    prompt_text TEXT NOT NULL DEFAULT '',
+                    negative_prompt TEXT NOT NULL DEFAULT '',
+                    sort_order INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (material_id)
+                        REFERENCES materials(id) ON DELETE CASCADE,
+                    UNIQUE (material_id, name)
+                )
+            """)
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_material_pages_material_sort ON material_pages(material_id, sort_order)")
+
+        # small_scene_page_mappings table
+        exists = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='small_scene_page_mappings'"
+        ).fetchone()
+        if not exists:
+            connection.execute("""
+                CREATE TABLE IF NOT EXISTS small_scene_page_mappings (
+                    id TEXT PRIMARY KEY,
+                    scene_page_id TEXT NOT NULL,
+                    material_page_id TEXT NOT NULL,
+                    material_type TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (scene_page_id)
+                        REFERENCES shot_pages(id) ON DELETE CASCADE,
+                    FOREIGN KEY (material_page_id)
+                        REFERENCES material_pages(id) ON DELETE CASCADE,
+                    UNIQUE (scene_page_id, material_type)
+                )
+            """)
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_small_scene_page_mappings_material_page ON small_scene_page_mappings(material_page_id, scene_page_id)")
+
+        # Add id column to small_scene_materials (for stable link_id)
+        cols = [row["name"] for row in connection.execute("PRAGMA table_info(small_scene_materials)").fetchall()]
+        if "id" not in cols:
+            connection.execute("ALTER TABLE small_scene_materials ADD COLUMN id TEXT")
+            # Backfill UUIDs for existing rows
+            rows = connection.execute("SELECT small_scene_id, material_id FROM small_scene_materials").fetchall()
+            from uuid import uuid4
+            for row in rows:
+                connection.execute(
+                    "UPDATE small_scene_materials SET id = ? WHERE small_scene_id = ? AND material_id = ?",
+                    (str(uuid4()), row["small_scene_id"], row["material_id"]),
+                )
+            connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_small_scene_materials_id ON small_scene_materials(id)")
+
+    def _migrate_default_material_pages(self, connection) -> None:
+        """Create default material_pages for materials that have none. Idempotent."""
+        # Check if material_pages table exists
+        exists = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='material_pages'"
+        ).fetchone()
+        if not exists:
+            return
+        from uuid import uuid4
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        # Find materials without any pages
+        materials = connection.execute("""
+            SELECT m.id, m.name, m.description, m.content, m.prompt_text, m.negative_prompt
+            FROM materials m
+            WHERE NOT EXISTS (
+                SELECT 1 FROM material_pages mp WHERE mp.material_id = m.id
+            )
+        """).fetchall()
+        for mat in materials:
+            connection.execute(
+                """INSERT INTO material_pages
+                   (id, material_id, name, description, content, prompt_text, negative_prompt, sort_order, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)""",
+                (str(uuid4()), mat["id"], mat["name"], mat["description"], mat["content"],
+                 mat["prompt_text"], mat["negative_prompt"], now, now),
+            )
 
     def activate(self, environment: DatabaseEnvironment) -> None:
         target_environment = self._validate_environment(environment)
@@ -2241,6 +2369,16 @@ class DatabaseManager:
                     material,
                 )
                 self._sync_material_tags(connection, material["id"], clean_tags, now)
+                # v0.4.1: auto-generate a default material page so the material
+                # is immediately usable after being associated with a scene.
+                connection.execute(
+                    """INSERT INTO material_pages
+                       (id, material_id, name, description, content, prompt_text,
+                        negative_prompt, sort_order, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)""",
+                    (str(uuid4()), material["id"], clean_name, description, content,
+                     prompt_text, negative_prompt, now, now),
+                )
         except sqlite3.IntegrityError as error:
             raise ValueError("该类型下已存在同名素材。") from error
         material["tags"] = clean_tags
@@ -3370,3 +3508,565 @@ class DatabaseManager:
             "deleted": deleted,
             "preserved_tables": ["atelier_meta"],
         }
+
+    # ── Story Tree (v0.4.1) ────────────────────────────────────────────
+
+    def get_story_tree(
+        self,
+        project_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        """Aggregate 4-level tree: chapters → large_scenes → small_scenes → shot_pages.
+
+        Uses batch queries to avoid N+1.
+        """
+        target_environment = environment or self._active_environment
+        with self.connection(target_environment) as connection:
+            proj = connection.execute(
+                "SELECT id FROM projects WHERE id = ?", (project_id,)
+            ).fetchone()
+            if not proj:
+                return None
+
+            chapters = connection.execute(
+                """SELECT id, project_id, name, sort_order, created_at, updated_at
+                   FROM chapters WHERE project_id = ? ORDER BY sort_order ASC""",
+                (project_id,),
+            ).fetchall()
+            chapter_ids = [c["id"] for c in chapters]
+
+            large_scenes: list[dict[str, object]] = []
+            small_scenes: list[dict[str, object]] = []
+            shot_pages: list[dict[str, object]] = []
+
+            if chapter_ids:
+                placeholders = ",".join("?" * len(chapter_ids))
+                large_scenes_rows = connection.execute(
+                    f"""SELECT id, chapter_id, name, scene_type, sort_order, created_at, updated_at
+                        FROM large_scenes WHERE chapter_id IN ({placeholders}) ORDER BY sort_order ASC""",
+                    chapter_ids,
+                ).fetchall()
+                large_scenes = [dict(r) for r in large_scenes_rows]
+                large_scene_ids = [ls["id"] for ls in large_scenes]
+
+                if large_scene_ids:
+                    placeholders_ls = ",".join("?" * len(large_scene_ids))
+                    small_scenes_rows = connection.execute(
+                        f"""SELECT id, large_scene_id, name, scene_type, description, sort_order, created_at, updated_at
+                            FROM small_scenes WHERE large_scene_id IN ({placeholders_ls}) ORDER BY sort_order ASC""",
+                        large_scene_ids,
+                    ).fetchall()
+                    small_scenes = [dict(r) for r in small_scenes_rows]
+                    small_scene_ids = [ss["id"] for ss in small_scenes]
+
+                    if small_scene_ids:
+                        placeholders_ss = ",".join("?" * len(small_scene_ids))
+                        shot_pages_rows = connection.execute(
+                            f"""SELECT id, small_scene_id, branch_id, title, description, prompt_text, negative_prompt,
+                                       sort_order, created_at, updated_at
+                                FROM shot_pages
+                                WHERE small_scene_id IN ({placeholders_ss}) AND branch_id IS NULL
+                                ORDER BY sort_order ASC""",
+                            small_scene_ids,
+                        ).fetchall()
+                        # Rename title → name for frontend contract
+                        shot_pages = []
+                        for r in shot_pages_rows:
+                            p = dict(r)
+                            p["name"] = p.pop("title")
+                            shot_pages.append(p)
+
+            pages_by_scene: dict[str, list[dict[str, object]]] = {}
+            for p in shot_pages:
+                pages_by_scene.setdefault(p["small_scene_id"], []).append(p)
+
+            scenes_by_large: dict[str, list[dict[str, object]]] = {}
+            for s in small_scenes:
+                s["pages"] = pages_by_scene.get(s["id"], [])
+                scenes_by_large.setdefault(s["large_scene_id"], []).append(s)
+
+            large_by_chapter: dict[str, list[dict[str, object]]] = {}
+            for ls in large_scenes:
+                ls["small_scenes"] = scenes_by_large.get(ls["id"], [])
+                large_by_chapter.setdefault(ls["chapter_id"], []).append(ls)
+
+            chapters_list: list[dict[str, object]] = []
+            for c in chapters:
+                c_dict = dict(c)
+                c_dict["large_scenes"] = large_by_chapter.get(c["id"], [])
+                chapters_list.append(c_dict)
+
+            return {
+                "project_id": project_id,
+                "chapters": chapters_list,
+                "backendAvailable": True,
+            }
+
+    # ── Small Scene Workspace (v0.4.1) ─────────────────────────────────
+
+    def get_small_scene_workspace(
+        self,
+        small_scene_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        """Aggregate workspace data: small_scene + pages + resources + mappings.
+
+        Field contract for frontend:
+        - pages: shot_pages with `name` (renamed from title)
+        - resources: each resource includes `link_id`, `pages` (material_pages of that material)
+        - mappings: includes material_page_name, material_id
+        - chapter, large_scene: parent info for breadcrumb
+        """
+        target_environment = environment or self._active_environment
+        with self.connection(target_environment) as connection:
+            scene_row = connection.execute(
+                """SELECT id, large_scene_id, name, scene_type, description, sort_order, created_at, updated_at
+                   FROM small_scenes WHERE id = ?""",
+                (small_scene_id,),
+            ).fetchone()
+            if not scene_row:
+                return None
+            small_scene = dict(scene_row)
+
+            # Fetch parent chapter & large_scene for breadcrumb
+            large_scene_row = connection.execute(
+                """SELECT id, chapter_id, name, scene_type
+                   FROM large_scenes WHERE id = ?""",
+                (small_scene["large_scene_id"],),
+            ).fetchone()
+            chapter = None
+            large_scene = None
+            if large_scene_row:
+                large_scene = dict(large_scene_row)
+                chapter_row = connection.execute(
+                    """SELECT id, project_id, name
+                       FROM chapters WHERE id = ?""",
+                    (large_scene["chapter_id"],),
+                ).fetchone()
+                if chapter_row:
+                    chapter = dict(chapter_row)
+
+            pages_rows = connection.execute(
+                """SELECT id, small_scene_id, title, description, prompt_text, negative_prompt,
+                          sort_order, created_at, updated_at
+                   FROM shot_pages
+                   WHERE small_scene_id = ? AND branch_id IS NULL
+                   ORDER BY sort_order ASC""",
+                (small_scene_id,),
+            ).fetchall()
+            # Rename title → name for frontend contract
+            pages: list[dict[str, object]] = []
+            for r in pages_rows:
+                p = dict(r)
+                p["name"] = p.pop("title")
+                pages.append(p)
+            page_ids = [p["id"] for p in pages]
+
+            resources_rows = connection.execute(
+                """SELECT ssm.id AS link_id, ssm.material_id, ssm.sort_order,
+                          m.name, m.material_type, m.description, m.prompt_text, m.negative_prompt
+                   FROM small_scene_materials ssm
+                   JOIN materials m ON m.id = ssm.material_id
+                   WHERE ssm.small_scene_id = ?
+                   ORDER BY ssm.sort_order ASC""",
+                (small_scene_id,),
+            ).fetchall()
+            resources = [dict(r) for r in resources_rows]
+
+            # Fetch material_pages for each resource (batch query)
+            material_ids = [r["material_id"] for r in resources]
+            resource_pages_map: dict[str, list[dict[str, object]]] = {}
+            if material_ids:
+                placeholders_m = ",".join("?" * len(material_ids))
+                mp_rows = connection.execute(
+                    f"""SELECT id, material_id, name, description, content, prompt_text, negative_prompt,
+                               sort_order, created_at, updated_at
+                        FROM material_pages
+                        WHERE material_id IN ({placeholders_m})
+                        ORDER BY sort_order ASC""",
+                    material_ids,
+                ).fetchall()
+                for mp in mp_rows:
+                    resource_pages_map.setdefault(mp["material_id"], []).append(dict(mp))
+            for r in resources:
+                r["pages"] = resource_pages_map.get(r["material_id"], [])
+
+            mappings: list[dict[str, object]] = []
+            if page_ids:
+                placeholders = ",".join("?" * len(page_ids))
+                mapping_rows = connection.execute(
+                    f"""SELECT sspm.id, sspm.scene_page_id, sspm.material_page_id, sspm.material_type,
+                               mp.name AS material_page_name, mp.material_id,
+                               sspm.created_at, sspm.updated_at
+                        FROM small_scene_page_mappings sspm
+                        JOIN material_pages mp ON mp.id = sspm.material_page_id
+                        WHERE sspm.scene_page_id IN ({placeholders})
+                        ORDER BY sspm.created_at ASC""",
+                    page_ids,
+                ).fetchall()
+                mappings = [dict(r) for r in mapping_rows]
+
+            return {
+                "small_scene": small_scene,
+                "chapter": chapter,
+                "large_scene": large_scene,
+                "pages": pages,
+                "resources": resources,
+                "mappings": mappings,
+            }
+
+    # ── Material Pages (v0.4.1) ────────────────────────────────────────
+
+    def list_material_pages(
+        self,
+        material_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> list[dict[str, object]]:
+        target_environment = environment or self._active_environment
+        with self.connection(target_environment) as connection:
+            rows = connection.execute(
+                """SELECT id, material_id, name, description, content, prompt_text, negative_prompt,
+                          sort_order, created_at, updated_at
+                   FROM material_pages
+                   WHERE material_id = ?
+                   ORDER BY sort_order ASC""",
+                (material_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_material_page(
+        self,
+        material_page_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        target_environment = environment or self._active_environment
+        with self.connection(target_environment) as connection:
+            row = connection.execute(
+                """SELECT id, material_id, name, description, content, prompt_text, negative_prompt,
+                          sort_order, created_at, updated_at
+                   FROM material_pages WHERE id = ?""",
+                (material_page_id,),
+            ).fetchone()
+            if not row:
+                return None
+            return dict(row)
+
+    def create_material_page(
+        self,
+        material_id: str,
+        name: str,
+        *,
+        description: str = "",
+        content: str = "",
+        prompt_text: str = "",
+        negative_prompt: str = "",
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        if not name or not name.strip():
+            raise ValueError("素材页名称不能为空")
+        name = name.strip()
+        if len(name) > 120:
+            raise ValueError("素材页名称不能超过120字")
+        if len(description) > 500:
+            raise ValueError("素材页描述不能超过500字")
+        if len(content) > 50000:
+            raise ValueError("素材页内容不能超过50000字")
+        if len(prompt_text) > 50000:
+            raise ValueError("正向提示词不能超过50000字")
+        if len(negative_prompt) > 20000:
+            raise ValueError("负向提示词不能超过20000字")
+        target_environment = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        page_id = str(uuid4())
+        with self._lock, self.connection(target_environment) as connection:
+            mat = connection.execute(
+                "SELECT id FROM materials WHERE id = ?", (material_id,)
+            ).fetchone()
+            if not mat:
+                raise ValueError("素材不存在")
+            duplicate = connection.execute(
+                "SELECT id FROM material_pages WHERE material_id = ? AND name = ? COLLATE NOCASE",
+                (material_id, name),
+            ).fetchone()
+            if duplicate:
+                raise ValueError("同素材下已存在同名素材页")
+            max_order = connection.execute(
+                "SELECT COALESCE(MAX(sort_order), 0) FROM material_pages WHERE material_id = ?",
+                (material_id,),
+            ).fetchone()[0]
+            connection.execute(
+                """INSERT INTO material_pages
+                   (id, material_id, name, description, content, prompt_text, negative_prompt, sort_order, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (page_id, material_id, name, description, content, prompt_text, negative_prompt,
+                 max_order + 1, now, now),
+            )
+        return self.get_material_page(page_id, environment=target_environment)  # type: ignore[return-value]
+
+    def update_material_page(
+        self,
+        material_page_id: str,
+        *,
+        name: str | None = None,
+        description: str | None = None,
+        content: str | None = None,
+        prompt_text: str | None = None,
+        negative_prompt: str | None = None,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        if all(v is None for v in (name, description, content, prompt_text, negative_prompt)):
+            raise ValueError("至少提供一个更新字段")
+        target_environment = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self.connection(target_environment) as connection:
+            existing = connection.execute(
+                "SELECT id, material_id FROM material_pages WHERE id = ?",
+                (material_page_id,),
+            ).fetchone()
+            if not existing:
+                return None
+            sets: list[str] = []
+            params: list[object] = []
+            if name is not None:
+                if not name.strip():
+                    raise ValueError("素材页名称不能为空")
+                name = name.strip()
+                if len(name) > 120:
+                    raise ValueError("素材页名称不能超过120字")
+                duplicate = connection.execute(
+                    "SELECT id FROM material_pages WHERE material_id = ? AND name = ? COLLATE NOCASE AND id != ?",
+                    (existing["material_id"], name, material_page_id),
+                ).fetchone()
+                if duplicate:
+                    raise ValueError("同素材下已存在同名素材页")
+                sets.append("name = ?")
+                params.append(name)
+            if description is not None:
+                if len(description) > 500:
+                    raise ValueError("素材页描述不能超过500字")
+                sets.append("description = ?")
+                params.append(description)
+            if content is not None:
+                if len(content) > 50000:
+                    raise ValueError("素材页内容不能超过50000字")
+                sets.append("content = ?")
+                params.append(content)
+            if prompt_text is not None:
+                if len(prompt_text) > 50000:
+                    raise ValueError("正向提示词不能超过50000字")
+                sets.append("prompt_text = ?")
+                params.append(prompt_text)
+            if negative_prompt is not None:
+                if len(negative_prompt) > 20000:
+                    raise ValueError("负向提示词不能超过20000字")
+                sets.append("negative_prompt = ?")
+                params.append(negative_prompt)
+            sets.append("updated_at = ?")
+            params.append(now)
+            params.append(material_page_id)
+            connection.execute(
+                f"UPDATE material_pages SET {', '.join(sets)} WHERE id = ?", params
+            )
+        return self.get_material_page(material_page_id, environment=target_environment)
+
+    def delete_material_page(
+        self,
+        material_page_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        target_environment = environment or self._active_environment
+        with self._lock, self.connection(target_environment) as connection:
+            existing = connection.execute(
+                "SELECT id, material_id, name FROM material_pages WHERE id = ?",
+                (material_page_id,),
+            ).fetchone()
+            if not existing:
+                return None
+            material_id = existing["material_id"]
+            connection.execute("DELETE FROM material_pages WHERE id = ?", (material_page_id,))
+            remaining = connection.execute(
+                "SELECT id FROM material_pages WHERE material_id = ? ORDER BY sort_order ASC",
+                (material_id,),
+            ).fetchall()
+            for idx, r in enumerate(remaining, start=1):
+                connection.execute(
+                    "UPDATE material_pages SET sort_order = ? WHERE id = ?",
+                    (idx, r["id"]),
+                )
+        return {"id": material_page_id, "name": existing["name"]}
+
+    def reorder_material_pages(
+        self,
+        material_id: str,
+        page_ids: list[str],
+        environment: DatabaseEnvironment | None = None,
+    ) -> list[dict[str, object]]:
+        target_environment = environment or self._active_environment
+        with self._lock, self.connection(target_environment) as connection:
+            for idx, pid in enumerate(page_ids, start=1):
+                connection.execute(
+                    "UPDATE material_pages SET sort_order = ? WHERE id = ? AND material_id = ?",
+                    (idx, pid, material_id),
+                )
+        return self.list_material_pages(material_id, environment=target_environment)
+
+    # ── Small Scene Resources (v0.4.1) ─────────────────────────────────
+
+    def add_small_scene_resource(
+        self,
+        small_scene_id: str,
+        material_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        """Associate a material with a small scene. Returns the link record with link_id."""
+        target_environment = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        link_id = str(uuid4())
+        with self._lock, self.connection(target_environment) as connection:
+            scene = connection.execute(
+                "SELECT id FROM small_scenes WHERE id = ?", (small_scene_id,)
+            ).fetchone()
+            if not scene:
+                raise ValueError("小场景不存在")
+            mat = connection.execute(
+                "SELECT id FROM materials WHERE id = ?", (material_id,)
+            ).fetchone()
+            if not mat:
+                raise ValueError("素材不存在")
+            existing = connection.execute(
+                "SELECT id FROM small_scene_materials WHERE small_scene_id = ? AND material_id = ?",
+                (small_scene_id, material_id),
+            ).fetchone()
+            if existing:
+                raise ValueError("该素材已关联到此小场景")
+            max_order = connection.execute(
+                "SELECT COALESCE(MAX(sort_order), 0) FROM small_scene_materials WHERE small_scene_id = ?",
+                (small_scene_id,),
+            ).fetchone()[0]
+            connection.execute(
+                """INSERT INTO small_scene_materials (id, small_scene_id, material_id, sort_order, created_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (link_id, small_scene_id, material_id, max_order + 1, now),
+            )
+        return {"link_id": link_id, "small_scene_id": small_scene_id, "material_id": material_id}
+
+    def remove_small_scene_resource_link(
+        self,
+        link_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        """Remove a material association by link_id (the stable id of small_scene_materials)."""
+        target_environment = environment or self._active_environment
+        with self._lock, self.connection(target_environment) as connection:
+            existing = connection.execute(
+                "SELECT id, small_scene_id, material_id FROM small_scene_materials WHERE id = ?",
+                (link_id,),
+            ).fetchone()
+            if not existing:
+                return None
+            connection.execute(
+                "DELETE FROM small_scene_materials WHERE id = ?", (link_id,)
+            )
+        return {"link_id": link_id, "small_scene_id": existing["small_scene_id"], "material_id": existing["material_id"]}
+
+    # ── Small Scene Page Mappings (v0.4.1) ─────────────────────────────
+
+    def list_small_scene_page_mappings(
+        self,
+        scene_page_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> list[dict[str, object]]:
+        target_environment = environment or self._active_environment
+        with self.connection(target_environment) as connection:
+            rows = connection.execute(
+                """SELECT sspm.id, sspm.scene_page_id, sspm.material_page_id, sspm.material_type,
+                          mp.name AS material_page_name, mp.material_id,
+                          sspm.created_at, sspm.updated_at
+                   FROM small_scene_page_mappings sspm
+                   JOIN material_pages mp ON mp.id = sspm.material_page_id
+                   WHERE sspm.scene_page_id = ?
+                   ORDER BY sspm.created_at ASC""",
+                (scene_page_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def set_small_scene_page_mapping(
+        self,
+        scene_page_id: str,
+        material_type: str,
+        material_page_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        """Set or replace the mapping for (scene_page_id, material_type).
+
+        Atomic replace: deletes existing mapping with same (scene_page_id, material_type),
+        then inserts new one. If material_page_id is None, removes the mapping.
+        """
+        valid_types = ('composition', 'expression', 'scene', 'lighting', 'prompt', 'composite_template')
+        if material_type not in valid_types:
+            raise ValueError(f"素材类型无效，允许值: {', '.join(valid_types)}")
+        target_environment = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        mapping_id = str(uuid4())
+        with self._lock, self.connection(target_environment) as connection:
+            page = connection.execute(
+                "SELECT id FROM shot_pages WHERE id = ?", (scene_page_id,)
+            ).fetchone()
+            if not page:
+                raise ValueError("场景页不存在")
+            mp = connection.execute(
+                "SELECT id, material_id FROM material_pages WHERE id = ?",
+                (material_page_id,),
+            ).fetchone()
+            if not mp:
+                raise ValueError("素材页不存在")
+            mat = connection.execute(
+                "SELECT material_type FROM materials WHERE id = ?",
+                (mp["material_id"],),
+            ).fetchone()
+            if not mat:
+                raise ValueError("素材不存在")
+            if mat["material_type"] != material_type:
+                raise ValueError(f"素材页所属素材类型({mat['material_type']})与指定类型({material_type})不匹配")
+            connection.execute(
+                "DELETE FROM small_scene_page_mappings WHERE scene_page_id = ? AND material_type = ?",
+                (scene_page_id, material_type),
+            )
+            connection.execute(
+                """INSERT INTO small_scene_page_mappings
+                   (id, scene_page_id, material_page_id, material_type, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (mapping_id, scene_page_id, material_page_id, material_type, now, now),
+            )
+        return {
+            "id": mapping_id,
+            "scene_page_id": scene_page_id,
+            "material_page_id": material_page_id,
+            "material_type": material_type,
+        }
+
+    def unset_small_scene_page_mapping(
+        self,
+        scene_page_id: str,
+        material_type: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        """Remove the mapping for (scene_page_id, material_type). Returns None if no mapping existed."""
+        valid_types = ('composition', 'expression', 'scene', 'lighting', 'prompt', 'composite_template')
+        if material_type not in valid_types:
+            raise ValueError(f"素材类型无效，允许值: {', '.join(valid_types)}")
+        target_environment = environment or self._active_environment
+        with self._lock, self.connection(target_environment) as connection:
+            existing = connection.execute(
+                "SELECT id, scene_page_id, material_page_id, material_type FROM small_scene_page_mappings "
+                "WHERE scene_page_id = ? AND material_type = ?",
+                (scene_page_id, material_type),
+            ).fetchone()
+            if not existing:
+                return None
+            connection.execute(
+                "DELETE FROM small_scene_page_mappings WHERE scene_page_id = ? AND material_type = ?",
+                (scene_page_id, material_type),
+            )
+        return dict(existing)
+

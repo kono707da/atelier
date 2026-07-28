@@ -844,7 +844,7 @@
   const storyWorkspaceState = {
     project: null,
     tree: null,
-    smallSceneBackendAvailable: false,
+    smallSceneBackendAvailable: true,
     smallSceneWorkspace: null,
   };
 
@@ -1574,15 +1574,17 @@
       const mapAction = event.target.closest("[data-material-map-action='toggle']");
       if (mapAction) {
         const selected = mapAction.classList.contains("selected");
-        await request(
-          `/api/small-scene-pages/${mapAction.dataset.scenePageId}/mappings/${mapAction.dataset.materialType}`,
-          {
+        const url = `/api/small-scene-pages/${mapAction.dataset.scenePageId}/mappings/${mapAction.dataset.materialType}`;
+        if (selected) {
+          await request(url, { method: "DELETE" });
+        } else {
+          await request(url, {
             method: "PUT",
             body: JSON.stringify({
-              material_page_id: selected ? null : mapAction.dataset.materialPageId,
+              material_page_id: mapAction.dataset.materialPageId,
             }),
-          }
-        );
+          });
+        }
         await refreshSmallSceneWorkspace();
         return;
       }

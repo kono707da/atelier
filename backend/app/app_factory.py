@@ -533,6 +533,95 @@ class SetMaterialsRequest(BaseModel):
     material_ids: list[str]
 
 
+# ── v0.4.1 Request Models ───────────────────────────────────────────
+
+class CreateScenePageRequest(BaseModel):
+    """场景页创建请求（前端使用 name 字段，内部转 title）"""
+    name: str = Field(min_length=1, max_length=120)
+    description: str = Field(default="", max_length=500)
+    prompt_text: str = Field(default="", max_length=50000)
+    negative_prompt: str = Field(default="", max_length=20000)
+
+    @field_validator("name")
+    @classmethod
+    def name_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("场景页名称不能为空。")
+        return value
+
+
+class UpdateScenePageRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = Field(default=None, max_length=500)
+    prompt_text: str | None = Field(default=None, max_length=50000)
+    negative_prompt: str | None = Field(default=None, max_length=20000)
+
+    @field_validator("name")
+    @classmethod
+    def name_not_blank(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("场景页名称不能为空。")
+        return value
+
+    @model_validator(mode="after")
+    def at_least_one_field(self):
+        if all(v is None for v in (self.name, self.description, self.prompt_text, self.negative_prompt)):
+            raise ValueError("至少需要提供一个更新字段。")
+        return self
+
+
+class ReorderPagesRequest(BaseModel):
+    page_ids: list[str] = Field(min_length=1)
+
+
+class AddResourceRequest(BaseModel):
+    material_id: str = Field(min_length=1)
+
+
+class SetMappingRequest(BaseModel):
+    material_page_id: str = Field(min_length=1)
+
+
+class CreateMaterialPageRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    description: str = Field(default="", max_length=500)
+    content: str = Field(default="", max_length=50000)
+    prompt_text: str = Field(default="", max_length=50000)
+    negative_prompt: str = Field(default="", max_length=20000)
+
+    @field_validator("name")
+    @classmethod
+    def name_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("素材页名称不能为空。")
+        return value
+
+
+class UpdateMaterialPageRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = Field(default=None, max_length=500)
+    content: str | None = Field(default=None, max_length=50000)
+    prompt_text: str | None = Field(default=None, max_length=50000)
+    negative_prompt: str | None = Field(default=None, max_length=20000)
+
+    @field_validator("name")
+    @classmethod
+    def name_not_blank(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("素材页名称不能为空。")
+        return value
+
+    @model_validator(mode="after")
+    def at_least_one_field(self):
+        if all(v is None for v in (self.name, self.description, self.content, self.prompt_text, self.negative_prompt)):
+            raise ValueError("至少需要提供一个更新字段。")
+        return self
+
+
+class ReorderMaterialPagesRequest(BaseModel):
+    page_ids: list[str] = Field(min_length=1)
+
+
 def create_app(
     *,
     data_root: Path | None = None,
@@ -542,7 +631,7 @@ def create_app(
 ) -> FastAPI:
     app = FastAPI(
         title="Atelier API",
-        version="0.4.0",
+        version="0.4.2",
         docs_url="/api/docs",
         redoc_url=None,
     )
@@ -1711,6 +1800,252 @@ def create_app(
         return {
             "database_environment": manager.active_environment,
             **result,
+        }
+
+    # ── v0.4.1 小场景联调整改路由 ───────────────────────────────────────
+
+    @app.get("/api/projects/{project_id}/story-tree")
+    def get_story_tree(project_id: str) -> dict[str, object]:
+        """6.1 项目剧本树聚合：章节 → 大场景 → 小场景 → 场景页"""
+        result = manager.get_story_tree(project_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail="项目不存在")
+        return {
+            "database_environment": manager.active_environment,
+            **result,
+        }
+
+    @app.get("/api/small-scenes/{small_scene_id}/workspace")
+    def get_small_scene_workspace(small_scene_id: str) -> dict[str, object]:
+        """6.2 小场景工作区聚合：small_scene + pages + resources + mappings"""
+        result = manager.get_small_scene_workspace(small_scene_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail="小场景不存在")
+        return {
+            "database_environment": manager.active_environment,
+            **result,
+        }
+
+    @app.post("/api/small-scenes/{small_scene_id}/pages")
+    def create_scene_page(small_scene_id: str, request: CreateScenePageRequest) -> dict[str, object]:
+        """6.3 创建场景页（前端 name → 内部 title）"""
+        try:
+            page = manager.create_shot_page(
+                small_scene_id,
+                request.name.strip(),
+                description=request.description,
+                prompt_text=request.prompt_text,
+                negative_prompt=request.negative_prompt,
+            )
+        except ValueError as error:
+            msg = str(error)
+            code = 404 if "不存在" in msg else 422
+            raise HTTPException(status_code=code, detail=msg) from error
+        # 返回时把 title 转回 name
+        result = dict(page)
+        result["name"] = result.pop("title")
+        return {
+            "database_environment": manager.active_environment,
+            **result,
+        }
+
+    @app.patch("/api/small-scene-pages/{page_id}")
+    def update_scene_page(page_id: str, request: UpdateScenePageRequest) -> dict[str, object]:
+        """6.3 更新场景页（前端 name → 内部 title）"""
+        try:
+            page = manager.update_shot_page(
+                page_id,
+                title=request.name,
+                description=request.description,
+                prompt_text=request.prompt_text,
+                negative_prompt=request.negative_prompt,
+            )
+        except ValueError as error:
+            msg = str(error)
+            code = 422
+            raise HTTPException(status_code=code, detail=msg) from error
+        if page is None:
+            raise HTTPException(status_code=404, detail="场景页不存在")
+        result = dict(page)
+        if "title" in result:
+            result["name"] = result.pop("title")
+        return {
+            "database_environment": manager.active_environment,
+            **result,
+        }
+
+    @app.delete("/api/small-scene-pages/{page_id}")
+    def delete_scene_page(page_id: str) -> dict[str, object]:
+        """6.3 删除场景页"""
+        result = manager.delete_shot_page(page_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail="场景页不存在")
+        return {
+            "database_environment": manager.active_environment,
+            **result,
+        }
+
+    @app.put("/api/small-scenes/{small_scene_id}/pages/order")
+    def reorder_scene_pages(small_scene_id: str, request: ReorderPagesRequest) -> dict[str, object]:
+        """6.3 场景页排序"""
+        try:
+            for idx, pid in enumerate(request.page_ids, start=1):
+                manager.move_shot_page(pid, idx)
+        except ValueError as error:
+            msg = str(error)
+            code = 404 if "不存在" in msg else 422
+            raise HTTPException(status_code=code, detail=msg) from error
+        pages = manager.list_shot_pages(small_scene_id)
+        # 转换 title → name
+        for p in pages:
+            p["name"] = p.pop("title")
+        return {
+            "database_environment": manager.active_environment,
+            "small_scene_id": small_scene_id,
+            "pages": pages,
+        }
+
+    @app.post("/api/small-scenes/{small_scene_id}/resources")
+    def add_small_scene_resource(small_scene_id: str, request: AddResourceRequest) -> dict[str, object]:
+        """6.4 关联素材到小场景"""
+        try:
+            result = manager.add_small_scene_resource(small_scene_id, request.material_id)
+        except ValueError as error:
+            msg = str(error)
+            code = 404 if "不存在" in msg else 422
+            raise HTTPException(status_code=code, detail=msg) from error
+        return {
+            "database_environment": manager.active_environment,
+            **result,
+        }
+
+    @app.delete("/api/small-scene-resource-links/{link_id}")
+    def remove_small_scene_resource_link(link_id: str) -> dict[str, object]:
+        """6.4 移除小场景素材关联"""
+        result = manager.remove_small_scene_resource_link(link_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail="素材关联不存在")
+        return {
+            "database_environment": manager.active_environment,
+            **result,
+        }
+
+    @app.put("/api/small-scene-pages/{page_id}/mappings/{material_type}")
+    def set_scene_page_mapping(page_id: str, material_type: str, request: SetMappingRequest) -> dict[str, object]:
+        """6.5 设置场景页映射（同类型原子替换）"""
+        valid_types = ('composition', 'expression', 'scene', 'lighting', 'prompt', 'composite_template')
+        if material_type not in valid_types:
+            raise HTTPException(status_code=422, detail=f"素材类型无效，允许值: {', '.join(valid_types)}")
+        try:
+            result = manager.set_small_scene_page_mapping(page_id, material_type, request.material_page_id)
+        except ValueError as error:
+            msg = str(error)
+            code = 404 if "不存在" in msg else 422
+            raise HTTPException(status_code=code, detail=msg) from error
+        return {
+            "database_environment": manager.active_environment,
+            **result,
+        }
+
+    @app.delete("/api/small-scene-pages/{page_id}/mappings/{material_type}")
+    def unset_scene_page_mapping(page_id: str, material_type: str) -> dict[str, object]:
+        """6.5 取消场景页映射"""
+        valid_types = ('composition', 'expression', 'scene', 'lighting', 'prompt', 'composite_template')
+        if material_type not in valid_types:
+            raise HTTPException(status_code=422, detail=f"素材类型无效，允许值: {', '.join(valid_types)}")
+        result = manager.unset_small_scene_page_mapping(page_id, material_type)
+        if result is None:
+            raise HTTPException(status_code=404, detail="映射不存在")
+        return {
+            "database_environment": manager.active_environment,
+            **result,
+        }
+
+    @app.get("/api/materials/{material_id}/pages")
+    def list_material_pages(material_id: str) -> dict[str, object]:
+        """6.6 获取素材页列表"""
+        mat = manager.get_material(material_id)
+        if mat is None:
+            raise HTTPException(status_code=404, detail="素材不存在")
+        pages = manager.list_material_pages(material_id)
+        return {
+            "database_environment": manager.active_environment,
+            "material_id": material_id,
+            "pages": pages,
+        }
+
+    @app.post("/api/materials/{material_id}/pages")
+    def create_material_page(material_id: str, request: CreateMaterialPageRequest) -> dict[str, object]:
+        """6.6 创建素材页"""
+        try:
+            page = manager.create_material_page(
+                material_id,
+                request.name.strip(),
+                description=request.description,
+                content=request.content,
+                prompt_text=request.prompt_text,
+                negative_prompt=request.negative_prompt,
+            )
+        except ValueError as error:
+            msg = str(error)
+            code = 404 if "不存在" in msg else 422
+            raise HTTPException(status_code=code, detail=msg) from error
+        return {
+            "database_environment": manager.active_environment,
+            **page,
+        }
+
+    @app.get("/api/material-pages/{page_id}")
+    def get_material_page(page_id: str) -> dict[str, object]:
+        """6.6 获取单个素材页"""
+        page = manager.get_material_page(page_id)
+        if page is None:
+            raise HTTPException(status_code=404, detail="素材页不存在")
+        return {
+            "database_environment": manager.active_environment,
+            **page,
+        }
+
+    @app.patch("/api/material-pages/{page_id}")
+    def update_material_page(page_id: str, request: UpdateMaterialPageRequest) -> dict[str, object]:
+        """6.6 更新素材页"""
+        try:
+            page = manager.update_material_page(
+                page_id,
+                name=request.name,
+                description=request.description,
+                content=request.content,
+                prompt_text=request.prompt_text,
+                negative_prompt=request.negative_prompt,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        if page is None:
+            raise HTTPException(status_code=404, detail="素材页不存在")
+        return {
+            "database_environment": manager.active_environment,
+            **page,
+        }
+
+    @app.delete("/api/material-pages/{page_id}")
+    def delete_material_page(page_id: str) -> dict[str, object]:
+        """6.6 删除素材页"""
+        result = manager.delete_material_page(page_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail="素材页不存在")
+        return {
+            "database_environment": manager.active_environment,
+            **result,
+        }
+
+    @app.put("/api/materials/{material_id}/pages/order")
+    def reorder_material_pages(material_id: str, request: ReorderMaterialPagesRequest) -> dict[str, object]:
+        """6.6 素材页排序"""
+        pages = manager.reorder_material_pages(material_id, request.page_ids)
+        return {
+            "database_environment": manager.active_environment,
+            "material_id": material_id,
+            "pages": pages,
         }
 
     # Warm the production lookup cache before the first page request. Test
