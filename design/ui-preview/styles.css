@@ -126,7 +126,8 @@ button {
 .nav-scroll {
   min-height: 0;
   flex: 1;
-  overflow: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .nav-section {
