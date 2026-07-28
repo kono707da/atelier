@@ -18,6 +18,7 @@ const pages = [
   ["library", "全局图库", "图库", "LB"],
   ["image-detail", "图片详情", "图库", "ID"],
   ["export", "导出中心", "成片", "EX"],
+  ["developer", "开发者管理", "系统", "DV"],
   ["settings", "设置与 ComfyUI", "系统", "ST"],
 ];
 
@@ -25,7 +26,7 @@ const navGroups = [
   ["项目", ["projects"]],
   ["项目制作", ["overview", "story-canvas", "workflows", "batch"]],
   ["生产与成片", ["tasks", "review", "assembly", "export"]],
-  ["全局资源", ["characters", "materials", "library", "settings"]],
+  ["全局资源", ["characters", "materials", "library", "developer", "settings"]],
   ["工具", ["character-database"]],
 ];
 
@@ -659,6 +660,24 @@ function settingsPage() {
   </div>`;
 }
 
+function developerManagementPage() {
+  return `<div class="page-scroll developer-page">
+    ${pageHeader("开发者管理", "集中查看 Atelier 各项功能的真实开发状态。")}
+    <section class="developer-launch-card">
+      <div class="developer-launch-icon">DV</div>
+      <div class="developer-launch-copy">
+        <span class="developer-eyebrow">PROJECT STATUS</span>
+        <h2>开发进度汇总</h2>
+        <p>完成情况直接读取项目根目录中的《功能开发待办》，不会在页面中写死。</p>
+      </div>
+      <button class="btn primary developer-launch-action" data-api-action="load-development-progress">
+        查看开发进度
+      </button>
+    </section>
+    <section id="development-progress-result" class="development-progress-result" hidden aria-live="polite"></section>
+  </div>`;
+}
+
 const renderers = {
   projects: projectsPage,
   overview: overviewPage,
@@ -679,6 +698,7 @@ const renderers = {
   library: libraryPage,
   "image-detail": imageDetailPage,
   export: exportPage,
+  developer: developerManagementPage,
   settings: settingsPage,
 };
 

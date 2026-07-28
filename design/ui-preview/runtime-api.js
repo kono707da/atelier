@@ -4576,6 +4576,89 @@
     return payload;
   }
 
+  function formatDevelopmentUpdatedAt(value) {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "更新时间未知";
+    return `更新于 ${date.toLocaleString("zh-CN", {
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    })}`;
+  }
+
+  function developmentProgressMarkup(payload) {
+    const progressPercent = Number(payload.progress_percent) || 0;
+    const items = Array.isArray(payload.items) ? payload.items : [];
+    const itemMarkup = items.length
+      ? items.map((item) => `
+          <article class="development-item ${item.completed ? "completed" : "pending"}">
+            <span class="development-item-state" aria-hidden="true">${item.completed ? "✓" : "•"}</span>
+            <div class="development-item-copy">
+              <div class="development-item-heading">
+                <strong>${escapeHtml(item.title)}</strong>
+                <span>${item.completed ? "已完成" : "待开发"}</span>
+              </div>
+              ${item.description ? `<p>${escapeHtml(item.description)}</p>` : ""}
+            </div>
+          </article>
+        `).join("")
+      : '<div class="development-empty">待办文档中还没有可汇总的功能项。</div>';
+
+    return `
+      <div class="development-summary">
+        <div class="development-progress-ring" style="--development-progress:${progressPercent * 3.6}deg">
+          <div><strong>${progressPercent}%</strong><span>总体进度</span></div>
+        </div>
+        <div class="development-summary-copy">
+          <span class="developer-eyebrow">LIVE CHECKLIST</span>
+          <h2>功能完成情况</h2>
+          <p>共 ${Number(payload.total) || 0} 项功能，已完成 ${Number(payload.completed) || 0} 项。</p>
+          <div class="development-progress-track">
+            <i style="width:${Math.max(0, Math.min(100, progressPercent))}%"></i>
+          </div>
+          <div class="development-summary-meta">
+            <span>${escapeHtml(payload.source || "功能开发待办.md")}</span>
+            <span>${escapeHtml(formatDevelopmentUpdatedAt(payload.updated_at))}</span>
+          </div>
+        </div>
+        <div class="development-metrics">
+          <div><strong>${Number(payload.completed) || 0}</strong><span>已完成</span></div>
+          <div><strong>${Number(payload.pending) || 0}</strong><span>待开发</span></div>
+          <div><strong>${Number(payload.total) || 0}</strong><span>总计</span></div>
+        </div>
+      </div>
+      <div class="development-list">${itemMarkup}</div>
+    `;
+  }
+
+  async function loadDevelopmentProgress() {
+    const output = document.getElementById("development-progress-result");
+    const button = document.querySelector('[data-api-action="load-development-progress"]');
+    if (!output || !button) return;
+    const originalText = button.textContent;
+    button.disabled = true;
+    button.textContent = "正在汇总…";
+    output.hidden = false;
+    output.innerHTML = '<div class="development-loading"><i></i><span>正在读取功能开发待办…</span></div>';
+    try {
+      const payload = await request("/api/developer/progress");
+      output.innerHTML = developmentProgressMarkup(payload);
+      button.textContent = "刷新开发进度";
+    } catch (error) {
+      output.innerHTML = `
+        <div class="development-error">
+          <strong>暂时无法读取开发进度</strong>
+          <p>${escapeHtml(error.message)}</p>
+        </div>
+      `;
+      button.textContent = originalText;
+    } finally {
+      button.disabled = false;
+    }
+  }
+
   async function refreshDatabaseState() {
     try {
       const payload = await request("/api/settings/databases");
@@ -4593,6 +4676,8 @@
         await renderMaterialsPage();
       } else if (pageKey === "material-detail") {
         await renderMaterialDetailPage();
+      } else if (pageKey === "developer") {
+        // 开发进度由用户点击后按需读取，避免把文档状态写死在页面里。
       } else if (pageKey !== "settings") {
         const project = await resolveCurrentProject();
         applyProjectHeader(project, pageKey);
@@ -4669,6 +4754,11 @@
 
     const button = event.target.closest("[data-api-action]");
     if (!button || button.disabled) return;
+
+    if (button.dataset.apiAction === "load-development-progress") {
+      await loadDevelopmentProgress();
+      return;
+    }
 
     if (button.dataset.apiAction === "open-material-modal") {
       openMaterialCreateModal();

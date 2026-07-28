@@ -7,7 +7,9 @@ ASGI 入口 ``app`` 由 ``backend.app.main`` 单独持有。
 from __future__ import annotations
 
 import io
+import re
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -25,6 +27,53 @@ from . import character_database
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DATA_ROOT = PROJECT_ROOT / "data"
 FRONTEND_ROOT = PROJECT_ROOT / "design" / "ui-preview"
+DEVELOPMENT_TODO_PATH = PROJECT_ROOT / "功能开发待办.md"
+DEVELOPMENT_TODO_PATTERN = re.compile(
+    r"^\s*-\s*\[(?P<state>[ xX])\]\s*(?P<body>.+?)\s*$"
+)
+
+
+def read_development_progress(todo_path: Path) -> dict[str, object]:
+    """Read the project checklist without turning progress into hard-coded UI data."""
+    content = todo_path.read_text(encoding="utf-8-sig")
+    items: list[dict[str, object]] = []
+    for line in content.splitlines():
+        match = DEVELOPMENT_TODO_PATTERN.match(line)
+        if not match:
+            continue
+        body = match.group("body").strip()
+        title, separator, description = body.partition("：")
+        if not separator:
+            title, separator, description = body.partition(":")
+        title = title.strip()
+        description = description.strip() if separator else ""
+        completed = match.group("state").lower() == "x"
+        items.append(
+            {
+                "id": f"feature-{len(items) + 1}",
+                "title": title,
+                "description": description,
+                "status": "completed" if completed else "pending",
+                "completed": completed,
+            }
+        )
+
+    completed_count = sum(1 for item in items if item["completed"])
+    total = len(items)
+    progress_percent = round((completed_count / total) * 100, 1) if total else 0.0
+    updated_at = datetime.fromtimestamp(
+        todo_path.stat().st_mtime,
+        tz=timezone.utc,
+    ).isoformat()
+    return {
+        "source": todo_path.name,
+        "updated_at": updated_at,
+        "total": total,
+        "completed": completed_count,
+        "pending": total - completed_count,
+        "progress_percent": progress_percent,
+        "items": items,
+    }
 
 
 class ActivateDatabaseRequest(BaseModel):
@@ -330,10 +379,11 @@ def create_app(
     data_root: Path | None = None,
     environment: Literal["production", "test"] = "production",
     locked_environment: Literal["production", "test"] | None = None,
+    development_todo_path: Path | None = None,
 ) -> FastAPI:
     app = FastAPI(
         title="Atelier API",
-        version="0.3.0",
+        version="0.4.0",
         docs_url="/api/docs",
         redoc_url=None,
     )
@@ -343,6 +393,9 @@ def create_app(
         locked_environment=locked_environment,
     )
     app.state.database_manager = manager
+    resolved_development_todo_path = (
+        development_todo_path or DEVELOPMENT_TODO_PATH
+    ).resolve()
 
     app.add_middleware(
         CORSMiddleware,
@@ -360,6 +413,21 @@ def create_app(
             "database_environment": manager.active_environment,
             "database_locked": manager.locked_environment is not None,
         }
+
+    @app.get("/api/developer/progress")
+    def developer_progress() -> dict[str, object]:
+        try:
+            return read_development_progress(resolved_development_todo_path)
+        except FileNotFoundError as error:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="功能开发待办文档不存在，暂时无法汇总开发进度。",
+            ) from error
+        except OSError as error:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="功能开发待办文档读取失败。",
+            ) from error
 
     @app.get("/api/settings/databases")
     def database_settings() -> dict[str, object]:
