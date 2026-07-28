@@ -152,6 +152,7 @@ class DatabaseManager:
                     id TEXT PRIMARY KEY,
                     chapter_id TEXT NOT NULL,
                     name TEXT NOT NULL,
+                    scene_type TEXT NOT NULL DEFAULT 'content',
                     sort_order INTEGER NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
@@ -242,6 +243,8 @@ class DatabaseManager:
             )
             # Migrate legacy tables if they exist (pre-v0.1.7 schema)
             self._migrate_legacy_character_schema(connection)
+            # Add scene_type column to large_scenes for pre-v0.2.0 databases
+            self._migrate_large_scenes_scene_type(connection)
             marker = connection.execute(
                 "SELECT value FROM atelier_meta WHERE key = 'environment'"
             ).fetchone()
@@ -418,6 +421,19 @@ class DatabaseManager:
                 (row["id"], row["variant_id"], row["project_spec_id"], row["prompt"], row["lora_name"],
                  row["lora_weight"], row["model_override"], row["notes"], row["created_at"], row["updated_at"]),
             )
+
+    def _migrate_large_scenes_scene_type(self, connection) -> None:
+        """Add scene_type column to large_scenes for pre-v0.2.0 databases.
+
+        Uses PRAGMA table_info to check existence. Existing rows get 'content'.
+        Does not touch data beyond setting the default.
+        """
+        cols = [row["name"] for row in connection.execute("PRAGMA table_info(large_scenes)").fetchall()]
+        if "scene_type" in cols:
+            return
+        connection.execute(
+            "ALTER TABLE large_scenes ADD COLUMN scene_type TEXT NOT NULL DEFAULT 'content'"
+        )
 
     def activate(self, environment: DatabaseEnvironment) -> None:
         target_environment = self._validate_environment(environment)
@@ -667,7 +683,7 @@ class DatabaseManager:
         with self.connection(target_environment) as connection:
             rows = connection.execute(
                 """
-                SELECT id, chapter_id, name, sort_order, created_at, updated_at
+                SELECT id, chapter_id, name, scene_type, sort_order, created_at, updated_at
                 FROM large_scenes
                 WHERE chapter_id = ?
                 ORDER BY sort_order ASC, created_at ASC
@@ -680,10 +696,13 @@ class DatabaseManager:
         self,
         chapter_id: str,
         name: str,
+        scene_type: str = "content",
         environment: DatabaseEnvironment | None = None,
     ) -> dict[str, object]:
         """Create a large scene at the end of a chapter's ordered scene list."""
         target_environment = environment or self._active_environment
+        if scene_type not in ("content", "transition"):
+            raise ValueError("大场景类型必须是 content 或 transition。")
         clean_name = " ".join(name.split())
         if not clean_name:
             raise ValueError("大场景名称不能为空。")
@@ -696,6 +715,7 @@ class DatabaseManager:
             "id": str(uuid4()),
             "chapter_id": chapter_id,
             "name": clean_name,
+            "scene_type": scene_type,
             "created_at": now,
             "updated_at": now,
         }
@@ -713,10 +733,10 @@ class DatabaseManager:
                 connection.execute(
                     """
                     INSERT INTO large_scenes(
-                        id, chapter_id, name, sort_order, created_at, updated_at
+                        id, chapter_id, name, scene_type, sort_order, created_at, updated_at
                     )
                     VALUES(
-                        :id, :chapter_id, :name, :sort_order, :created_at, :updated_at
+                        :id, :chapter_id, :name, :scene_type, :sort_order, :created_at, :updated_at
                     )
                     """,
                     large_scene,
@@ -734,7 +754,7 @@ class DatabaseManager:
         with self.connection(target_environment) as connection:
             row = connection.execute(
                 """
-                SELECT id, chapter_id, name, sort_order, created_at, updated_at
+                SELECT id, chapter_id, name, scene_type, sort_order, created_at, updated_at
                 FROM large_scenes
                 WHERE id = ?
                 """,
@@ -742,37 +762,257 @@ class DatabaseManager:
             ).fetchone()
         return dict(row) if row else None
 
+    def update_large_scene(
+        self,
+        large_scene_id: str,
+        *,
+        name: str | None = None,
+        scene_type: str | None = None,
+        chapter_id: str | None = None,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        """Update name, scene_type, and/or chapter_id of a large scene.
+
+        - At least one of name/scene_type/chapter_id must be provided.
+        - When chapter_id changes, scene is moved to end of target chapter and
+          both source and target chapters are renumbered within this transaction.
+        - Same-project constraint and same-name conflict are enforced.
+        """
+        target_environment = environment or self._active_environment
+        if name is None and scene_type is None and chapter_id is None:
+            raise ValueError("至少需要提供一个更新字段。")
+        if scene_type is not None and scene_type not in ("content", "transition"):
+            raise ValueError("大场景类型必须是 content 或 transition。")
+        clean_name = " ".join(name.split()) if name is not None else None
+        if clean_name is not None:
+            if not clean_name:
+                raise ValueError("大场景名称不能为空。")
+            if len(clean_name) > 80:
+                raise ValueError("大场景名称不能超过 80 个字符。")
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            with self._lock, self.connection(target_environment) as connection:
+                existing = connection.execute(
+                    """
+                    SELECT id, chapter_id, name, scene_type, sort_order
+                    FROM large_scenes WHERE id = ?
+                    """,
+                    (large_scene_id,),
+                ).fetchone()
+                if existing is None:
+                    raise ValueError("大场景不存在。")
+                source_chapter_id = existing["chapter_id"]
+                target_chapter_id = chapter_id if chapter_id is not None else source_chapter_id
+
+                # Validate target chapter existence and same-project constraint
+                if chapter_id is not None:
+                    src_ch = connection.execute(
+                        "SELECT project_id FROM chapters WHERE id = ?",
+                        (source_chapter_id,),
+                    ).fetchone()
+                    tgt_ch = connection.execute(
+                        "SELECT project_id FROM chapters WHERE id = ?",
+                        (target_chapter_id,),
+                    ).fetchone()
+                    if tgt_ch is None:
+                        raise ValueError("目标章节不存在。")
+                    if src_ch["project_id"] != tgt_ch["project_id"]:
+                        raise ValueError("目标章节与原章节不属于同一项目。")
+
+                # Validate name uniqueness in target chapter
+                effective_name = clean_name if clean_name is not None else existing["name"]
+                dup = connection.execute(
+                    """
+                    SELECT id FROM large_scenes
+                    WHERE chapter_id = ? AND name = ? AND id != ?
+                    """,
+                    (target_chapter_id, effective_name, large_scene_id),
+                ).fetchone()
+                if dup is not None:
+                    raise ValueError("目标章节下已经存在同名大场景。")
+
+                # Update scalar fields
+                sets = []
+                params: list[object] = []
+                if clean_name is not None:
+                    sets.append("name = ?")
+                    params.append(clean_name)
+                if scene_type is not None:
+                    sets.append("scene_type = ?")
+                    params.append(scene_type)
+                if chapter_id is not None and chapter_id != source_chapter_id:
+                    # Append to end of target chapter
+                    max_row = connection.execute(
+                        "SELECT COALESCE(MAX(sort_order), 0) AS m FROM large_scenes WHERE chapter_id = ?",
+                        (target_chapter_id,),
+                    ).fetchone()
+                    sets.append("chapter_id = ?")
+                    params.append(target_chapter_id)
+                    sets.append("sort_order = ?")
+                    params.append(int(max_row["m"]) + 1)
+                sets.append("updated_at = ?")
+                params.append(now)
+                params.append(large_scene_id)
+                connection.execute(
+                    f"UPDATE large_scenes SET {', '.join(sets)} WHERE id = ?",
+                    params,
+                )
+
+                # Renumber affected chapters
+                chapters_to_renumber = {source_chapter_id}
+                if chapter_id is not None and chapter_id != source_chapter_id:
+                    chapters_to_renumber.add(target_chapter_id)
+                for ch_id in chapters_to_renumber:
+                    rows = connection.execute(
+                        "SELECT id FROM large_scenes WHERE chapter_id = ? ORDER BY sort_order ASC, created_at ASC",
+                        (ch_id,),
+                    ).fetchall()
+                    for idx, r in enumerate(rows, start=1):
+                        connection.execute(
+                            "UPDATE large_scenes SET sort_order = ? WHERE id = ?",
+                            (idx, r["id"]),
+                        )
+        except sqlite3.IntegrityError as error:
+            raise ValueError("该章节下已经存在同名大场景。") from error
+        result = self.get_large_scene(large_scene_id, target_environment)
+        if result is None:
+            raise ValueError("大场景不存在。")
+        return result
+
     def rename_large_scene(
         self,
         large_scene_id: str,
         name: str,
         environment: DatabaseEnvironment | None = None,
     ) -> dict[str, object]:
+        """Legacy rename-only method. Kept for backward compatibility with tests."""
+        return self.update_large_scene(
+            large_scene_id, name=name, environment=environment
+        )
+
+    def move_large_scene(
+        self,
+        large_scene_id: str,
+        target_chapter_id: str,
+        target_sort_order: int,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        """Move a large scene to a specific position in a chapter.
+
+        - Validates same-project constraint and name conflict.
+        - target_sort_order < 1 is treated as 1; > target length is appended to end.
+        - Renumbers source and target chapters in the same transaction.
+        - Returns dict with source/target chapter ids and their final items.
+        """
         target_environment = environment or self._active_environment
-        clean_name = " ".join(name.split())
-        if not clean_name:
-            raise ValueError("大场景名称不能为空。")
-        if len(clean_name) > 80:
-            raise ValueError("大场景名称不能超过 80 个字符。")
+        if target_sort_order < 1:
+            target_sort_order = 1
         now = datetime.now(timezone.utc).isoformat()
-        try:
-            with self._lock, self.connection(target_environment) as connection:
-                cursor = connection.execute(
-                    """
-                    UPDATE large_scenes
-                    SET name = ?, updated_at = ?
-                    WHERE id = ?
-                    """,
-                    (clean_name, now, large_scene_id),
+        with self._lock, self.connection(target_environment) as connection:
+            existing = connection.execute(
+                "SELECT id, chapter_id, name, scene_type, sort_order FROM large_scenes WHERE id = ?",
+                (large_scene_id,),
+            ).fetchone()
+            if existing is None:
+                raise ValueError("大场景不存在。")
+            source_chapter_id = existing["chapter_id"]
+
+            src_ch = connection.execute(
+                "SELECT project_id FROM chapters WHERE id = ?",
+                (source_chapter_id,),
+            ).fetchone()
+            tgt_ch = connection.execute(
+                "SELECT project_id FROM chapters WHERE id = ?",
+                (target_chapter_id,),
+            ).fetchone()
+            if tgt_ch is None:
+                raise ValueError("目标章节不存在。")
+            if src_ch is None:
+                raise ValueError("原章节不存在。")
+            if src_ch["project_id"] != tgt_ch["project_id"]:
+                raise ValueError("目标章节与原章节不属于同一项目。")
+
+            # Name conflict check (excluding self)
+            dup = connection.execute(
+                "SELECT id FROM large_scenes WHERE chapter_id = ? AND name = ? AND id != ?",
+                (target_chapter_id, existing["name"], large_scene_id),
+            ).fetchone()
+            if dup is not None:
+                raise ValueError("目标章节下已经存在同名大场景。")
+
+            # If cross-chapter, remove from source ordering first
+            if source_chapter_id != target_chapter_id:
+                connection.execute(
+                    "UPDATE large_scenes SET chapter_id = ?, updated_at = ? WHERE id = ?",
+                    (target_chapter_id, now, large_scene_id),
                 )
-                if cursor.rowcount == 0:
-                    raise ValueError("大场景不存在。")
-        except sqlite3.IntegrityError as error:
-            raise ValueError("该章节下已经存在同名大场景。") from error
-        large_scene = self.get_large_scene(large_scene_id, target_environment)
-        if large_scene is None:
-            raise ValueError("大场景不存在。")
-        return large_scene
+
+            # Build target ordering
+            target_rows = connection.execute(
+                """
+                SELECT id FROM large_scenes
+                WHERE chapter_id = ? AND id != ?
+                ORDER BY sort_order ASC, created_at ASC
+                """,
+                (target_chapter_id, large_scene_id),
+            ).fetchall()
+            target_ids = [r["id"] for r in target_rows]
+            if target_sort_order > len(target_ids) + 1:
+                target_sort_order = len(target_ids) + 1
+            target_ids.insert(target_sort_order - 1, large_scene_id)
+            for idx, sid in enumerate(target_ids, start=1):
+                connection.execute(
+                    "UPDATE large_scenes SET sort_order = ?, updated_at = ? WHERE id = ?",
+                    (idx, now, sid),
+                )
+
+            # Renumber source chapter if cross-chapter
+            if source_chapter_id != target_chapter_id:
+                src_rows = connection.execute(
+                    "SELECT id FROM large_scenes WHERE chapter_id = ? ORDER BY sort_order ASC, created_at ASC",
+                    (source_chapter_id,),
+                ).fetchall()
+                for idx, r in enumerate(src_rows, start=1):
+                    connection.execute(
+                        "UPDATE large_scenes SET sort_order = ? WHERE id = ?",
+                        (idx, r["id"]),
+                    )
+
+            # Fetch final state
+            moved = connection.execute(
+                """
+                SELECT id, chapter_id, name, scene_type, sort_order, created_at, updated_at
+                FROM large_scenes WHERE id = ?
+                """,
+                (large_scene_id,),
+            ).fetchone()
+            source_items = [
+                dict(r) for r in connection.execute(
+                    """
+                    SELECT id, chapter_id, name, scene_type, sort_order, created_at, updated_at
+                    FROM large_scenes WHERE chapter_id = ?
+                    ORDER BY sort_order ASC, created_at ASC
+                    """,
+                    (source_chapter_id,),
+                ).fetchall()
+            ]
+            target_items = [
+                dict(r) for r in connection.execute(
+                    """
+                    SELECT id, chapter_id, name, scene_type, sort_order, created_at, updated_at
+                    FROM large_scenes WHERE chapter_id = ?
+                    ORDER BY sort_order ASC, created_at ASC
+                    """,
+                    (target_chapter_id,),
+                ).fetchall()
+            ]
+        return {
+            "large_scene": dict(moved),
+            "source_chapter_id": source_chapter_id,
+            "target_chapter_id": target_chapter_id,
+            "source_items": source_items,
+            "target_items": target_items,
+        }
 
     def delete_large_scene(
         self,
@@ -783,7 +1023,7 @@ class DatabaseManager:
         with self._lock, self.connection(target_environment) as connection:
             large_scene = connection.execute(
                 """
-                SELECT id, chapter_id, name, sort_order, created_at, updated_at
+                SELECT id, chapter_id, name, scene_type, sort_order, created_at, updated_at
                 FROM large_scenes
                 WHERE id = ?
                 """,
@@ -791,9 +1031,20 @@ class DatabaseManager:
             ).fetchone()
             if large_scene is None:
                 raise ValueError("大场景不存在。")
+            chapter_id = large_scene["chapter_id"]
             connection.execute(
                 "DELETE FROM large_scenes WHERE id = ?", (large_scene_id,)
             )
+            # Renumber remaining scenes in the chapter to be contiguous 1..N
+            rows = connection.execute(
+                "SELECT id FROM large_scenes WHERE chapter_id = ? ORDER BY sort_order ASC, created_at ASC",
+                (chapter_id,),
+            ).fetchall()
+            for idx, r in enumerate(rows, start=1):
+                connection.execute(
+                    "UPDATE large_scenes SET sort_order = ? WHERE id = ?",
+                    (idx, r["id"]),
+                )
         return dict(large_scene)
 
     # ── Characters ──────────────────────────────────────────────

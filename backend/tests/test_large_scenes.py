@@ -203,5 +203,342 @@ class LargeSceneDatabaseTests(unittest.TestCase):
             )
 
 
+class LargeSceneOrganizeApiTests(unittest.TestCase):
+    """大场景组织功能测试：scene_type 字段、跨章节移动、重排序、安全迁移。"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.app = create_app(
+            data_root=Path(self._tmp.name),
+            environment="test",
+            locked_environment="test",
+        )
+        self.client = TestClient(self.app)
+        self.manager = self.app.state.database_manager
+        self.project = self.manager.create_project("组织测试项目")
+        self.chapter_a = self.manager.create_chapter(
+            str(self.project["id"]), "沙滩章"
+        )
+        self.chapter_b = self.manager.create_chapter(
+            str(self.project["id"]), "更衣章"
+        )
+
+    def _scene(self, chapter_id: str, name: str, scene_type: str = "content"):
+        return self.manager.create_large_scene(
+            str(chapter_id), name, scene_type
+        )
+
+    # ── 4.1 scene_type 字段与迁移 ──────────────────────────────
+
+    def test_create_with_scene_type_content_by_default(self) -> None:
+        scene = self._scene(str(self.chapter_a["id"]), "内容1")
+        self.assertEqual(scene["scene_type"], "content")
+
+    def test_create_with_scene_type_transition(self) -> None:
+        scene = self._scene(
+            str(self.chapter_a["id"]), "过渡1", scene_type="transition"
+        )
+        self.assertEqual(scene["scene_type"], "transition")
+
+    def test_create_with_invalid_scene_type_returns_422(self) -> None:
+        response = self.client.post(
+            f"/api/chapters/{self.chapter_a['id']}/large-scenes",
+            json={"name": "非法", "scene_type": "invalid"},
+        )
+        self.assertEqual(response.status_code, 422)
+
+    def test_list_returns_scene_type(self) -> None:
+        self._scene(str(self.chapter_a["id"]), "内容1", "content")
+        self._scene(str(self.chapter_a["id"]), "过渡1", "transition")
+        items = self.client.get(
+            f"/api/chapters/{self.chapter_a['id']}/large-scenes"
+        ).json()["items"]
+        self.assertEqual([i["scene_type"] for i in items], ["content", "transition"])
+
+    def test_legacy_db_migration_adds_scene_type_with_default_content(self) -> None:
+        # Simulate pre-v0.2.0 schema: drop & recreate large_scenes without scene_type
+        with self.manager.connection("test") as conn:
+            conn.execute("DROP TABLE large_scenes")
+            conn.execute(
+                """
+                CREATE TABLE large_scenes (
+                    id TEXT PRIMARY KEY,
+                    chapter_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    sort_order INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (chapter_id) REFERENCES chapters(id) ON DELETE CASCADE,
+                    UNIQUE (chapter_id, name)
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO large_scenes(id, chapter_id, name, sort_order, created_at, updated_at) "
+                "VALUES('legacy-1', ?, '旧场景', 1, '2024-01-01', '2024-01-01')",
+                (str(self.chapter_a["id"]),),
+            )
+        # Reinitialize — should auto-add scene_type column back with default 'content'
+        self.manager.initialize("test")
+        with self.manager.connection("test") as conn:
+            cols = [r["name"] for r in conn.execute("PRAGMA table_info(large_scenes)").fetchall()]
+            self.assertIn("scene_type", cols)
+            row = conn.execute("SELECT scene_type FROM large_scenes WHERE id = 'legacy-1'").fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row["scene_type"], "content")
+
+    # ── 5.2 PATCH 三字段可选 update ────────────────────────────
+
+    def test_update_name_only_preserves_sort_and_type(self) -> None:
+        scene = self._scene(str(self.chapter_a["id"]), "旧名", "transition")
+        response = self.client.patch(
+            f"/api/large-scenes/{scene['id']}", json={"name": "新名"}
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()["large_scene"]
+        self.assertEqual(body["name"], "新名")
+        self.assertEqual(body["scene_type"], "transition")
+        self.assertEqual(body["sort_order"], 1)
+
+    def test_update_scene_type_only(self) -> None:
+        scene = self._scene(str(self.chapter_a["id"]), "场景1", "content")
+        response = self.client.patch(
+            f"/api/large-scenes/{scene['id']}", json={"scene_type": "transition"}
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["large_scene"]["scene_type"], "transition")
+
+    def test_update_chapter_moves_to_end_of_target(self) -> None:
+        a1 = self._scene(str(self.chapter_a["id"]), "A1")
+        a2 = self._scene(str(self.chapter_a["id"]), "A2")
+        b1 = self._scene(str(self.chapter_b["id"]), "B1")
+        response = self.client.patch(
+            f"/api/large-scenes/{a1['id']}",
+            json={"chapter_id": str(self.chapter_b["id"])},
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()["large_scene"]
+        self.assertEqual(body["chapter_id"], self.chapter_b["id"])
+        self.assertEqual(body["sort_order"], 2)  # appended after B1
+        # Source chapter renumbered
+        src = self.manager.list_large_scenes(str(self.chapter_a["id"]))
+        self.assertEqual([s["sort_order"] for s in src], [1])
+        self.assertEqual(src[0]["id"], a2["id"])
+
+    def test_update_to_missing_chapter_returns_404(self) -> None:
+        scene = self._scene(str(self.chapter_a["id"]), "场景1")
+        response = self.client.patch(
+            f"/api/large-scenes/{scene['id']}", json={"chapter_id": "missing"}
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_update_to_same_name_in_target_rejected(self) -> None:
+        self._scene(str(self.chapter_a["id"]), "重名场景")
+        scene_b = self._scene(str(self.chapter_b["id"]), "B1")
+        response = self.client.patch(
+            f"/api/large-scenes/{scene_b['id']}",
+            json={
+                "chapter_id": str(self.chapter_a["id"]),
+                "name": "重名场景",
+            },
+        )
+        self.assertEqual(response.status_code, 409)
+        # Data unchanged
+        self.assertEqual(
+            len(self.manager.list_large_scenes(str(self.chapter_b["id"]))), 1
+        )
+
+    def test_update_at_least_one_field_required(self) -> None:
+        scene = self._scene(str(self.chapter_a["id"]), "场景1")
+        response = self.client.patch(
+            f"/api/large-scenes/{scene['id']}", json={}
+        )
+        self.assertEqual(response.status_code, 422)
+
+    # ── 5.3 /move 接口 ────────────────────────────────────────
+
+    def test_move_within_chapter_forward(self) -> None:
+        a = self._scene(str(self.chapter_a["id"]), "A")
+        b = self._scene(str(self.chapter_a["id"]), "B")
+        c = self._scene(str(self.chapter_a["id"]), "C")
+        # Move A to position 3
+        response = self.client.post(
+            f"/api/large-scenes/{a['id']}/move",
+            json={
+                "target_chapter_id": str(self.chapter_a["id"]),
+                "target_sort_order": 3,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(
+            [i["name"] for i in body["target_items"]], ["B", "C", "A"]
+        )
+        self.assertEqual(
+            [i["sort_order"] for i in body["target_items"]], [1, 2, 3]
+        )
+
+    def test_move_within_chapter_backward(self) -> None:
+        a = self._scene(str(self.chapter_a["id"]), "A")
+        b = self._scene(str(self.chapter_a["id"]), "B")
+        c = self._scene(str(self.chapter_a["id"]), "C")
+        # Move C to position 1
+        response = self.client.post(
+            f"/api/large-scenes/{c['id']}/move",
+            json={
+                "target_chapter_id": str(self.chapter_a["id"]),
+                "target_sort_order": 1,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [i["name"] for i in response.json()["target_items"]],
+            ["C", "A", "B"],
+        )
+
+    def test_move_cross_chapter_to_empty_chapter(self) -> None:
+        a = self._scene(str(self.chapter_a["id"]), "A")
+        response = self.client.post(
+            f"/api/large-scenes/{a['id']}/move",
+            json={
+                "target_chapter_id": str(self.chapter_b["id"]),
+                "target_sort_order": 1,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["source_chapter_id"], self.chapter_a["id"])
+        self.assertEqual(body["target_chapter_id"], self.chapter_b["id"])
+        self.assertEqual(len(body["source_items"]), 0)
+        self.assertEqual(len(body["target_items"]), 1)
+        self.assertEqual(body["target_items"][0]["id"], a["id"])
+        self.assertEqual(body["target_items"][0]["sort_order"], 1)
+
+    def test_move_cross_chapter_to_specific_position(self) -> None:
+        a = self._scene(str(self.chapter_a["id"]), "A")
+        b1 = self._scene(str(self.chapter_b["id"]), "B1")
+        b2 = self._scene(str(self.chapter_b["id"]), "B2")
+        response = self.client.post(
+            f"/api/large-scenes/{a['id']}/move",
+            json={
+                "target_chapter_id": str(self.chapter_b["id"]),
+                "target_sort_order": 2,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [i["name"] for i in response.json()["target_items"]],
+            ["B1", "A", "B2"],
+        )
+
+    def test_move_target_sort_below_one_treated_as_one(self) -> None:
+        # target_sort_order is validated by pydantic ge=1, so 0 returns 422
+        # but backend clamps internally if somehow reached
+        a = self._scene(str(self.chapter_a["id"]), "A")
+        b = self._scene(str(self.chapter_a["id"]), "B")
+        # Use manager directly to test clamp (since API rejects <1 at validation)
+        result = self.manager.move_large_scene(
+            str(a["id"]), str(self.chapter_a["id"]), 0
+        )
+        self.assertEqual(
+            [i["name"] for i in result["target_items"]], ["A", "B"]
+        )
+
+    def test_move_target_sort_exceeds_length_appends_to_end(self) -> None:
+        a = self._scene(str(self.chapter_a["id"]), "A")
+        b = self._scene(str(self.chapter_a["id"]), "B")
+        response = self.client.post(
+            f"/api/large-scenes/{a['id']}/move",
+            json={
+                "target_chapter_id": str(self.chapter_a["id"]),
+                "target_sort_order": 999,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [i["name"] for i in response.json()["target_items"]], ["B", "A"]
+        )
+
+    def test_move_cross_project_rejected(self) -> None:
+        other_project = self.manager.create_project("其他项目")
+        other_chapter = self.manager.create_chapter(
+            str(other_project["id"]), "其他章"
+        )
+        a = self._scene(str(self.chapter_a["id"]), "A")
+        response = self.client.post(
+            f"/api/large-scenes/{a['id']}/move",
+            json={
+                "target_chapter_id": str(other_chapter["id"]),
+                "target_sort_order": 1,
+            },
+        )
+        self.assertEqual(response.status_code, 409)
+        # Data unchanged
+        self.assertEqual(
+            len(self.manager.list_large_scenes(str(self.chapter_a["id"]))), 1
+        )
+
+    def test_move_to_missing_target_chapter_returns_404(self) -> None:
+        a = self._scene(str(self.chapter_a["id"]), "A")
+        response = self.client.post(
+            f"/api/large-scenes/{a['id']}/move",
+            json={"target_chapter_id": "missing", "target_sort_order": 1},
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_move_missing_large_scene_returns_404(self) -> None:
+        response = self.client.post(
+            "/api/large-scenes/missing/move",
+            json={
+                "target_chapter_id": str(self.chapter_a["id"]),
+                "target_sort_order": 1,
+            },
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_move_same_name_in_target_rolls_back(self) -> None:
+        a = self._scene(str(self.chapter_a["id"]), "重名")
+        self._scene(str(self.chapter_b["id"]), "重名")
+        response = self.client.post(
+            f"/api/large-scenes/{a['id']}/move",
+            json={
+                "target_chapter_id": str(self.chapter_b["id"]),
+                "target_sort_order": 1,
+            },
+        )
+        self.assertEqual(response.status_code, 409)
+        # Source unchanged, target unchanged
+        self.assertEqual(
+            len(self.manager.list_large_scenes(str(self.chapter_a["id"]))), 1
+        )
+        self.assertEqual(
+            len(self.manager.list_large_scenes(str(self.chapter_b["id"]))), 1
+        )
+
+    # ── 删除后重排 ───────────────────────────────────────────
+
+    def test_delete_renumbers_remaining_scenes(self) -> None:
+        a = self._scene(str(self.chapter_a["id"]), "A")
+        b = self._scene(str(self.chapter_a["id"]), "B")
+        c = self._scene(str(self.chapter_a["id"]), "C")
+        # Delete B (middle)
+        self.client.delete(f"/api/large-scenes/{b['id']}")
+        remaining = self.manager.list_large_scenes(str(self.chapter_a["id"]))
+        self.assertEqual([s["name"] for s in remaining], ["A", "C"])
+        self.assertEqual([s["sort_order"] for s in remaining], [1, 2])
+
+    # ── 双数据库隔离 ─────────────────────────────────────────
+
+    def test_test_db_writes_do_not_affect_production(self) -> None:
+        self._scene(str(self.chapter_a["id"]), "测试场景")
+        self.assertEqual(
+            len(self.manager.list_large_scenes(
+                str(self.chapter_a["id"]), "production"
+            )),
+            0,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

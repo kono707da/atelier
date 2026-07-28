@@ -739,6 +739,72 @@ button {
   font-size: 8px;
 }
 
+/* 大场景类型徽标 — 内容段突出（蓝），过渡段低调（灰） */
+.large-scene-type-badge {
+  display: inline-block;
+  margin-top: 6px;
+  padding: 2px 8px;
+  border-radius: 99px;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+}
+
+.large-scene-type-badge[data-scene-type="content"] {
+  background: rgba(111, 126, 213, 0.18);
+  color: #5463c4;
+}
+
+.large-scene-type-badge[data-scene-type="transition"] {
+  background: rgba(144, 152, 168, 0.18);
+  color: #6b7280;
+}
+
+/* 拖动把手 — 顶部横纹 */
+.large-scene-drag-handle {
+  position: absolute;
+  top: 0;
+  left: 12px;
+  right: 12px;
+  height: 6px;
+  border-radius: 99px 99px 0 0;
+  background: linear-gradient(90deg, #c4cbea 0%, #c4cbea 30%, transparent 30%, transparent 70%, #c4cbea 70%, #c4cbea 100%);
+  background-size: 12px 6px;
+  cursor: grab;
+  z-index: 2;
+}
+
+.large-scene-drag-handle:hover {
+  background: linear-gradient(90deg, #8a9bed 0%, #8a9bed 30%, transparent 30%, transparent 70%, #8a9bed 70%, #8a9bed 100%);
+  background-size: 12px 6px;
+}
+
+.large-scene-drag-handle:active {
+  cursor: grabbing;
+}
+
+/* 拖动中状态 */
+.large-scene-block.dragging {
+  opacity: 0.4;
+  cursor: grabbing;
+}
+
+/* 拖放区域高亮 */
+.large-scene-lane[data-drop-zone] {
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+/* 虚线占位指示器 */
+.large-scene-drop-indicator {
+  width: 168px;
+  min-height: 126px;
+  margin-right: 32px;
+  border: 2px dashed #6f7ed5;
+  border-radius: 17px;
+  background: rgba(111, 126, 213, 0.08);
+  flex-shrink: 0;
+}
+
 .structure-context-menu {
   position: fixed;
   z-index: 1500;
@@ -1915,13 +1981,54 @@ button {
 }
 
 .character-database-results {
-  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+  overflow: hidden;
+}
+
+.character-database-scroll {
+  max-height: 70vh;
+  overflow: auto;
+  /* clip-path 强制把滚动条也裁剪成圆角，避免遮挡外层圆角 */
+  clip-path: inset(0 round 10px);
+}
+
+/* WebKit 滚动条样式 */
+.character-database-scroll::-webkit-scrollbar {
+  width: 8px;
+}
+.character-database-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.character-database-scroll::-webkit-scrollbar-thumb {
+  background: #c1c7d4;
+  border-radius: 4px;
+}
+.character-database-scroll::-webkit-scrollbar-thumb:hover {
+  background: #a8b0c0;
 }
 
 .character-database-table {
   width: 100%;
-  border-collapse: collapse;
+  border-collapse: separate;
+  border-spacing: 0;
   font-size: 11px;
+}
+
+.character-database-table thead {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #f4f6fa;
+}
+
+.character-database-table thead th:first-child {
+  border-top-left-radius: 10px;
+}
+
+.character-database-table thead th:last-child {
+  border-top-right-radius: 10px;
 }
 
 .character-database-table th {
@@ -1942,6 +2049,10 @@ button {
   vertical-align: top;
   word-break: break-word;
   line-height: 1.5;
+}
+
+.character-database-table tbody tr:last-child td {
+  border-bottom: none;
 }
 
 .character-database-table tbody tr:hover {
@@ -1971,17 +2082,24 @@ button {
   font-size: 12px;
 }
 
-.character-database-pagination {
+.character-database-sentinel {
+  min-height: 32px;
   display: flex;
   align-items: center;
-  gap: 10px;
   justify-content: center;
-  margin-top: 14px;
 }
 
-.character-database-page-info {
-  color: #687186;
+.character-database-loading-more,
+.character-database-end,
+.character-database-loading-error {
+  padding: 12px;
+  text-align: center;
+  color: #8c94a5;
   font-size: 11px;
+}
+
+.character-database-loading-error {
+  color: #c33;
 }
 
 .atelier-modal.character-detail-modal {
