@@ -43,6 +43,22 @@
     "shot-inspector": "分镜检查器",
   };
 
+  const storyCanvasView = {
+    projectId: "",
+    x: 0,
+    y: 0,
+    scale: 1,
+    pointerId: null,
+    pointerStartX: 0,
+    pointerStartY: 0,
+    viewStartX: 0,
+    viewStartY: 0,
+    persistTimer: null,
+  };
+
+  const STORY_CANVAS_MIN_SCALE = 0.45;
+  const STORY_CANVAS_MAX_SCALE = 1.6;
+
   function formatBytes(bytes) {
     if (!bytes) return "0 KB";
     const units = ["B", "KB", "MB", "GB"];
@@ -289,66 +305,507 @@
     const typeLabel = sceneType === "transition" ? "过渡段" : "内容段";
     return `
       <article
-        class="large-scene-block scene-type-${sceneType}"
+        class="story-block large-scene-block scene-type-${sceneType}"
         data-large-scene-id="${escapeHtml(largeScene.id)}"
         data-chapter-id="${escapeHtml(largeScene.chapter_id)}"
+        data-chapter-name="${escapeHtml(largeScene.chapter_name || "")}"
         data-scene-type="${escapeHtml(sceneType)}"
+        data-sort-order="${escapeHtml(largeScene.sort_order)}"
+        data-inspector-kind="large-scene"
         data-context-menu="large-scene"
         data-name="${escapeHtml(largeScene.name)}"
         draggable="true"
         aria-label="拖动大场景调整顺序或跨章节移动"
       >
-        <div class="large-scene-kicker">大场景 ${String(largeScene.sort_order).padStart(2, "0")}</div>
-        <div class="large-scene-type-badge" data-scene-type="${escapeHtml(sceneType)}">${typeLabel}</div>
-        <div class="large-scene-name">${escapeHtml(largeScene.name)}</div>
-        <div class="large-scene-meta">尚未添加小场景</div>
+        <div class="large-scene-drag-handle" aria-label="拖动大场景调整顺序或跨章节移动" title="拖动以调整顺序"></div>
+        <div class="block-kicker">大场景 ${String(largeScene.sort_order).padStart(2, "0")}</div>
+        <div class="block-title">${escapeHtml(largeScene.name)}</div>
+        <div class="block-meta">尚未添加小场景</div>
+        <div class="block-footer">
+          <span class="large-scene-type-badge" data-scene-type="${escapeHtml(sceneType)}">${typeLabel}</span>
+        </div>
       </article>
     `;
   }
 
   function chapterBlock(chapter) {
     const largeScenes = chapter.large_scenes || [];
-    const addLargeSceneButton = `
-      <button
-        class="btn compact"
-        data-api-action="open-large-scene-modal"
-        data-chapter-id="${escapeHtml(chapter.id)}"
-        data-chapter-name="${escapeHtml(chapter.name)}"
-      >添加大场景</button>
+    const addLargeSceneNode = `
+      <div class="large-scene-add-card story-add-node">
+        <button
+          class="btn compact"
+          data-api-action="open-large-scene-modal"
+          data-chapter-id="${escapeHtml(chapter.id)}"
+          data-chapter-name="${escapeHtml(chapter.name)}"
+        >＋ 大场景</button>
+      </div>
     `;
     return `
-      <section class="real-chapter-section" data-chapter-id="${escapeHtml(chapter.id)}">
+      <section class="story-chapter-group" data-chapter-id="${escapeHtml(chapter.id)}">
         <article
-          class="real-chapter-block"
+          class="story-block chapter real-chapter-block"
           data-context-menu="chapter"
+          data-inspector-kind="chapter"
           data-chapter-id="${escapeHtml(chapter.id)}"
           data-name="${escapeHtml(chapter.name)}"
+          data-sort-order="${escapeHtml(chapter.sort_order)}"
           data-large-scene-count="${largeScenes.length}"
         >
-          <div class="real-chapter-kicker">章节 ${String(chapter.sort_order).padStart(2, "0")}</div>
-          <div class="real-chapter-name">${escapeHtml(chapter.name)}</div>
-          <div class="real-chapter-meta">${largeScenes.length} 个大场景</div>
+          <div class="block-kicker">章节 ${String(chapter.sort_order).padStart(2, "0")}</div>
+          <div class="block-title">${escapeHtml(chapter.name)}</div>
+          <div class="block-meta">${largeScenes.length} 个大场景</div>
         </article>
         <div class="chapter-scene-connector" aria-hidden="true"></div>
-        <div class="large-scene-lane" data-drop-zone data-chapter-id="${escapeHtml(chapter.id)}">
-          ${
-            largeScenes.length
-              ? `
-                <div class="large-scene-track" data-drop-zone data-chapter-id="${escapeHtml(chapter.id)}">
-                  ${largeScenes.map(largeSceneBlock).join("")}
-                  <div class="large-scene-add-card">${addLargeSceneButton}</div>
-                </div>
-              `
-              : `
-                <div class="large-scene-empty" data-drop-zone data-chapter-id="${escapeHtml(chapter.id)}">
-                  <span>这个章节还没有大场景</span>
-                  ${addLargeSceneButton}
-                </div>
-              `
-          }
+        <div
+          class="large-scene-track story-scene-track"
+          data-drop-zone
+          data-chapter-id="${escapeHtml(chapter.id)}"
+        >
+          ${largeScenes.map((largeScene) => largeSceneBlock({
+            ...largeScene,
+            chapter_name: chapter.name,
+          })).join("")}
+          ${addLargeSceneNode}
         </div>
       </section>
     `;
+  }
+
+  function storyCanvasPalette(chapterItems) {
+    const firstChapter = chapterItems[0] || null;
+    return `
+      <section class="panel story-palette-panel">
+        <div class="panel-header">
+          <div>
+            <div class="panel-title">积木与场景包</div>
+            <div class="panel-sub">点击添加到主线</div>
+          </div>
+        </div>
+        <div class="palette-list">
+          <button class="palette-item" type="button" data-api-action="open-chapter-modal">
+            <span class="palette-swatch"></span>
+            <span>章节</span>
+            <span class="palette-item-mark">＋</span>
+          </button>
+          <button
+            class="palette-item"
+            id="story-palette-large-scene"
+            type="button"
+            data-api-action="open-large-scene-modal"
+            data-chapter-id="${firstChapter ? escapeHtml(firstChapter.id) : ""}"
+            data-chapter-name="${firstChapter ? escapeHtml(firstChapter.name) : ""}"
+            ${firstChapter ? "" : "disabled"}
+          >
+            <span class="palette-swatch green"></span>
+            <span>大场景</span>
+            <span class="palette-item-mark">＋</span>
+          </button>
+        </div>
+        <div class="story-palette-note">
+          节点只沿主线排序，拖动大场景可调整顺序或移动到其他章节。
+        </div>
+      </section>
+    `;
+  }
+
+  function storyCanvasInspectorPlaceholder() {
+    return `
+      <section class="panel inspector story-runtime-inspector" id="story-runtime-inspector">
+        <div class="panel-header">
+          <div>
+            <div class="panel-title">未选择节点</div>
+            <div class="panel-sub">在画布中选择章节或大场景</div>
+          </div>
+        </div>
+        <div class="story-inspector-placeholder">
+          <span class="story-inspector-placeholder-icon">⌁</span>
+          <p>选择一个结构节点后，这里会显示真实信息和可用操作。</p>
+        </div>
+      </section>
+    `;
+  }
+
+  function storyCanvasEmptyStage() {
+    return `
+      <div class="story-canvas-empty-node">
+        <span class="story-canvas-empty-icon">CH</span>
+        <strong>主线还是空的</strong>
+        <p>从左侧添加第一个章节。</p>
+        <button class="btn primary" type="button" data-api-action="open-chapter-modal">新建章节</button>
+      </div>
+    `;
+  }
+
+  function storyCanvasWorkspace(chapterItems, chapterTotal, largeSceneTotal) {
+    return `
+      <div class="three-pane story-canvas-three-pane">
+        ${storyCanvasPalette(chapterItems)}
+        <section class="panel story-canvas-center-panel">
+          <div class="toolbar story-canvas-toolbar">
+            <span class="tool active">主线</span>
+            <span class="story-toolbar-count">${chapterTotal} 个章节 · ${largeSceneTotal} 个大场景</span>
+            <span class="spacer"></span>
+            <button class="tool" type="button" data-story-canvas-action="zoom-out" title="缩小画布" aria-label="缩小画布">−</button>
+            <button class="tool story-zoom-label" type="button" data-story-canvas-action="zoom-reset" id="story-canvas-zoom-label" title="恢复 100%">100%</button>
+            <button class="tool" type="button" data-story-canvas-action="zoom-in" title="放大画布" aria-label="放大画布">＋</button>
+            <button class="tool" type="button" data-story-canvas-action="fit">自动整理</button>
+          </div>
+          <div class="canvas real-story-viewport" id="story-canvas-viewport" aria-label="剧本结构画布">
+            <div class="story-canvas-surface" id="story-canvas-surface">
+              <div class="real-story-stack story-runtime-stage">
+                ${
+                  chapterItems.length
+                    ? `<div class="story-runtime-spine" aria-hidden="true"></div>${chapterItems.map(chapterBlock).join("")}`
+                    : storyCanvasEmptyStage()
+                }
+              </div>
+            </div>
+            <div class="story-canvas-hint">拖动空白处移动 · Ctrl/⌘ + 滚轮缩放</div>
+          </div>
+        </section>
+        ${storyCanvasInspectorPlaceholder()}
+      </div>
+    `;
+  }
+
+  function updateStoryCanvasInspector(node) {
+    const inspector = document.getElementById("story-runtime-inspector");
+    if (!inspector || !node) return;
+    const kind = node.dataset.inspectorKind;
+    const name = node.dataset.name || "未命名";
+    const id = kind === "chapter"
+      ? node.dataset.chapterId
+      : node.dataset.largeSceneId;
+    const order = Number(node.dataset.sortOrder || 0);
+    const isChapter = kind === "chapter";
+    const chapterId = isChapter ? id : node.dataset.chapterId;
+    const chapterName = isChapter ? name : node.dataset.chapterName || "";
+    const typeLabel = node.dataset.sceneType === "transition" ? "过渡段" : "内容段";
+    inspector.innerHTML = `
+      <div class="panel-header">
+        <div>
+          <div class="panel-title">${escapeHtml(name)}</div>
+          <div class="panel-sub">${isChapter ? "章节" : "大场景"} ${String(order).padStart(2, "0")} · 当前选中</div>
+        </div>
+        <span class="status blue">${isChapter ? "章节" : escapeHtml(typeLabel)}</span>
+      </div>
+      <div class="inspector-section">
+        <div class="form-group">
+          <label class="label">名称</label>
+          <div class="field">${escapeHtml(name)}</div>
+        </div>
+        ${
+          isChapter
+            ? `
+              <div class="form-group">
+                <label class="label">包含内容</label>
+                <div class="field">${Number(node.dataset.largeSceneCount || 0)} 个大场景</div>
+              </div>
+            `
+            : `
+              <div class="form-group">
+                <label class="label">所属章节</label>
+                <div class="field">${escapeHtml(chapterName)}</div>
+              </div>
+              <div class="form-group">
+                <label class="label">场景类型</label>
+                <div class="field">${escapeHtml(typeLabel)}</div>
+              </div>
+            `
+        }
+      </div>
+      <div class="inspector-section story-inspector-actions">
+        ${
+          isChapter
+            ? `
+              <button
+                class="btn soft"
+                type="button"
+                data-api-action="open-large-scene-modal"
+                data-chapter-id="${escapeHtml(chapterId)}"
+                data-chapter-name="${escapeHtml(chapterName)}"
+              >添加大场景</button>
+            `
+            : ""
+        }
+        <button
+          class="btn"
+          type="button"
+          data-story-inspector-action="rename"
+          data-kind="${escapeHtml(kind)}"
+          data-id="${escapeHtml(id)}"
+          data-name="${escapeHtml(name)}"
+        >改名</button>
+        <button
+          class="btn danger-soft"
+          type="button"
+          data-story-inspector-action="delete"
+          data-kind="${escapeHtml(kind)}"
+          data-id="${escapeHtml(id)}"
+          data-name="${escapeHtml(name)}"
+          data-large-scene-count="${escapeHtml(node.dataset.largeSceneCount || "0")}"
+        >删除</button>
+      </div>
+      <div class="inspector-section story-inspector-tip">也可以右键节点打开快捷菜单。</div>
+    `;
+    const paletteLargeScene = document.getElementById("story-palette-large-scene");
+    if (paletteLargeScene && chapterId) {
+      paletteLargeScene.disabled = false;
+      paletteLargeScene.dataset.chapterId = chapterId;
+      paletteLargeScene.dataset.chapterName = chapterName;
+    }
+  }
+
+  function storyCanvasStorageKey(projectId) {
+    return `atelier:story-canvas-view:v2:${projectId}`;
+  }
+
+  function clampStoryCanvasScale(scale) {
+    return Math.min(
+      STORY_CANVAS_MAX_SCALE,
+      Math.max(STORY_CANVAS_MIN_SCALE, Number(scale) || 1)
+    );
+  }
+
+  function saveStoryCanvasView() {
+    if (!storyCanvasView.projectId) return;
+    window.clearTimeout(storyCanvasView.persistTimer);
+    storyCanvasView.persistTimer = window.setTimeout(() => {
+      try {
+        window.localStorage.setItem(
+          storyCanvasStorageKey(storyCanvasView.projectId),
+          JSON.stringify({
+            x: Math.round(storyCanvasView.x * 10) / 10,
+            y: Math.round(storyCanvasView.y * 10) / 10,
+            scale: Math.round(storyCanvasView.scale * 1000) / 1000,
+          })
+        );
+      } catch (error) {
+        // View persistence is optional; the canvas remains usable without storage.
+      }
+    }, 120);
+  }
+
+  function restoreStoryCanvasView(projectId) {
+    try {
+      const saved = JSON.parse(
+        window.localStorage.getItem(storyCanvasStorageKey(projectId)) || "null"
+      );
+      if (
+        saved &&
+        Number.isFinite(saved.x) &&
+        Number.isFinite(saved.y) &&
+        Number.isFinite(saved.scale)
+      ) {
+        storyCanvasView.x = saved.x;
+        storyCanvasView.y = saved.y;
+        storyCanvasView.scale = clampStoryCanvasScale(saved.scale);
+        return true;
+      }
+    } catch (error) {
+      // Ignore invalid or unavailable browser storage.
+    }
+    return false;
+  }
+
+  function applyStoryCanvasView({ persist = true } = {}) {
+    const viewport = document.getElementById("story-canvas-viewport");
+    const surface = document.getElementById("story-canvas-surface");
+    const zoomLabel = document.getElementById("story-canvas-zoom-label");
+    if (!viewport || !surface) return;
+    surface.style.transform = `translate3d(${storyCanvasView.x}px, ${storyCanvasView.y}px, 0) scale(${storyCanvasView.scale})`;
+    viewport.style.setProperty(
+      "--story-grid-size",
+      `${Math.max(9, 22 * storyCanvasView.scale)}px`
+    );
+    viewport.style.setProperty(
+      "--story-grid-x",
+      `${storyCanvasView.x % (22 * storyCanvasView.scale)}px`
+    );
+    viewport.style.setProperty(
+      "--story-grid-y",
+      `${storyCanvasView.y % (22 * storyCanvasView.scale)}px`
+    );
+    if (zoomLabel) zoomLabel.textContent = `${Math.round(storyCanvasView.scale * 100)}%`;
+    if (persist) saveStoryCanvasView();
+  }
+
+  function setStoryCanvasScale(nextScale, clientX, clientY) {
+    const viewport = document.getElementById("story-canvas-viewport");
+    if (!viewport) return;
+    const rect = viewport.getBoundingClientRect();
+    const originX = Number.isFinite(clientX) ? clientX - rect.left : rect.width / 2;
+    const originY = Number.isFinite(clientY) ? clientY - rect.top : rect.height / 2;
+    const previousScale = storyCanvasView.scale;
+    const scale = clampStoryCanvasScale(nextScale);
+    const worldX = (originX - storyCanvasView.x) / previousScale;
+    const worldY = (originY - storyCanvasView.y) / previousScale;
+    storyCanvasView.scale = scale;
+    storyCanvasView.x = originX - worldX * scale;
+    storyCanvasView.y = originY - worldY * scale;
+    applyStoryCanvasView();
+  }
+
+  function fitStoryCanvas({ persist = true } = {}) {
+    const viewport = document.getElementById("story-canvas-viewport");
+    const stack = document.querySelector("#story-canvas-surface .real-story-stack");
+    if (!viewport || !stack) return;
+    const viewportWidth = viewport.clientWidth;
+    const viewportHeight = viewport.clientHeight;
+    const contentWidth = stack.offsetWidth;
+    const contentHeight = stack.offsetHeight;
+    if (!viewportWidth || !viewportHeight || !contentWidth || !contentHeight) return;
+    const inset = 44;
+    storyCanvasView.scale = clampStoryCanvasScale(
+      Math.min(
+        1,
+        (viewportWidth - inset * 2) / contentWidth,
+        (viewportHeight - inset * 2) / contentHeight
+      )
+    );
+    storyCanvasView.x = Math.max(inset, (viewportWidth - contentWidth * storyCanvasView.scale) / 2);
+    storyCanvasView.y = Math.max(inset, (viewportHeight - contentHeight * storyCanvasView.scale) / 2);
+    applyStoryCanvasView({ persist });
+  }
+
+  function bindStoryCanvas(projectId) {
+    const viewport = document.getElementById("story-canvas-viewport");
+    const toolbar = document.querySelector(".story-canvas-toolbar");
+    if (!viewport || !toolbar) return;
+    storyCanvasView.projectId = projectId;
+
+    const stopPanning = (event) => {
+      if (storyCanvasView.pointerId === null) return;
+      if (
+        event &&
+        viewport.hasPointerCapture?.(storyCanvasView.pointerId)
+      ) {
+        viewport.releasePointerCapture(storyCanvasView.pointerId);
+      }
+      storyCanvasView.pointerId = null;
+      viewport.classList.remove("is-panning");
+      saveStoryCanvasView();
+    };
+
+    viewport.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0 && event.button !== 1) return;
+      if (
+        event.target.closest(
+          "button, input, select, textarea, a, .large-scene-block, .real-chapter-block"
+        )
+      ) {
+        return;
+      }
+      event.preventDefault();
+      storyCanvasView.pointerId = event.pointerId;
+      storyCanvasView.pointerStartX = event.clientX;
+      storyCanvasView.pointerStartY = event.clientY;
+      storyCanvasView.viewStartX = storyCanvasView.x;
+      storyCanvasView.viewStartY = storyCanvasView.y;
+      viewport.setPointerCapture?.(event.pointerId);
+      viewport.classList.add("is-panning");
+    });
+
+    viewport.addEventListener("pointermove", (event) => {
+      if (event.pointerId !== storyCanvasView.pointerId) return;
+      storyCanvasView.x =
+        storyCanvasView.viewStartX + event.clientX - storyCanvasView.pointerStartX;
+      storyCanvasView.y =
+        storyCanvasView.viewStartY + event.clientY - storyCanvasView.pointerStartY;
+      applyStoryCanvasView({ persist: false });
+    });
+
+    viewport.addEventListener("pointerup", stopPanning);
+    viewport.addEventListener("pointercancel", stopPanning);
+
+    viewport.addEventListener(
+      "wheel",
+      (event) => {
+        event.preventDefault();
+        if (event.ctrlKey || event.metaKey) {
+          const factor = Math.exp(-event.deltaY * 0.002);
+          setStoryCanvasScale(storyCanvasView.scale * factor, event.clientX, event.clientY);
+          return;
+        }
+        storyCanvasView.x -= event.deltaX;
+        storyCanvasView.y -= event.deltaY;
+        applyStoryCanvasView();
+      },
+      { passive: false }
+    );
+
+    viewport.addEventListener("click", (event) => {
+      const selected = event.target.closest(".large-scene-block, .real-chapter-block");
+      viewport
+        .querySelectorAll(".canvas-node-selected")
+        .forEach((node) => node.classList.remove("canvas-node-selected"));
+      if (selected) {
+        selected.classList.add("canvas-node-selected");
+        updateStoryCanvasInspector(selected);
+      }
+    });
+
+    toolbar.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-story-canvas-action]");
+      if (!button) return;
+      const action = button.dataset.storyCanvasAction;
+      if (action === "zoom-in") {
+        setStoryCanvasScale(storyCanvasView.scale + 0.1);
+      } else if (action === "zoom-out") {
+        setStoryCanvasScale(storyCanvasView.scale - 0.1);
+      } else if (action === "zoom-reset") {
+        setStoryCanvasScale(1);
+      } else if (action === "fit") {
+        fitStoryCanvas();
+      }
+    });
+
+    document
+      .getElementById("story-runtime-inspector")
+      ?.addEventListener("click", async (event) => {
+        const button = event.target.closest("[data-story-inspector-action]");
+        if (!button) return;
+        const kind = button.dataset.kind;
+        const id = button.dataset.id;
+        const name = button.dataset.name;
+        if (button.dataset.storyInspectorAction === "rename") {
+          if (kind === "chapter") openRenameModal("chapter", id, name);
+          else openLargeSceneEditModal(id, name);
+          return;
+        }
+        if (button.dataset.storyInspectorAction === "delete") {
+          if (kind === "chapter") {
+            await deleteChapter(
+              id,
+              name,
+              Number(button.dataset.largeSceneCount || 0)
+            );
+          } else {
+            await deleteLargeScene(id, name);
+          }
+        }
+      });
+
+    const restored = restoreStoryCanvasView(projectId);
+    window.requestAnimationFrame(() => {
+      if (restored) applyStoryCanvasView({ persist: false });
+      else {
+        const stack = document.querySelector("#story-canvas-surface .real-story-stack");
+        const hasChapters = Boolean(stack?.querySelector(".story-chapter-group"));
+        if (hasChapters) {
+          const viewportHeight = viewport.clientHeight;
+          storyCanvasView.scale = 0.82;
+          storyCanvasView.x = 32;
+          storyCanvasView.y = Math.max(
+            24,
+            (viewportHeight - stack.offsetHeight * storyCanvasView.scale) / 2
+          );
+          applyStoryCanvasView({ persist: false });
+        } else {
+          fitStoryCanvas({ persist: false });
+        }
+      }
+    });
   }
 
   async function renderProductionStoryCanvas(project) {
@@ -367,10 +824,6 @@
       actions.innerHTML = '<button class="btn primary" data-api-action="open-chapter-modal">新建章节</button>';
     }
     const chapters = await request(`/api/projects/${project.id}/chapters`);
-    if (!chapters.total) {
-      page.insertAdjacentHTML("beforeend", chapterEmptyState());
-      return;
-    }
     const chapterItems = await Promise.all(
       chapters.items.map(async (chapter) => {
         const largeScenes = await request(`/api/chapters/${chapter.id}/large-scenes`);
@@ -383,22 +836,9 @@
     );
     page.insertAdjacentHTML(
       "beforeend",
-      `
-        <section class="panel real-story-panel">
-          <div class="panel-header">
-            <div>
-              <div class="panel-title">章节与大场景</div>
-              <div class="panel-sub">${chapters.total} 个章节 · ${largeSceneTotal} 个大场景 · 自动规整排列</div>
-            </div>
-          </div>
-          <div class="real-story-viewport">
-            <div class="real-story-stack">
-              ${chapterItems.map(chapterBlock).join("")}
-            </div>
-          </div>
-        </section>
-      `
+      storyCanvasWorkspace(chapterItems, chapters.total, largeSceneTotal)
     );
+    bindStoryCanvas(project.id);
   }
 
   const specTypeLabels = {
