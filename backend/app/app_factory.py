@@ -579,7 +579,15 @@ class AddResourceRequest(BaseModel):
 
 
 class SetMappingRequest(BaseModel):
-    material_page_id: str = Field(min_length=1)
+    """Per second-round contract 8.5: material_page_id may be null to unset mapping."""
+    material_page_id: str | None = None
+
+    @field_validator("material_page_id")
+    @classmethod
+    def non_empty_string(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("material_page_id 不能为空字符串")
+        return value
 
 
 class CreateMaterialPageRequest(BaseModel):
@@ -631,7 +639,7 @@ def create_app(
 ) -> FastAPI:
     app = FastAPI(
         title="Atelier API",
-        version="0.4.2",
+        version="0.4.3",
         docs_url="/api/docs",
         redoc_url=None,
     )
@@ -1826,7 +1834,7 @@ def create_app(
             **result,
         }
 
-    @app.post("/api/small-scenes/{small_scene_id}/pages")
+    @app.post("/api/small-scenes/{small_scene_id}/pages", status_code=status.HTTP_201_CREATED)
     def create_scene_page(small_scene_id: str, request: CreateScenePageRequest) -> dict[str, object]:
         """6.3 创建场景页（前端 name → 内部 title）"""
         try:
@@ -1846,7 +1854,7 @@ def create_app(
         result["name"] = result.pop("title")
         return {
             "database_environment": manager.active_environment,
-            **result,
+            "page": result,
         }
 
     @app.patch("/api/small-scene-pages/{page_id}")
@@ -1871,7 +1879,7 @@ def create_app(
             result["name"] = result.pop("title")
         return {
             "database_environment": manager.active_environment,
-            **result,
+            "page": result,
         }
 
     @app.delete("/api/small-scene-pages/{page_id}")
@@ -1887,52 +1895,70 @@ def create_app(
 
     @app.put("/api/small-scenes/{small_scene_id}/pages/order")
     def reorder_scene_pages(small_scene_id: str, request: ReorderPagesRequest) -> dict[str, object]:
-        """6.3 场景页排序"""
+        """6.3 场景页排序（单事务 + 完整集合校验）"""
         try:
-            for idx, pid in enumerate(request.page_ids, start=1):
-                manager.move_shot_page(pid, idx)
+            pages = manager.reorder_scene_pages(small_scene_id, request.page_ids)
         except ValueError as error:
             msg = str(error)
-            code = 404 if "不存在" in msg else 422
+            # Per second-round contract 7.1: all invalid page_ids return 422.
+            # Only the small_scene itself missing returns 404.
+            code = 404 if msg == "小场景不存在" else 422
             raise HTTPException(status_code=code, detail=msg) from error
-        pages = manager.list_shot_pages(small_scene_id)
         # 转换 title → name
         for p in pages:
-            p["name"] = p.pop("title")
+            if "title" in p:
+                p["name"] = p.pop("title")
         return {
             "database_environment": manager.active_environment,
             "small_scene_id": small_scene_id,
             "pages": pages,
         }
 
-    @app.post("/api/small-scenes/{small_scene_id}/resources")
+    @app.post("/api/small-scenes/{small_scene_id}/resources", status_code=status.HTTP_201_CREATED)
     def add_small_scene_resource(small_scene_id: str, request: AddResourceRequest) -> dict[str, object]:
         """6.4 关联素材到小场景"""
         try:
-            result = manager.add_small_scene_resource(small_scene_id, request.material_id)
+            link_info = manager.add_small_scene_resource(small_scene_id, request.material_id)
         except ValueError as error:
             msg = str(error)
-            code = 404 if "不存在" in msg else 422
+            if "已关联" in msg:
+                code = 409
+            elif "不存在" in msg:
+                code = 404
+            else:
+                code = 422
             raise HTTPException(status_code=code, detail=msg) from error
+        # Build resource payload with material info + material_pages (per contract 8.3)
+        material = manager.get_material(request.material_id)
+        if material is None:
+            raise HTTPException(status_code=404, detail="素材不存在") from None
+        material_pages = manager.list_material_pages(request.material_id)
+        resource = {
+            "link_id": link_info["link_id"],
+            "material_id": request.material_id,
+            "name": material.get("name"),
+            "material_type": material.get("material_type"),
+            "pages": material_pages,
+        }
         return {
             "database_environment": manager.active_environment,
-            **result,
+            "resource": resource,
         }
 
     @app.delete("/api/small-scene-resource-links/{link_id}")
     def remove_small_scene_resource_link(link_id: str) -> dict[str, object]:
-        """6.4 移除小场景素材关联"""
+        """6.4 移除小场景素材关联（级联删除该小场景内映射）"""
         result = manager.remove_small_scene_resource_link(link_id)
         if result is None:
             raise HTTPException(status_code=404, detail="素材关联不存在")
         return {
             "database_environment": manager.active_environment,
-            **result,
+            "deleted": result,
         }
 
     @app.put("/api/small-scene-pages/{page_id}/mappings/{material_type}")
     def set_scene_page_mapping(page_id: str, material_type: str, request: SetMappingRequest) -> dict[str, object]:
-        """6.5 设置场景页映射（同类型原子替换）"""
+        """6.5 设置场景页映射（同类型原子替换，支持 PUT null 取消）"""
         valid_types = ('composition', 'expression', 'scene', 'lighting', 'prompt', 'composite_template')
         if material_type not in valid_types:
             raise HTTPException(status_code=422, detail=f"素材类型无效，允许值: {', '.join(valid_types)}")
@@ -1942,14 +1968,21 @@ def create_app(
             msg = str(error)
             code = 404 if "不存在" in msg else 422
             raise HTTPException(status_code=code, detail=msg) from error
+        # result is None when material_page_id was None and no existing mapping to remove
+        # Per contract 8.5: cancel returns mapping: null
+        if result is None:
+            return {
+                "database_environment": manager.active_environment,
+                "mapping": None,
+            }
         return {
             "database_environment": manager.active_environment,
-            **result,
+            "mapping": result,
         }
 
     @app.delete("/api/small-scene-pages/{page_id}/mappings/{material_type}")
     def unset_scene_page_mapping(page_id: str, material_type: str) -> dict[str, object]:
-        """6.5 取消场景页映射"""
+        """6.5 取消场景页映射（DELETE 兼容接口；前端应使用 PUT + null）"""
         valid_types = ('composition', 'expression', 'scene', 'lighting', 'prompt', 'composite_template')
         if material_type not in valid_types:
             raise HTTPException(status_code=422, detail=f"素材类型无效，允许值: {', '.join(valid_types)}")
@@ -1958,7 +1991,7 @@ def create_app(
             raise HTTPException(status_code=404, detail="映射不存在")
         return {
             "database_environment": manager.active_environment,
-            **result,
+            "mapping": result,
         }
 
     @app.get("/api/materials/{material_id}/pages")

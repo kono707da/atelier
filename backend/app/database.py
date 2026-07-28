@@ -430,6 +430,7 @@ class DatabaseManager:
             self._migrate_v040_tables(connection)
             self._migrate_v041_tables(connection)
             self._migrate_default_material_pages(connection)
+            self._migrate_fix_empty_link_ids(connection)
             marker = connection.execute(
                 "SELECT value FROM atelier_meta WHERE key = 'environment'"
             ).fetchone()
@@ -828,6 +829,32 @@ class DatabaseManager:
                    VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)""",
                 (str(uuid4()), mat["id"], mat["name"], mat["description"], mat["content"],
                  mat["prompt_text"], mat["negative_prompt"], now, now),
+            )
+
+    def _migrate_fix_empty_link_ids(self, connection) -> None:
+        """Idempotent fix for small_scene_materials.id being NULL or empty string.
+
+        Per second-round requirement 9.2: backfill UUIDs for any rows where id is
+        NULL or empty. Re-running this migration must not modify rows that already
+        have a valid non-empty id.
+        """
+        # Check table exists
+        exists = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='small_scene_materials'"
+        ).fetchone()
+        if not exists:
+            return
+        cols = [row["name"] for row in connection.execute("PRAGMA table_info(small_scene_materials)").fetchall()]
+        if "id" not in cols:
+            return
+        from uuid import uuid4
+        rows = connection.execute(
+            "SELECT small_scene_id, material_id FROM small_scene_materials WHERE id IS NULL OR id = ''"
+        ).fetchall()
+        for row in rows:
+            connection.execute(
+                "UPDATE small_scene_materials SET id = ? WHERE small_scene_id = ? AND material_id = ?",
+                (str(uuid4()), row["small_scene_id"], row["material_id"]),
             )
 
     def activate(self, environment: DatabaseEnvironment) -> None:
@@ -3042,6 +3069,66 @@ class DatabaseManager:
             )
         return self.get_shot_page(shot_page_id, environment=target_environment)
 
+    def reorder_scene_pages(
+        self,
+        small_scene_id: str,
+        page_ids: list[str],
+        environment: DatabaseEnvironment | None = None,
+    ) -> list[dict[str, object]]:
+        """Reorder scene pages of a small scene in a single transaction.
+
+        Validates that page_ids exactly match the set of直属 scene pages
+        (small_scene_id matches, branch_id IS NULL). Rejects:
+        - missing IDs, duplicate IDs, IDs from other small_scenes
+        - branch page IDs, non-existent IDs, empty list
+
+        On success, sort_order is rewritten starting from 1.
+        """
+        if not page_ids:
+            raise ValueError("排序页面列表不能为空")
+        if len(page_ids) != len(set(page_ids)):
+            raise ValueError("排序页面列表包含重复 ID")
+        target_environment = environment or self._active_environment
+        with self._lock, self.connection(target_environment) as connection:
+            scene = connection.execute(
+                "SELECT id FROM small_scenes WHERE id = ?", (small_scene_id,)
+            ).fetchone()
+            if not scene:
+                raise ValueError("小场景不存在")
+            # Fetch直属 scene pages (branch_id IS NULL)
+            existing_rows = connection.execute(
+                "SELECT id FROM shot_pages WHERE small_scene_id = ? AND branch_id IS NULL",
+                (small_scene_id,),
+            ).fetchall()
+            existing_ids = {r["id"] for r in existing_rows}
+            requested_set = set(page_ids)
+            if requested_set != existing_ids:
+                missing = existing_ids - requested_set
+                extra = requested_set - existing_ids
+                if missing:
+                    raise ValueError("排序页面列表缺失页面")
+                if extra:
+                    # Check if any extra IDs are branch pages or belong to other small_scenes
+                    for extra_id in extra:
+                        row = connection.execute(
+                            "SELECT small_scene_id, branch_id FROM shot_pages WHERE id = ?",
+                            (extra_id,),
+                        ).fetchone()
+                        if not row:
+                            raise ValueError(f"页面不存在: {extra_id}")
+                        if row["branch_id"] is not None:
+                            raise ValueError("排序页面列表包含分支页面")
+                        if row["small_scene_id"] != small_scene_id:
+                            raise ValueError("排序页面列表包含其他小场景的页面")
+                    raise ValueError("排序页面列表包含非法页面")
+            # All validation passed, perform the reorder in this single transaction
+            for idx, pid in enumerate(page_ids, start=1):
+                connection.execute(
+                    "UPDATE shot_pages SET sort_order = ? WHERE id = ? AND small_scene_id = ? AND branch_id IS NULL",
+                    (idx, pid, small_scene_id),
+                )
+        return self.list_shot_pages(small_scene_id, environment=target_environment)
+
     def move_shot_page(
         self,
         shot_page_id: str,
@@ -3335,6 +3422,14 @@ class DatabaseManager:
         material_ids: list[str],
         environment: DatabaseEnvironment | None = None,
     ) -> dict[str, object]:
+        """Differential update preserving existing link_id for retained associations.
+
+        - Retained materials keep their original `id` (link_id) and sort_order is updated.
+        - Newly added materials get a new UUID as `id`.
+        - Removed materials: their related small_scene_page_mappings (within this
+          small_scene) are cascade-deleted, then the link row is deleted.
+        - All operations run in a single transaction.
+        """
         target_environment = environment or self._active_environment
         now = datetime.now(timezone.utc).isoformat()
         seen: set[str] = set()
@@ -3355,17 +3450,54 @@ class DatabaseManager:
                 ).fetchone()
                 if not mat:
                     raise ValueError(f"素材不存在: {mid}")
-            connection.execute(
-                "DELETE FROM small_scene_materials WHERE small_scene_id = ?",
+            # Snapshot existing links: {material_id: link_id}
+            existing_rows = connection.execute(
+                "SELECT id, material_id FROM small_scene_materials WHERE small_scene_id = ?",
                 (small_scene_id,),
-            )
-            for idx, mid in enumerate(unique_ids, start=1):
+            ).fetchall()
+            existing_map: dict[str, str] = {r["material_id"]: r["id"] for r in existing_rows}
+            existing_set = set(existing_map.keys())
+            new_set = set(unique_ids)
+            to_remove = existing_set - new_set
+            to_add = [mid for mid in unique_ids if mid not in existing_set]
+            # Order retained + new materials by user-supplied order
+            ordered_materials = unique_ids
+            # Cascade delete mappings for removed materials (only within this small_scene)
+            if to_remove:
+                removed_material_ids = list(to_remove)
+                placeholders_rm = ",".join("?" * len(removed_material_ids))
+                material_page_ids = [r["id"] for r in connection.execute(
+                    f"SELECT id FROM material_pages WHERE material_id IN ({placeholders_rm})",
+                    removed_material_ids,
+                ).fetchall()]
+                if material_page_ids:
+                    placeholders_mp = ",".join("?" * len(material_page_ids))
+                    connection.execute(
+                        f"""DELETE FROM small_scene_page_mappings
+                            WHERE material_page_id IN ({placeholders_mp})
+                            AND scene_page_id IN (
+                                SELECT id FROM shot_pages WHERE small_scene_id = ?
+                            )""",
+                        (*material_page_ids, small_scene_id),
+                    )
+                placeholders_rm_ids = ",".join("?" * len(removed_material_ids))
                 connection.execute(
-                    """
-                    INSERT INTO small_scene_materials (small_scene_id, material_id, sort_order, created_at)
-                    VALUES (?, ?, ?, ?)
-                    """,
-                    (small_scene_id, mid, idx, now),
+                    f"DELETE FROM small_scene_materials WHERE small_scene_id = ? AND material_id IN ({placeholders_rm_ids})",
+                    (small_scene_id, *removed_material_ids),
+                )
+            # Insert new associations with generated id
+            for mid in to_add:
+                link_id = str(uuid4())
+                connection.execute(
+                    """INSERT INTO small_scene_materials (id, small_scene_id, material_id, sort_order, created_at)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (link_id, small_scene_id, mid, 0, now),
+                )
+            # Rewrite continuous sort_order for all retained + new associations
+            for idx, mid in enumerate(ordered_materials, start=1):
+                connection.execute(
+                    "UPDATE small_scene_materials SET sort_order = ? WHERE small_scene_id = ? AND material_id = ?",
+                    (idx, small_scene_id, mid),
                 )
         materials = self.list_small_scene_materials(small_scene_id, environment=target_environment)
         return {"small_scene_id": small_scene_id, "materials": materials}
@@ -3519,6 +3651,10 @@ class DatabaseManager:
         """Aggregate 4-level tree: chapters → large_scenes → small_scenes → shot_pages.
 
         Uses batch queries to avoid N+1.
+        Each small_scene includes:
+        - pages: shot_pages (with `name` field)
+        - resources: associated materials (with link_id, material_id, name, material_type, pages)
+        - page_count, resource_count: counts
         """
         target_environment = environment or self._active_environment
         with self.connection(target_environment) as connection:
@@ -3538,6 +3674,8 @@ class DatabaseManager:
             large_scenes: list[dict[str, object]] = []
             small_scenes: list[dict[str, object]] = []
             shot_pages: list[dict[str, object]] = []
+            scene_resources: list[dict[str, object]] = []
+            material_page_rows: list[dict[str, object]] = []
 
             if chapter_ids:
                 placeholders = ",".join("?" * len(chapter_ids))
@@ -3576,13 +3714,59 @@ class DatabaseManager:
                             p["name"] = p.pop("title")
                             shot_pages.append(p)
 
+                        # Batch query resources (small_scene_materials + materials)
+                        resources_rows = connection.execute(
+                            f"""SELECT ssm.id AS link_id, ssm.small_scene_id, ssm.material_id, ssm.sort_order,
+                                       m.name, m.material_type, m.description, m.prompt_text, m.negative_prompt
+                                FROM small_scene_materials ssm
+                                JOIN materials m ON m.id = ssm.material_id
+                                WHERE ssm.small_scene_id IN ({placeholders_ss})
+                                ORDER BY ssm.sort_order ASC""",
+                            small_scene_ids,
+                        ).fetchall()
+                        scene_resources = [dict(r) for r in resources_rows]
+
+                        # Batch query material_pages for all referenced materials
+                        material_ids = list({r["material_id"] for r in scene_resources})
+                        if material_ids:
+                            placeholders_m = ",".join("?" * len(material_ids))
+                            material_page_rows = [
+                                dict(r) for r in connection.execute(
+                                    f"""SELECT id, material_id, name, description, content, prompt_text, negative_prompt,
+                                               sort_order, created_at, updated_at
+                                        FROM material_pages
+                                        WHERE material_id IN ({placeholders_m})
+                                        ORDER BY sort_order ASC""",
+                                    material_ids,
+                                ).fetchall()
+                            ]
+
+            # Group pages by scene
             pages_by_scene: dict[str, list[dict[str, object]]] = {}
             for p in shot_pages:
                 pages_by_scene.setdefault(p["small_scene_id"], []).append(p)
 
+            # Group material_pages by material_id
+            mp_by_material: dict[str, list[dict[str, object]]] = {}
+            for mp in material_page_rows:
+                mp_by_material.setdefault(mp["material_id"], []).append(mp)
+
+            # Group resources by scene, attach pages to each resource
+            resources_by_scene: dict[str, list[dict[str, object]]] = {}
+            for r in scene_resources:
+                r_pages = mp_by_material.get(r["material_id"], [])
+                r["pages"] = r_pages
+                r["page_count"] = len(r_pages)
+                resources_by_scene.setdefault(r["small_scene_id"], []).append(r)
+
             scenes_by_large: dict[str, list[dict[str, object]]] = {}
             for s in small_scenes:
-                s["pages"] = pages_by_scene.get(s["id"], [])
+                s_pages = pages_by_scene.get(s["id"], [])
+                s_resources = resources_by_scene.get(s["id"], [])
+                s["pages"] = s_pages
+                s["resources"] = s_resources
+                s["page_count"] = len(s_pages)
+                s["resource_count"] = len(s_resources)
                 scenes_by_large.setdefault(s["large_scene_id"], []).append(s)
 
             large_by_chapter: dict[str, list[dict[str, object]]] = {}
@@ -3955,7 +4139,12 @@ class DatabaseManager:
         link_id: str,
         environment: DatabaseEnvironment | None = None,
     ) -> dict[str, object] | None:
-        """Remove a material association by link_id (the stable id of small_scene_materials)."""
+        """Remove a material association by link_id (the stable id of small_scene_materials).
+
+        Also cascade-deletes all small_scene_page_mappings that reference material_pages
+        belonging to this material, for any scene_page within the same small_scene.
+        Returns deleted_mapping_count for the API contract.
+        """
         target_environment = environment or self._active_environment
         with self._lock, self.connection(target_environment) as connection:
             existing = connection.execute(
@@ -3964,10 +4153,35 @@ class DatabaseManager:
             ).fetchone()
             if not existing:
                 return None
+            small_scene_id = existing["small_scene_id"]
+            material_id = existing["material_id"]
+            # Cascade delete mappings: find all material_pages of this material,
+            # then delete mappings that reference those pages AND belong to scene_pages
+            # within this same small_scene.
+            material_page_ids = [r["id"] for r in connection.execute(
+                "SELECT id FROM material_pages WHERE material_id = ?", (material_id,)
+            ).fetchall()]
+            deleted_mapping_count = 0
+            if material_page_ids:
+                placeholders = ",".join("?" * len(material_page_ids))
+                cursor = connection.execute(
+                    f"""DELETE FROM small_scene_page_mappings
+                        WHERE material_page_id IN ({placeholders})
+                        AND scene_page_id IN (
+                            SELECT id FROM shot_pages WHERE small_scene_id = ?
+                        )""",
+                    (*material_page_ids, small_scene_id),
+                )
+                deleted_mapping_count = cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
             connection.execute(
                 "DELETE FROM small_scene_materials WHERE id = ?", (link_id,)
             )
-        return {"link_id": link_id, "small_scene_id": existing["small_scene_id"], "material_id": existing["material_id"]}
+        return {
+            "link_id": link_id,
+            "small_scene_id": small_scene_id,
+            "material_id": material_id,
+            "deleted_mapping_count": deleted_mapping_count,
+        }
 
     # ── Small Scene Page Mappings (v0.4.1) ─────────────────────────────
 
@@ -3994,26 +4208,35 @@ class DatabaseManager:
         self,
         scene_page_id: str,
         material_type: str,
-        material_page_id: str,
+        material_page_id: str | None,
         environment: DatabaseEnvironment | None = None,
-    ) -> dict[str, object]:
+    ) -> dict[str, object] | None:
         """Set or replace the mapping for (scene_page_id, material_type).
 
-        Atomic replace: deletes existing mapping with same (scene_page_id, material_type),
-        then inserts new one. If material_page_id is None, removes the mapping.
+        - If material_page_id is None, removes the mapping (PUT + null contract).
+          Returns None to signal the API layer that the response should be `mapping: null`.
+        - Validates that the material is already associated to the same small_scene.
+        - Atomic replace: deletes existing mapping with same (scene_page_id, material_type),
+          then inserts new one.
         """
         valid_types = ('composition', 'expression', 'scene', 'lighting', 'prompt', 'composite_template')
         if material_type not in valid_types:
             raise ValueError(f"素材类型无效，允许值: {', '.join(valid_types)}")
+        # If material_page_id is None, treat as unset - always return None
+        # per second-round contract 8.5 (cancel returns mapping: null)
+        if material_page_id is None:
+            self.unset_small_scene_page_mapping(scene_page_id, material_type, environment)
+            return None
         target_environment = environment or self._active_environment
         now = datetime.now(timezone.utc).isoformat()
         mapping_id = str(uuid4())
         with self._lock, self.connection(target_environment) as connection:
             page = connection.execute(
-                "SELECT id FROM shot_pages WHERE id = ?", (scene_page_id,)
+                "SELECT id, small_scene_id FROM shot_pages WHERE id = ?", (scene_page_id,)
             ).fetchone()
             if not page:
                 raise ValueError("场景页不存在")
+            small_scene_id = page["small_scene_id"]
             mp = connection.execute(
                 "SELECT id, material_id FROM material_pages WHERE id = ?",
                 (material_page_id,),
@@ -4028,6 +4251,13 @@ class DatabaseManager:
                 raise ValueError("素材不存在")
             if mat["material_type"] != material_type:
                 raise ValueError(f"素材页所属素材类型({mat['material_type']})与指定类型({material_type})不匹配")
+            # Validate the material is associated to this small_scene
+            link = connection.execute(
+                "SELECT id FROM small_scene_materials WHERE small_scene_id = ? AND material_id = ?",
+                (small_scene_id, mp["material_id"]),
+            ).fetchone()
+            if not link:
+                raise ValueError("该素材尚未关联到此小场景，不能设置映射")
             connection.execute(
                 "DELETE FROM small_scene_page_mappings WHERE scene_page_id = ? AND material_type = ?",
                 (scene_page_id, material_type),

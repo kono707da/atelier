@@ -1576,7 +1576,11 @@
         const selected = mapAction.classList.contains("selected");
         const url = `/api/small-scene-pages/${mapAction.dataset.scenePageId}/mappings/${mapAction.dataset.materialType}`;
         if (selected) {
-          await request(url, { method: "DELETE" });
+          // Per second-round contract 8.5: PUT + null is the canonical unset
+          await request(url, {
+            method: "PUT",
+            body: JSON.stringify({ material_page_id: null }),
+          });
         } else {
           await request(url, {
             method: "PUT",
