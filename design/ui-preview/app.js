@@ -355,7 +355,8 @@ function characterDatabasePage() {
       <div class="panel-body">
         <form class="character-database-search" id="character-database-search-form">
           <input class="modal-input" id="character-database-q" name="q" type="text" placeholder="搜索角色名 / 触发词 / 标签" autocomplete="off" />
-          <select class="modal-input" id="character-database-copyright" name="copyright"><option value="">全部作品系列</option></select>
+          <input class="modal-input" id="character-database-copyright" name="copyright" type="text" list="character-database-copyright-options" placeholder="输入作品系列" autocomplete="off" />
+          <datalist id="character-database-copyright-options"></datalist>
           <select class="modal-input" id="character-database-sort" name="sort">
             <option value="count_desc">标签数从多到少</option>
             <option value="count_asc">标签数从少到多</option>

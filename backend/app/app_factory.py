@@ -726,23 +726,30 @@ def create_app(
         return result
 
     @app.get("/api/character-database/copyrights")
-    def list_character_database_copyrights() -> dict[str, object]:
+    def list_character_database_copyrights(
+        q: str = "",
+        limit: int = 50,
+    ) -> dict[str, object]:
+        if limit < 1 or limit > 200:
+            limit = 50
         try:
-            items = character_database.list_copyrights()
+            items = character_database.list_copyrights(q=q, limit=limit)
         except character_database.CharacterDatabaseNotReadyError as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
         return {
             "items": items,
             "total": len(items),
+            "query": q,
         }
 
     @app.get("/api/character-database/stats")
     def character_database_stats() -> dict[str, object]:
         return character_database.stats()
 
-    # Kick off background CSV→SQLite import at app creation so the index is
-    # already warming up before the first request hits the page.
-    character_database.status()
+    # Warm the production lookup cache before the first page request. Test
+    # application factories must not start a shared background import thread.
+    if environment != "test":
+        character_database.status()
 
     if not FRONTEND_ROOT.exists():
         raise RuntimeError(f"Frontend directory does not exist: {FRONTEND_ROOT}")

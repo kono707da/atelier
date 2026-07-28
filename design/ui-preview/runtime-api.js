@@ -699,14 +699,18 @@
     pageSize: 50,
     total: 0,
     isLoading: false,
+    isReady: false,
     hasMore: true,
     observer: null,
     statusTimer: null,
+    copyrightTimer: null,
+    copyrightRequestId: 0,
   };
 
   async function renderCharacterDatabasePage() {
     const page = document.querySelector(".page-scroll");
     if (!page) return;
+    characterDatabaseState.isReady = false;
     const form = document.getElementById("character-database-search-form");
     if (form && !form.dataset.bound) {
       form.dataset.bound = "1";
@@ -722,6 +726,20 @@
         characterDatabaseState.hasMore = true;
         loadCharacterDatabaseResults(false);
       });
+    }
+    const copyrightInput = document.getElementById("character-database-copyright");
+    if (copyrightInput && !copyrightInput.dataset.bound) {
+      copyrightInput.dataset.bound = "1";
+      const scheduleSuggestions = () => {
+        if (characterDatabaseState.copyrightTimer) {
+          clearTimeout(characterDatabaseState.copyrightTimer);
+        }
+        characterDatabaseState.copyrightTimer = setTimeout(() => {
+          loadCharacterDatabaseCopyrights(copyrightInput.value || "");
+        }, 180);
+      };
+      copyrightInput.addEventListener("input", scheduleSuggestions);
+      copyrightInput.addEventListener("focus", scheduleSuggestions);
     }
     // Reset results container with table shell + scroll sentinel.
     const resultsEl = document.getElementById("character-database-results");
@@ -739,7 +757,7 @@
     try {
       const statusPayload = await request("/api/character-database/status");
       if (statusPayload.state === "ready") {
-        await loadCharacterDatabaseCopyrights();
+        characterDatabaseState.isReady = true;
         await loadCharacterDatabaseResults(false);
       } else if (statusPayload.state === "loading") {
         showCharacterDatabaseLoading(statusPayload.progress || 0);
@@ -775,6 +793,7 @@
       try {
         const statusPayload = await request("/api/character-database/status");
         if (statusPayload.state === "ready") {
+          characterDatabaseState.isReady = true;
           clearInterval(characterDatabaseState.statusTimer);
           characterDatabaseState.statusTimer = null;
           const resultsEl = document.getElementById("character-database-results");
@@ -788,7 +807,6 @@
               + '</div>';
             setupCharacterDatabaseScrollObserver();
           }
-          await loadCharacterDatabaseCopyrights();
           await loadCharacterDatabaseResults(false);
         } else if (statusPayload.state === "loading") {
           showCharacterDatabaseLoading(statusPayload.progress || 0);
@@ -817,6 +835,7 @@
         for (const entry of entries) {
           if (entry.isIntersecting) {
             if (
+              characterDatabaseState.isReady &&
               !characterDatabaseState.isLoading &&
               characterDatabaseState.hasMore
             ) {
@@ -832,35 +851,37 @@
     characterDatabaseState.observer = observer;
   }
 
-  async function loadCharacterDatabaseCopyrights() {
-    const select = document.getElementById("character-database-copyright");
-    if (!select) return;
+  async function loadCharacterDatabaseCopyrights(query) {
+    const list = document.getElementById("character-database-copyright-options");
+    if (!list) return;
+    const requestId = characterDatabaseState.copyrightRequestId + 1;
+    characterDatabaseState.copyrightRequestId = requestId;
     try {
-      const payload = await request("/api/character-database/copyrights");
+      const params = new URLSearchParams();
+      params.set("q", String(query || "").trim());
+      params.set("limit", "50");
+      const payload = await request(
+        `/api/character-database/copyrights?${params.toString()}`
+      );
+      if (requestId !== characterDatabaseState.copyrightRequestId) return;
       const items = Array.isArray(payload.items)
         ? payload.items
         : Array.isArray(payload)
         ? payload
         : [];
-      const current = characterDatabaseState.copyright;
-      select.innerHTML =
-        '<option value="">全部作品系列</option>' +
-        items
-          .map((item) => {
-            const value =
-              typeof item === "string"
-                ? item
-                : item.value || item.copyright || item.name || "";
-            const label =
-              typeof item === "string"
-                ? item
-                : item.label || item.copyright || item.name || value;
-            return `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`;
-          })
-          .join("");
-      if (current) select.value = current;
+      list.innerHTML = items
+        .map((item) => {
+          const value =
+            typeof item === "string"
+              ? item
+              : item.value || item.copyright || item.name || "";
+          return `<option value="${escapeHtml(value)}"></option>`;
+        })
+        .join("");
     } catch (error) {
-      select.innerHTML = '<option value="">全部作品系列</option>';
+      if (requestId === characterDatabaseState.copyrightRequestId) {
+        list.innerHTML = "";
+      }
     }
   }
 

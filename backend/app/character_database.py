@@ -1,18 +1,20 @@
 """Danbooru character database — SQLite + FTS5 read-only lookup.
 
 CSV source: danbooru_character.csv (from comfyui-manager project, ~244k rows).
-On first start the CSV is imported into a sidecar SQLite file with a FTS5
-full-text index. Subsequent starts reuse the SQLite file as long as the CSV
-has not changed (compared by mtime).
+On first start the CSV is streamed into a local-app-data SQLite cache with an
+FTS5 full-text index. Subsequent starts reuse that cache while the source
+path, size and modification time remain unchanged.
 
-Import runs in a background daemon thread with batched INSERTs and short
-sleeps between batches to release the GIL, so the FastAPI request loop can
-keep serving other endpoints while the index is being built.
+Import runs in a background daemon thread with batched INSERTs. Only one
+small batch is held in memory, and the network/project directory is never
+used for SQLite random I/O.
 """
 
 from __future__ import annotations
 
 import csv
+import io
+import os
 import sqlite3
 import threading
 import time
@@ -21,8 +23,41 @@ from typing import Literal
 
 
 _CSV_DIR = Path(__file__).resolve().parents[2] / "data" / "character-database"
-_CSV_PATH = _CSV_DIR / "danbooru_character.csv"
-_SQLITE_PATH = _CSV_DIR / "danbooru_character.sqlite3"
+_CSV_FILENAME = "danbooru_character.csv"
+
+
+def _resolve_csv_path() -> Path:
+    configured_path = os.environ.get("ATELIER_CHARACTER_CSV", "").strip()
+    candidates = [
+        Path(configured_path).expanduser() if configured_path else None,
+        _CSV_DIR / _CSV_FILENAME,
+        Path.home()
+        / "Documents"
+        / "AICode"
+        / "提示词整理"
+        / _CSV_FILENAME,
+    ]
+    for candidate in candidates:
+        if candidate is not None and candidate.is_file():
+            return candidate.resolve()
+    return _CSV_DIR / _CSV_FILENAME
+
+
+def _resolve_sqlite_path() -> Path:
+    configured_path = os.environ.get("ATELIER_CHARACTER_CACHE", "").strip()
+    if configured_path:
+        return Path(configured_path).expanduser().resolve()
+    local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
+    cache_root = (
+        Path(local_app_data)
+        if local_app_data
+        else Path.home() / "AppData" / "Local"
+    )
+    return cache_root / "Atelier" / "character-database" / "danbooru_character.sqlite3"
+
+
+_CSV_PATH = _resolve_csv_path()
+_SQLITE_PATH = _resolve_sqlite_path()
 
 ImportState = Literal["pending", "loading", "ready", "error"]
 
@@ -40,11 +75,11 @@ _import_thread: threading.Thread | None = None
 
 
 def _connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(_SQLITE_PATH, timeout=30)
+    uri = _SQLITE_PATH.resolve().as_uri() + "?mode=ro"
+    conn = sqlite3.connect(uri, timeout=5, uri=True)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode = WAL")
-    conn.execute("PRAGMA synchronous = NORMAL")
-    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA query_only = ON")
+    conn.execute("PRAGMA temp_store = MEMORY")
     return conn
 
 
@@ -66,20 +101,6 @@ def _build_schema(conn: sqlite3.Connection) -> None:
             url TEXT NOT NULL DEFAULT ''
         );
 
-        CREATE INDEX idx_characters_count ON characters(count);
-        CREATE INDEX idx_characters_character ON characters(character);
-        CREATE INDEX idx_characters_copyright ON characters(copyright);
-
-        CREATE VIRTUAL TABLE characters_fts USING fts5(
-            character,
-            copyright,
-            trigger,
-            core_tags,
-            content='characters',
-            content_rowid='id',
-            tokenize="unicode61 separators '_-.'"
-        );
-
         CREATE TABLE db_meta (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
@@ -88,38 +109,46 @@ def _build_schema(conn: sqlite3.Connection) -> None:
     )
 
 
+def _csv_signature() -> str:
+    stat = _CSV_PATH.stat()
+    return f"{_CSV_PATH.resolve()}|{stat.st_size}|{stat.st_mtime_ns}"
+
+
 def _existing_index_is_current() -> bool:
-    """Return True if the sidecar SQLite exists and matches the CSV mtime."""
+    """Return True if the local SQLite cache matches the current CSV."""
     if not _SQLITE_PATH.exists():
         return False
     try:
         conn = sqlite3.connect(_SQLITE_PATH, timeout=5)
         try:
-            row = conn.execute(
-                "SELECT value FROM db_meta WHERE key = 'csv_mtime'"
-            ).fetchone()
-            row_count = conn.execute("SELECT COUNT(*) FROM characters").fetchone()[0]
+            rows = conn.execute(
+                "SELECT key, value FROM db_meta "
+                "WHERE key IN ('csv_signature', 'row_count')"
+            ).fetchall()
         finally:
             conn.close()
     except sqlite3.DatabaseError:
         return False
-    if not row or row_count == 0:
+    metadata = {str(row[0]): str(row[1]) for row in rows}
+    if int(metadata.get("row_count", "0") or 0) <= 0:
         return False
     try:
-        csv_mtime = str(_CSV_PATH.stat().st_mtime)
+        signature = _csv_signature()
     except OSError:
         return False
-    return row[0] == csv_mtime
+    return metadata.get("csv_signature") == signature
 
 
 def _count_existing_rows() -> int:
-    """Return the row count of the existing sidecar SQLite, or 0 on error."""
+    """Read the cached row count without scanning the full characters table."""
     if not _SQLITE_PATH.exists():
         return 0
     try:
         conn = sqlite3.connect(_SQLITE_PATH, timeout=5)
         try:
-            row = conn.execute("SELECT COUNT(*) FROM characters").fetchone()
+            row = conn.execute(
+                "SELECT value FROM db_meta WHERE key = 'row_count'"
+            ).fetchone()
         finally:
             conn.close()
         return int(row[0]) if row else 0
@@ -143,6 +172,8 @@ def _import_csv_to_sqlite() -> None:
             _error = f"CSV not found: {_CSV_PATH}"
             return
 
+        _SQLITE_PATH.parent.mkdir(parents=True, exist_ok=True)
+
         # Write to a temp file so an interrupted import doesn't corrupt the
         # last good index.
         if tmp_path.exists():
@@ -154,21 +185,23 @@ def _import_csv_to_sqlite() -> None:
 
         conn = sqlite3.connect(tmp_path, timeout=30)
         try:
-            # Import-time pragmas for speed; we switch to WAL after.
+            # The cache is disposable and built in a temporary file, so these
+            # import-time settings are safe and avoid unnecessary disk syncs.
             conn.execute("PRAGMA journal_mode = OFF")
             conn.execute("PRAGMA synchronous = OFF")
+            conn.execute("PRAGMA locking_mode = EXCLUSIVE")
+            conn.execute("PRAGMA temp_store = MEMORY")
+            conn.execute("PRAGMA cache_size = -65536")
             _build_schema(conn)
 
-            with open(_CSV_PATH, "r", encoding="utf-8", newline="") as f:
-                reader = csv.DictReader(f)
-                # First pass: count rows for progress reporting.
-                rows = list(reader)
-                _total_rows = len(rows)
-
+            source_size = max(1, _CSV_PATH.stat().st_size)
+            with open(_CSV_PATH, "rb") as raw_file:
+                text_file = io.TextIOWrapper(raw_file, encoding="utf-8", newline="")
+                reader = csv.DictReader(text_file)
                 batch: list[tuple] = []
                 batch_size = 2000
                 inserted = 0
-                for idx, row in enumerate(rows, start=1):
+                for idx, row in enumerate(reader, start=1):
                     try:
                         batch.append((
                             idx,
@@ -187,38 +220,59 @@ def _import_csv_to_sqlite() -> None:
                             "INSERT INTO characters(id, character, copyright, trigger, core_tags, count, solo_count, url) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                             batch,
                         )
-                        conn.commit()
                         inserted += len(batch)
                         batch.clear()
-                        _progress = inserted / _total_rows if _total_rows else 1.0
-                        # Yield to other threads so request loop stays responsive.
-                        time.sleep(0.005)
+                        _total_rows = inserted
+                        # Reserve the final 15% for SQLite/FTS index creation.
+                        _progress = min(0.85, (raw_file.tell() / source_size) * 0.85)
+                        # Let the request thread report progress between batches.
+                        time.sleep(0)
                 if batch:
                     conn.executemany(
                         "INSERT INTO characters(id, character, copyright, trigger, core_tags, count, solo_count, url) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                         batch,
                     )
-                    conn.commit()
                     inserted += len(batch)
-                _progress = 1.0
+                _total_rows = inserted
 
-                # Rebuild FTS index from the characters table.
-                conn.execute("INSERT INTO characters_fts(rowid, character, copyright, trigger, core_tags) SELECT id, character, copyright, trigger, core_tags FROM characters")
-                # Record CSV mtime so subsequent starts can skip re-import.
-                try:
-                    csv_mtime = str(_CSV_PATH.stat().st_mtime)
-                except OSError:
-                    csv_mtime = ""
-                conn.execute(
-                    "INSERT INTO db_meta(key, value) VALUES('csv_mtime', ?)",
-                    (csv_mtime,),
+            _progress = 0.87
+            conn.execute("CREATE INDEX idx_characters_count ON characters(count)")
+            conn.execute(
+                "CREATE INDEX idx_characters_character ON characters(character)"
+            )
+            conn.execute(
+                "CREATE INDEX idx_characters_copyright ON characters(copyright)"
+            )
+            _progress = 0.91
+            conn.execute(
+                """
+                CREATE VIRTUAL TABLE characters_fts USING fts5(
+                    character,
+                    copyright,
+                    trigger,
+                    core_tags,
+                    content='characters',
+                    content_rowid='id',
+                    tokenize="unicode61 separators '_-.'"
                 )
-                conn.commit()
+                """
+            )
+            conn.execute(
+                "INSERT INTO characters_fts("
+                "rowid, character, copyright, trigger, core_tags"
+                ") SELECT id, character, copyright, trigger, core_tags FROM characters"
+            )
+            _progress = 0.98
+            conn.executemany(
+                "INSERT INTO db_meta(key, value) VALUES(?, ?)",
+                [
+                    ("csv_signature", _csv_signature()),
+                    ("row_count", str(inserted)),
+                ],
+            )
+            conn.commit()
+            _progress = 1.0
         finally:
-            try:
-                conn.execute("PRAGMA journal_mode = WAL")
-            except Exception:
-                pass
             conn.close()
 
         # Atomically replace the old index with the freshly built one.
@@ -344,7 +398,8 @@ def search(
 
     where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
-    with _connect() as conn:
+    conn = _connect()
+    try:
         total_row = conn.execute(
             f"SELECT COUNT(*) AS c FROM characters{where_sql}", params
         ).fetchone()
@@ -356,6 +411,8 @@ def search(
             f"FROM characters{where_sql} ORDER BY {order_sql} LIMIT ? OFFSET ?",
             params + [page_size, offset],
         ).fetchall()
+    finally:
+        conn.close()
 
     items = [dict(row) for row in rows]
     return {
@@ -366,15 +423,29 @@ def search(
     }
 
 
-def list_copyrights() -> list[str]:
+def list_copyrights(q: str = "", limit: int = 50) -> list[str]:
     if not _is_ready():
         raise CharacterDatabaseNotReadyError(
             f"Character database is {_state}; please retry shortly."
         )
-    with _connect() as conn:
+    safe_limit = max(1, min(limit, 200))
+    q_clean = q.strip().lower().replace(" ", "_")
+    params: list[object]
+    where_sql = "WHERE copyright != ''"
+    if q_clean:
+        where_sql += " AND copyright >= ? AND copyright < ?"
+        params = [q_clean, q_clean + "\U0010ffff", safe_limit]
+    else:
+        params = [safe_limit]
+    conn = _connect()
+    try:
         rows = conn.execute(
-            "SELECT DISTINCT copyright FROM characters WHERE copyright != '' ORDER BY copyright"
+            "SELECT DISTINCT copyright FROM characters "
+            f"{where_sql} ORDER BY copyright LIMIT ?",
+            params,
         ).fetchall()
+    finally:
+        conn.close()
     return [row["copyright"] for row in rows]
 
 
@@ -385,11 +456,14 @@ def stats() -> dict[str, object]:
             "total_characters": 0,
             "total_copyrights": 0,
         }
-    with _connect() as conn:
+    conn = _connect()
+    try:
         total_row = conn.execute("SELECT COUNT(*) AS c FROM characters").fetchone()
         copyright_row = conn.execute(
             "SELECT COUNT(DISTINCT copyright) AS c FROM characters WHERE copyright != ''"
         ).fetchone()
+    finally:
+        conn.close()
     return {
         "state": _state,
         "total_characters": int(total_row["c"]) if total_row else 0,
