@@ -165,18 +165,29 @@ class DatabaseManager:
 
                 CREATE TABLE IF NOT EXISTS characters (
                     id TEXT PRIMARY KEY,
-                    project_id TEXT NOT NULL,
                     name TEXT NOT NULL,
                     sort_order INTEGER NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
-                    FOREIGN KEY (project_id)
-                        REFERENCES projects(id) ON DELETE CASCADE,
-                    UNIQUE (project_id, name)
+                    UNIQUE (name)
                 );
 
-                CREATE INDEX IF NOT EXISTS idx_characters_project_sort
-                    ON characters(project_id, sort_order);
+                CREATE INDEX IF NOT EXISTS idx_characters_sort
+                    ON characters(sort_order);
+
+                CREATE TABLE IF NOT EXISTS project_characters (
+                    project_id TEXT NOT NULL,
+                    character_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (project_id, character_id),
+                    FOREIGN KEY (project_id)
+                        REFERENCES projects(id) ON DELETE CASCADE,
+                    FOREIGN KEY (character_id)
+                        REFERENCES characters(id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_project_characters_project
+                    ON project_characters(project_id);
 
                 CREATE TABLE IF NOT EXISTS character_variants (
                     id TEXT PRIMARY KEY,
@@ -194,26 +205,23 @@ class DatabaseManager:
                 CREATE INDEX IF NOT EXISTS idx_character_variants_character_sort
                     ON character_variants(character_id, sort_order);
 
-                CREATE TABLE IF NOT EXISTS project_specs (
+                CREATE TABLE IF NOT EXISTS specs (
                     id TEXT PRIMARY KEY,
-                    project_id TEXT NOT NULL,
                     spec_type TEXT NOT NULL,
                     custom_label TEXT NOT NULL DEFAULT '',
                     sort_order INTEGER NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
-                    FOREIGN KEY (project_id)
-                        REFERENCES projects(id) ON DELETE CASCADE,
-                    UNIQUE (project_id, spec_type, custom_label)
+                    UNIQUE (spec_type, custom_label)
                 );
 
-                CREATE INDEX IF NOT EXISTS idx_project_specs_project_sort
-                    ON project_specs(project_id, sort_order);
+                CREATE INDEX IF NOT EXISTS idx_specs_sort
+                    ON specs(sort_order);
 
                 CREATE TABLE IF NOT EXISTS character_spec_values (
                     id TEXT PRIMARY KEY,
                     variant_id TEXT NOT NULL,
-                    project_spec_id TEXT NOT NULL,
+                    spec_id TEXT NOT NULL,
                     prompt TEXT NOT NULL DEFAULT '',
                     lora_name TEXT NOT NULL DEFAULT '',
                     lora_weight REAL,
@@ -223,15 +231,17 @@ class DatabaseManager:
                     updated_at TEXT NOT NULL,
                     FOREIGN KEY (variant_id)
                         REFERENCES character_variants(id) ON DELETE CASCADE,
-                    FOREIGN KEY (project_spec_id)
-                        REFERENCES project_specs(id) ON DELETE CASCADE,
-                    UNIQUE (variant_id, project_spec_id)
+                    FOREIGN KEY (spec_id)
+                        REFERENCES specs(id) ON DELETE CASCADE,
+                    UNIQUE (variant_id, spec_id)
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_character_spec_values_variant
                     ON character_spec_values(variant_id);
                 """
             )
+            # Migrate legacy tables if they exist (pre-v0.1.7 schema)
+            self._migrate_legacy_character_schema(connection)
             marker = connection.execute(
                 "SELECT value FROM atelier_meta WHERE key = 'environment'"
             ).fetchone()
@@ -255,6 +265,158 @@ class DatabaseManager:
                 ON CONFLICT(key) DO NOTHING
                 """,
                 (now,),
+            )
+
+    def _migrate_legacy_character_schema(self, connection) -> None:
+        """Migrate pre-v0.1.7 schema: characters had project_id, project_specs was project-scoped."""
+        # Check if old characters table has project_id column
+        cols = [row["name"] for row in connection.execute("PRAGMA table_info(characters)").fetchall()]
+        if "project_id" not in cols:
+            return  # Already new schema or empty
+
+        # Backup old data
+        old_chars = connection.execute(
+            "SELECT id, project_id, name, sort_order, created_at, updated_at FROM characters"
+        ).fetchall()
+        old_variants = connection.execute(
+            "SELECT id, character_id, name, is_default, sort_order, created_at, updated_at FROM character_variants"
+        ).fetchall()
+        old_specs = connection.execute(
+            "SELECT id, project_id, spec_type, custom_label, sort_order, created_at, updated_at FROM project_specs"
+        ).fetchall()
+        old_csv = connection.execute(
+            "SELECT id, variant_id, project_spec_id, prompt, lora_name, lora_weight, model_override, notes, created_at, updated_at FROM character_spec_values"
+        ).fetchall()
+
+        # Drop old tables and recreate with new schema
+        connection.execute("DROP TABLE IF EXISTS character_spec_values")
+        connection.execute("DROP TABLE IF EXISTS character_variants")
+        connection.execute("DROP TABLE IF EXISTS project_specs")
+        connection.execute("DROP TABLE IF EXISTS project_characters")
+        connection.execute("DROP TABLE IF EXISTS specs")
+        connection.execute("DROP TABLE IF EXISTS characters")
+
+        connection.execute(
+            """
+            CREATE TABLE characters (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                sort_order INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE (name)
+            )
+            """
+        )
+        connection.execute("CREATE INDEX idx_characters_sort ON characters(sort_order)")
+        connection.execute(
+            """
+            CREATE TABLE project_characters (
+                project_id TEXT NOT NULL,
+                character_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (project_id, character_id),
+                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+                FOREIGN KEY (character_id) REFERENCES characters(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute("CREATE INDEX idx_project_characters_project ON project_characters(project_id)")
+        connection.execute(
+            """
+            CREATE TABLE character_variants (
+                id TEXT PRIMARY KEY,
+                character_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                is_default INTEGER NOT NULL DEFAULT 0,
+                sort_order INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (character_id) REFERENCES characters(id) ON DELETE CASCADE,
+                UNIQUE (character_id, name)
+            )
+            """
+        )
+        connection.execute("CREATE INDEX idx_character_variants_character_sort ON character_variants(character_id, sort_order)")
+        connection.execute(
+            """
+            CREATE TABLE specs (
+                id TEXT PRIMARY KEY,
+                spec_type TEXT NOT NULL,
+                custom_label TEXT NOT NULL DEFAULT '',
+                sort_order INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE (spec_type, custom_label)
+            )
+            """
+        )
+        connection.execute("CREATE INDEX idx_specs_sort ON specs(sort_order)")
+        connection.execute(
+            """
+            CREATE TABLE character_spec_values (
+                id TEXT PRIMARY KEY,
+                variant_id TEXT NOT NULL,
+                spec_id TEXT NOT NULL,
+                prompt TEXT NOT NULL DEFAULT '',
+                lora_name TEXT NOT NULL DEFAULT '',
+                lora_weight REAL,
+                model_override TEXT NOT NULL DEFAULT '',
+                notes TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (variant_id) REFERENCES character_variants(id) ON DELETE CASCADE,
+                FOREIGN KEY (spec_id) REFERENCES specs(id) ON DELETE CASCADE,
+                UNIQUE (variant_id, spec_id)
+            )
+            """
+        )
+        connection.execute("CREATE INDEX idx_character_spec_values_variant ON character_spec_values(variant_id)")
+
+        # Migrate characters (deduplicate by name, prefer earliest created_at)
+        seen_names = {}
+        for row in old_chars:
+            name = row["name"]
+            if name not in seen_names or row["created_at"] < seen_names[name]["created_at"]:
+                seen_names[name] = row
+        for name, row in seen_names.items():
+            connection.execute(
+                "INSERT INTO characters(id, name, sort_order, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                (row["id"], name, row["sort_order"], row["created_at"], row["updated_at"]),
+            )
+            # Re-create project_characters association from original project_id
+            connection.execute(
+                "INSERT OR IGNORE INTO project_characters(project_id, character_id, created_at) VALUES (?, ?, ?)",
+                (row["project_id"], row["id"], row["created_at"]),
+            )
+
+        # Re-insert character_variants (schema unchanged)
+        for row in old_variants:
+            connection.execute(
+                "INSERT OR IGNORE INTO character_variants(id, character_id, name, is_default, sort_order, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (row["id"], row["character_id"], row["name"], row["is_default"], row["sort_order"], row["created_at"], row["updated_at"]),
+            )
+
+        # Migrate specs (deduplicate by spec_type + custom_label)
+        seen_specs = {}
+        for row in old_specs:
+            key = (row["spec_type"], row["custom_label"])
+            if key not in seen_specs or row["created_at"] < seen_specs[key]["created_at"]:
+                seen_specs[key] = row
+        for key, row in seen_specs.items():
+            connection.execute(
+                "INSERT INTO specs(id, spec_type, custom_label, sort_order, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (row["id"], row["spec_type"], row["custom_label"], row["sort_order"], row["created_at"], row["updated_at"]),
+            )
+
+        # Migrate character_spec_values (project_spec_id → spec_id, mapping already preserved since spec ids unchanged)
+        for row in old_csv:
+            connection.execute(
+                """INSERT INTO character_spec_values(
+                    id, variant_id, spec_id, prompt, lora_name, lora_weight, model_override, notes, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (row["id"], row["variant_id"], row["project_spec_id"], row["prompt"], row["lora_name"],
+                 row["lora_weight"], row["model_override"], row["notes"], row["created_at"], row["updated_at"]),
             )
 
     def activate(self, environment: DatabaseEnvironment) -> None:
@@ -638,20 +800,32 @@ class DatabaseManager:
 
     def list_characters(
         self,
-        project_id: str,
+        project_id: str | None = None,
         environment: DatabaseEnvironment | None = None,
     ) -> list[dict[str, object]]:
+        """List characters. If project_id given, return characters linked to that project.
+        If project_id is None, return all global characters."""
         target_environment = environment or self._active_environment
         with self.connection(target_environment) as connection:
-            rows = connection.execute(
-                """
-                SELECT id, project_id, name, sort_order, created_at, updated_at
-                FROM characters
-                WHERE project_id = ?
-                ORDER BY sort_order ASC, created_at ASC
-                """,
-                (project_id,),
-            ).fetchall()
+            if project_id is None:
+                rows = connection.execute(
+                    """
+                    SELECT id, name, sort_order, created_at, updated_at
+                    FROM characters
+                    ORDER BY sort_order ASC, created_at ASC
+                    """
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT c.id, c.name, c.sort_order, c.created_at, c.updated_at
+                    FROM characters c
+                    JOIN project_characters pc ON pc.character_id = c.id
+                    WHERE pc.project_id = ?
+                    ORDER BY c.sort_order ASC, c.created_at ASC
+                    """,
+                    (project_id,),
+                ).fetchall()
         return [dict(row) for row in rows]
 
     def get_character_stats(
@@ -689,7 +863,7 @@ class DatabaseManager:
         with self.connection(target_environment) as connection:
             row = connection.execute(
                 """
-                SELECT id, project_id, name, sort_order, created_at, updated_at
+                SELECT id, name, sort_order, created_at, updated_at
                 FROM characters
                 WHERE id = ?
                 """,
@@ -699,48 +873,39 @@ class DatabaseManager:
 
     def create_character(
         self,
-        project_id: str,
         name: str,
+        project_id: str | None = None,
         environment: DatabaseEnvironment | None = None,
     ) -> dict[str, object]:
+        """Create a global character. If project_id given, also link to that project."""
         target_environment = environment or self._active_environment
         clean_name = " ".join(name.split())
         if not clean_name:
             raise ValueError("人物名称不能为空。")
         if len(clean_name) > 80:
             raise ValueError("人物名称不能超过 80 个字符。")
-        if self.get_project(project_id, target_environment) is None:
+        if project_id is not None and self.get_project(project_id, target_environment) is None:
             raise ValueError("项目不存在。")
         now = datetime.now(timezone.utc).isoformat()
         character_id = str(uuid4())
-        character = {
-            "id": character_id,
-            "project_id": project_id,
-            "name": clean_name,
-            "created_at": now,
-            "updated_at": now,
-        }
         try:
             with self._lock, self.connection(target_environment) as connection:
                 row = connection.execute(
-                    """
-                    SELECT COALESCE(MAX(sort_order), 0) AS max_sort
-                    FROM characters
-                    WHERE project_id = ?
-                    """,
-                    (project_id,),
+                    "SELECT COALESCE(MAX(sort_order), 0) AS max_sort FROM characters"
                 ).fetchone()
                 next_sort = int(row["max_sort"]) + 1
-                character["sort_order"] = next_sort
                 connection.execute(
                     """
-                    INSERT INTO characters(
-                        id, project_id, name, sort_order, created_at, updated_at
-                    )
-                    VALUES(:id, :project_id, :name, :sort_order, :created_at, :updated_at)
+                    INSERT INTO characters(id, name, sort_order, created_at, updated_at)
+                    VALUES(?, ?, ?, ?, ?)
                     """,
-                    character,
+                    (character_id, clean_name, next_sort, now, now),
                 )
+                if project_id is not None:
+                    connection.execute(
+                        "INSERT INTO project_characters(project_id, character_id, created_at) VALUES (?, ?, ?)",
+                        (project_id, character_id, now),
+                    )
                 variant_id = str(uuid4())
                 connection.execute(
                     """
@@ -752,19 +917,13 @@ class DatabaseManager:
                     (variant_id, character_id, now, now),
                 )
                 spec_rows = connection.execute(
-                    """
-                    SELECT id, spec_type, custom_label, sort_order
-                    FROM project_specs
-                    WHERE project_id = ?
-                    ORDER BY sort_order ASC
-                    """,
-                    (project_id,),
+                    "SELECT id FROM specs ORDER BY sort_order ASC"
                 ).fetchall()
                 for spec in spec_rows:
                     connection.execute(
                         """
                         INSERT INTO character_spec_values(
-                            id, variant_id, project_spec_id,
+                            id, variant_id, spec_id,
                             prompt, lora_name, lora_weight, model_override, notes,
                             created_at, updated_at
                         )
@@ -773,8 +932,39 @@ class DatabaseManager:
                         (str(uuid4()), variant_id, spec["id"], now, now),
                     )
         except sqlite3.IntegrityError as error:
-            raise ValueError("该项目下已经存在同名人物。") from error
+            raise ValueError("已存在同名人物。") from error
         return self.get_character(character_id, target_environment)  # type: ignore[return-value]
+
+    def link_character_to_project(
+        self,
+        character_id: str,
+        project_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> None:
+        target_environment = environment or self._active_environment
+        if self.get_character(character_id, target_environment) is None:
+            raise ValueError("人物不存在。")
+        if self.get_project(project_id, target_environment) is None:
+            raise ValueError("项目不存在。")
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self.connection(target_environment) as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO project_characters(project_id, character_id, created_at) VALUES (?, ?, ?)",
+                (project_id, character_id, now),
+            )
+
+    def unlink_character_from_project(
+        self,
+        character_id: str,
+        project_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> None:
+        target_environment = environment or self._active_environment
+        with self._lock, self.connection(target_environment) as connection:
+            connection.execute(
+                "DELETE FROM project_characters WHERE project_id = ? AND character_id = ?",
+                (project_id, character_id),
+            )
 
     def rename_character(
         self,
@@ -792,17 +982,13 @@ class DatabaseManager:
         try:
             with self._lock, self.connection(target_environment) as connection:
                 cursor = connection.execute(
-                    """
-                    UPDATE characters
-                    SET name = ?, updated_at = ?
-                    WHERE id = ?
-                    """,
+                    "UPDATE characters SET name = ?, updated_at = ? WHERE id = ?",
                     (clean_name, now, character_id),
                 )
                 if cursor.rowcount == 0:
                     raise ValueError("人物不存在。")
         except sqlite3.IntegrityError as error:
-            raise ValueError("该项目下已经存在同名人物。") from error
+            raise ValueError("已存在同名人物。") from error
         character = self.get_character(character_id, target_environment)
         if character is None:
             raise ValueError("人物不存在。")
@@ -816,11 +1002,7 @@ class DatabaseManager:
         target_environment = environment or self._active_environment
         with self._lock, self.connection(target_environment) as connection:
             character = connection.execute(
-                """
-                SELECT id, project_id, name, sort_order, created_at, updated_at
-                FROM characters
-                WHERE id = ?
-                """,
+                "SELECT id, name, sort_order, created_at, updated_at FROM characters WHERE id = ?",
                 (character_id,),
             ).fetchone()
             if character is None:
@@ -903,19 +1085,13 @@ class DatabaseManager:
                     (variant_id, character_id, clean_name, next_sort, now, now),
                 )
                 spec_rows = connection.execute(
-                    """
-                    SELECT id, spec_type, custom_label, sort_order
-                    FROM project_specs
-                    WHERE project_id = ?
-                    ORDER BY sort_order ASC
-                    """,
-                    (character["project_id"],),
+                    "SELECT id FROM specs ORDER BY sort_order ASC"
                 ).fetchall()
                 for spec in spec_rows:
                     connection.execute(
                         """
                         INSERT INTO character_spec_values(
-                            id, variant_id, project_spec_id,
+                            id, variant_id, spec_id,
                             prompt, lora_name, lora_weight, model_override, notes,
                             created_at, updated_at
                         )
@@ -981,27 +1157,24 @@ class DatabaseManager:
             )
         return dict(variant)
 
-    # ── Project Specs ───────────────────────────────────────────
+    # ── Specs (global) ──────────────────────────────────────────
 
-    def list_project_specs(
+    def list_specs(
         self,
-        project_id: str,
         environment: DatabaseEnvironment | None = None,
     ) -> list[dict[str, object]]:
         target_environment = environment or self._active_environment
         with self.connection(target_environment) as connection:
             rows = connection.execute(
                 """
-                SELECT id, project_id, spec_type, custom_label, sort_order, created_at, updated_at
-                FROM project_specs
-                WHERE project_id = ?
+                SELECT id, spec_type, custom_label, sort_order, created_at, updated_at
+                FROM specs
                 ORDER BY sort_order ASC, created_at ASC
-                """,
-                (project_id,),
+                """
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def get_project_spec(
+    def get_spec(
         self,
         spec_id: str,
         environment: DatabaseEnvironment | None = None,
@@ -1010,17 +1183,16 @@ class DatabaseManager:
         with self.connection(target_environment) as connection:
             row = connection.execute(
                 """
-                SELECT id, project_id, spec_type, custom_label, sort_order, created_at, updated_at
-                FROM project_specs
+                SELECT id, spec_type, custom_label, sort_order, created_at, updated_at
+                FROM specs
                 WHERE id = ?
                 """,
                 (spec_id,),
             ).fetchone()
         return dict(row) if row else None
 
-    def create_project_spec(
+    def create_spec(
         self,
-        project_id: str,
         spec_type: str,
         custom_label: str = "",
         environment: DatabaseEnvironment | None = None,
@@ -1033,44 +1205,30 @@ class DatabaseManager:
             raise ValueError("自定义规格必须提供标签名称。")
         if spec_type != "custom":
             custom_label = ""
-        if self.get_project(project_id, target_environment) is None:
-            raise ValueError("项目不存在。")
         now = datetime.now(timezone.utc).isoformat()
         spec_id = str(uuid4())
         try:
             with self._lock, self.connection(target_environment) as connection:
                 row = connection.execute(
-                    """
-                    SELECT COALESCE(MAX(sort_order), 0) AS max_sort
-                    FROM project_specs
-                    WHERE project_id = ?
-                    """,
-                    (project_id,),
+                    "SELECT COALESCE(MAX(sort_order), 0) AS max_sort FROM specs"
                 ).fetchone()
                 next_sort = int(row["max_sort"]) + 1
                 connection.execute(
                     """
-                    INSERT INTO project_specs(
-                        id, project_id, spec_type, custom_label, sort_order, created_at, updated_at
-                    )
-                    VALUES(?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO specs(id, spec_type, custom_label, sort_order, created_at, updated_at)
+                    VALUES(?, ?, ?, ?, ?, ?)
                     """,
-                    (spec_id, project_id, spec_type, custom_label, next_sort, now, now),
+                    (spec_id, spec_type, custom_label, next_sort, now, now),
                 )
+                # Create empty spec values for all existing variants
                 variant_rows = connection.execute(
-                    """
-                    SELECT cv.id
-                    FROM character_variants cv
-                    JOIN characters c ON c.id = cv.character_id
-                    WHERE c.project_id = ?
-                    """,
-                    (project_id,),
+                    "SELECT id FROM character_variants"
                 ).fetchall()
                 for variant in variant_rows:
                     connection.execute(
                         """
                         INSERT INTO character_spec_values(
-                            id, variant_id, project_spec_id,
+                            id, variant_id, spec_id,
                             prompt, lora_name, lora_weight, model_override, notes,
                             created_at, updated_at
                         )
@@ -1079,17 +1237,17 @@ class DatabaseManager:
                         (str(uuid4()), variant["id"], spec_id, now, now),
                     )
         except sqlite3.IntegrityError as error:
-            raise ValueError("该项目下已经存在相同类型和标签的规格。") from error
-        return self.get_project_spec(spec_id, target_environment)  # type: ignore[return-value]
+            raise ValueError("已存在相同类型和标签的规格。") from error
+        return self.get_spec(spec_id, target_environment)  # type: ignore[return-value]
 
-    def update_project_spec(
+    def update_spec(
         self,
         spec_id: str,
         custom_label: str | None = None,
         environment: DatabaseEnvironment | None = None,
     ) -> dict[str, object]:
         target_environment = environment or self._active_environment
-        spec = self.get_project_spec(spec_id, target_environment)
+        spec = self.get_spec(spec_id, target_environment)
         if spec is None:
             raise ValueError("规格不存在。")
         if spec["spec_type"] != "custom":
@@ -1103,20 +1261,16 @@ class DatabaseManager:
         try:
             with self._lock, self.connection(target_environment) as connection:
                 cursor = connection.execute(
-                    """
-                    UPDATE project_specs
-                    SET custom_label = ?, updated_at = ?
-                    WHERE id = ?
-                    """,
+                    "UPDATE specs SET custom_label = ?, updated_at = ? WHERE id = ?",
                     (clean_label, now, spec_id),
                 )
                 if cursor.rowcount == 0:
                     raise ValueError("规格不存在。")
         except sqlite3.IntegrityError as error:
-            raise ValueError("该项目下已经存在相同标签的规格。") from error
-        return self.get_project_spec(spec_id, target_environment)  # type: ignore[return-value]
+            raise ValueError("已存在相同标签的规格。") from error
+        return self.get_spec(spec_id, target_environment)  # type: ignore[return-value]
 
-    def delete_project_spec(
+    def delete_spec(
         self,
         spec_id: str,
         environment: DatabaseEnvironment | None = None,
@@ -1125,15 +1279,15 @@ class DatabaseManager:
         with self._lock, self.connection(target_environment) as connection:
             spec = connection.execute(
                 """
-                SELECT id, project_id, spec_type, custom_label, sort_order, created_at, updated_at
-                FROM project_specs
+                SELECT id, spec_type, custom_label, sort_order, created_at, updated_at
+                FROM specs
                 WHERE id = ?
                 """,
                 (spec_id,),
             ).fetchone()
             if spec is None:
                 raise ValueError("规格不存在。")
-            connection.execute("DELETE FROM project_specs WHERE id = ?", (spec_id,))
+            connection.execute("DELETE FROM specs WHERE id = ?", (spec_id,))
         return dict(spec)
 
     # ── Character Spec Values ───────────────────────────────────
@@ -1147,7 +1301,7 @@ class DatabaseManager:
         with self.connection(target_environment) as connection:
             row = connection.execute(
                 """
-                SELECT id, variant_id, project_spec_id,
+                SELECT id, variant_id, spec_id,
                        prompt, lora_name, lora_weight, model_override, notes,
                        created_at, updated_at
                 FROM character_spec_values
@@ -1219,15 +1373,15 @@ class DatabaseManager:
         with self.connection(target_environment) as connection:
             rows = connection.execute(
                 """
-                SELECT csv.id, csv.variant_id, csv.project_spec_id,
+                SELECT csv.id, csv.variant_id, csv.spec_id,
                        csv.prompt, csv.lora_name, csv.lora_weight,
                        csv.model_override, csv.notes,
                        csv.created_at, csv.updated_at,
-                       ps.spec_type, ps.custom_label
+                       s.spec_type, s.custom_label
                 FROM character_spec_values csv
-                JOIN project_specs ps ON ps.id = csv.project_spec_id
+                JOIN specs s ON s.id = csv.spec_id
                 WHERE csv.variant_id = ?
-                ORDER BY ps.sort_order ASC
+                ORDER BY s.sort_order ASC
                 """,
                 (variant_id,),
             ).fetchall()

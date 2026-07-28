@@ -7,6 +7,7 @@ const pages = [
   ["materials", "素材库", "素材", "MT"],
   ["material-detail", "素材详情", "素材", "MD"],
   ["characters", "人物库", "素材", "CH"],
+  ["character-database", "角色查询", "工具", "CD"],
   ["character-matrix", "人物替换矩阵", "制作", "MX"],
   ["workflows", "工作流库", "工作流", "WF"],
   ["workflow-canvas", "工作流画布", "工作流", "WC"],
@@ -22,9 +23,10 @@ const pages = [
 
 const navGroups = [
   ["项目", ["projects"]],
-  ["项目制作", ["overview", "story-canvas", "characters", "workflows", "batch"]],
+  ["项目制作", ["overview", "story-canvas", "workflows", "batch"]],
   ["生产与成片", ["tasks", "review", "assembly", "export"]],
-  ["全局资源", ["materials", "library", "settings"]],
+  ["全局资源", ["characters", "materials", "library", "settings"]],
+  ["工具", ["character-database"]],
 ];
 
 const pageMeta = Object.fromEntries(pages.map((p) => [p[0], p]));
@@ -343,6 +345,33 @@ function charactersPage() {
   </div>`;
 }
 
+function characterDatabasePage() {
+  return `<div class="page-scroll">
+    ${pageHeader("角色查询", "从全局角色库检索角色、作品系列与标签信息。", "")}
+    <section class="panel character-database-panel">
+      <div class="panel-header">
+        <div><div class="panel-title">搜索角色</div><div class="panel-sub">输入关键词或选择作品系列进行筛选</div></div>
+      </div>
+      <div class="panel-body">
+        <form class="character-database-search" id="character-database-search-form">
+          <input class="modal-input" id="character-database-q" name="q" type="text" placeholder="搜索角色名 / 触发词 / 标签" autocomplete="off" />
+          <select class="modal-input" id="character-database-copyright" name="copyright"><option value="">全部作品系列</option></select>
+          <select class="modal-input" id="character-database-sort" name="sort">
+            <option value="count_desc">标签数从多到少</option>
+            <option value="count_asc">标签数从少到多</option>
+            <option value="character_asc">角色名 A→Z</option>
+            <option value="character_desc">角色名 Z→A</option>
+          </select>
+          <button class="btn primary" type="submit">搜索</button>
+        </form>
+        <div class="character-database-meta" id="character-database-meta"></div>
+        <div class="character-database-results" id="character-database-results"></div>
+        <div class="character-database-pagination" id="character-database-pagination"></div>
+      </div>
+    </section>
+  </div>`;
+}
+
 function characterMatrixPage() {
   const rows = [
     ["角色 A · 裙装", "已填写", "已填写", "已填写", "已填写"],
@@ -615,6 +644,7 @@ const renderers = {
   materials: materialsPage,
   "material-detail": materialDetailPage,
   characters: charactersPage,
+  "character-database": characterDatabasePage,
   "character-matrix": characterMatrixPage,
   workflows: workflowsPage,
   "workflow-canvas": workflowCanvasPage,

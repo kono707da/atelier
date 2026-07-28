@@ -6,3 +6,4 @@ __pycache__/
 data/databases/*.sqlite3
 data/databases/*.sqlite3-shm
 data/databases/*.sqlite3-wal
+data/character-database/*.csv

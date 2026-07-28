@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .database import DatabaseManager, DatabaseSafetyError
+from . import character_database
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -172,7 +173,7 @@ def create_app(
 ) -> FastAPI:
     app = FastAPI(
         title="Atelier API",
-        version="0.1.0",
+        version="0.1.7",
         docs_url="/api/docs",
         redoc_url=None,
     )
@@ -385,11 +386,11 @@ def create_app(
             "deleted": deleted,
         }
 
-    # ── Characters ──────────────────────────────────────────────
+    # ── Characters (global) ────────────────────────────────────
 
-    @app.get("/api/projects/{project_id}/characters")
-    def list_characters(project_id: str) -> dict[str, object]:
-        if manager.get_project(project_id) is None:
+    @app.get("/api/characters")
+    def list_characters(project_id: str | None = None) -> dict[str, object]:
+        if project_id is not None and manager.get_project(project_id) is None:
             raise HTTPException(status_code=404, detail="项目不存在。")
         characters = manager.list_characters(project_id)
         for character in characters:
@@ -402,16 +403,17 @@ def create_app(
         }
 
     @app.post(
-        "/api/projects/{project_id}/characters",
+        "/api/characters",
         status_code=status.HTTP_201_CREATED,
     )
     def create_character(
-        project_id: str, request: CreateCharacterRequest
+        request: CreateCharacterRequest,
+        project_id: str | None = None,
     ) -> dict[str, object]:
-        if manager.get_project(project_id) is None:
+        if project_id is not None and manager.get_project(project_id) is None:
             raise HTTPException(status_code=404, detail="项目不存在。")
         try:
-            character = manager.create_character(project_id, request.name)
+            character = manager.create_character(request.name, project_id)
         except ValueError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         return {
@@ -453,6 +455,37 @@ def create_app(
         return {
             "database_environment": manager.active_environment,
             "deleted": deleted,
+        }
+
+    @app.post("/api/projects/{project_id}/characters/{character_id}")
+    def link_character_to_project(project_id: str, character_id: str) -> dict[str, object]:
+        if manager.get_project(project_id) is None:
+            raise HTTPException(status_code=404, detail="项目不存在。")
+        if manager.get_character(character_id) is None:
+            raise HTTPException(status_code=404, detail="人物不存在。")
+        try:
+            manager.link_character_to_project(character_id, project_id)
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return {
+            "database_environment": manager.active_environment,
+            "project_id": project_id,
+            "character_id": character_id,
+            "linked": True,
+        }
+
+    @app.delete("/api/projects/{project_id}/characters/{character_id}")
+    def unlink_character_from_project(project_id: str, character_id: str) -> dict[str, object]:
+        if manager.get_project(project_id) is None:
+            raise HTTPException(status_code=404, detail="项目不存在。")
+        if manager.get_character(character_id) is None:
+            raise HTTPException(status_code=404, detail="人物不存在。")
+        manager.unlink_character_from_project(character_id, project_id)
+        return {
+            "database_environment": manager.active_environment,
+            "project_id": project_id,
+            "character_id": character_id,
+            "linked": False,
         }
 
     # ── Character Variants ──────────────────────────────────────
@@ -512,32 +545,25 @@ def create_app(
             "deleted": deleted,
         }
 
-    # ── Project Specs ───────────────────────────────────────────
+    # ── Specs (global) ─────────────────────────────────────────
 
-    @app.get("/api/projects/{project_id}/specs")
-    def list_project_specs(project_id: str) -> dict[str, object]:
-        if manager.get_project(project_id) is None:
-            raise HTTPException(status_code=404, detail="项目不存在。")
-        specs = manager.list_project_specs(project_id)
+    @app.get("/api/specs")
+    def list_specs() -> dict[str, object]:
+        specs = manager.list_specs()
         return {
             "database_environment": manager.active_environment,
-            "project_id": project_id,
             "items": specs,
             "total": len(specs),
         }
 
     @app.post(
-        "/api/projects/{project_id}/specs",
+        "/api/specs",
         status_code=status.HTTP_201_CREATED,
     )
-    def create_project_spec(
-        project_id: str, request: CreateProjectSpecRequest
-    ) -> dict[str, object]:
-        if manager.get_project(project_id) is None:
-            raise HTTPException(status_code=404, detail="项目不存在。")
+    def create_spec(request: CreateProjectSpecRequest) -> dict[str, object]:
         try:
-            spec = manager.create_project_spec(
-                project_id, request.spec_type, request.custom_label
+            spec = manager.create_spec(
+                request.spec_type, request.custom_label
             )
         except ValueError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
@@ -546,14 +572,14 @@ def create_app(
             "spec": spec,
         }
 
-    @app.patch("/api/project-specs/{spec_id}")
-    def update_project_spec(
+    @app.patch("/api/specs/{spec_id}")
+    def update_spec(
         spec_id: str, request: UpdateProjectSpecRequest
     ) -> dict[str, object]:
-        if manager.get_project_spec(spec_id) is None:
+        if manager.get_spec(spec_id) is None:
             raise HTTPException(status_code=404, detail="规格不存在。")
         try:
-            spec = manager.update_project_spec(spec_id, request.custom_label)
+            spec = manager.update_spec(spec_id, request.custom_label)
         except ValueError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         return {
@@ -561,11 +587,11 @@ def create_app(
             "spec": spec,
         }
 
-    @app.delete("/api/project-specs/{spec_id}")
-    def delete_project_spec(spec_id: str) -> dict[str, object]:
-        if manager.get_project_spec(spec_id) is None:
+    @app.delete("/api/specs/{spec_id}")
+    def delete_spec(spec_id: str) -> dict[str, object]:
+        if manager.get_spec(spec_id) is None:
             raise HTTPException(status_code=404, detail="规格不存在。")
-        deleted = manager.delete_project_spec(spec_id)
+        deleted = manager.delete_spec(spec_id)
         return {
             "database_environment": manager.active_environment,
             "deleted": deleted,
@@ -606,6 +632,40 @@ def create_app(
             "database_environment": manager.active_environment,
             "spec_value": value,
         }
+
+    # ── Character Database (Danbooru CSV lookup) ───────────────
+
+    @app.get("/api/character-database/search")
+    def search_character_database(
+        q: str = "",
+        copyright: str = "",
+        sort: str = "count",
+        page: int = 1,
+        page_size: int = 50,
+    ) -> dict[str, object]:
+        if page < 1:
+            page = 1
+        if page_size < 1 or page_size > 200:
+            page_size = 50
+        result = character_database.search(
+            q=q,
+            copyright_filter=copyright,
+            sort=sort,
+            page=page,
+            page_size=page_size,
+        )
+        return result
+
+    @app.get("/api/character-database/copyrights")
+    def list_character_database_copyrights() -> dict[str, object]:
+        return {
+            "items": character_database.list_copyrights(),
+            "total": len(character_database.list_copyrights()),
+        }
+
+    @app.get("/api/character-database/stats")
+    def character_database_stats() -> dict[str, object]:
+        return character_database.stats()
 
     if not FRONTEND_ROOT.exists():
         raise RuntimeError(f"Frontend directory does not exist: {FRONTEND_ROOT}")

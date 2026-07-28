@@ -24,19 +24,21 @@ class CharacterApiTests(unittest.TestCase):
         self.project = self.manager.create_project("人物测试项目")
 
     def test_empty_project_returns_empty_character_list(self) -> None:
-        response = self.client.get(f"/api/projects/{self.project['id']}/characters")
+        response = self.client.get(
+            f"/api/characters?project_id={self.project['id']}"
+        )
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertEqual(body["items"], [])
         self.assertEqual(body["total"], 0)
 
     def test_list_characters_includes_stats_aggregate(self) -> None:
-        self.manager.create_project_spec(str(self.project["id"]), "full_body")
-        self.manager.create_project_spec(str(self.project["id"]), "half_body")
-        char = self.manager.create_character(str(self.project["id"]), "角色A")
+        self.manager.create_spec("full_body")
+        self.manager.create_spec("half_body")
+        char = self.manager.create_character("角色A", str(self.project["id"]))
         self.manager.create_character_variant(str(char["id"]), "裙装")
         response = self.client.get(
-            f"/api/projects/{self.project['id']}/characters"
+            f"/api/characters?project_id={self.project['id']}"
         )
         self.assertEqual(response.status_code, 200)
         item = response.json()["items"][0]
@@ -47,35 +49,35 @@ class CharacterApiTests(unittest.TestCase):
 
     def test_create_character_returns_full_shape(self) -> None:
         response = self.client.post(
-            f"/api/projects/{self.project['id']}/characters",
+            f"/api/characters?project_id={self.project['id']}",
             json={"name": "角色A"},
         )
         self.assertEqual(response.status_code, 201)
         char = response.json()["character"]
-        self.assertEqual(char["project_id"], self.project["id"])
+        self.assertNotIn("project_id", char)
         self.assertEqual(char["name"], "角色A")
         self.assertEqual(char["sort_order"], 1)
         for key in ("id", "created_at", "updated_at"):
             self.assertIn(key, char)
 
     def test_create_character_auto_creates_default_variant(self) -> None:
-        char = self.manager.create_character(str(self.project["id"]), "角色A")
+        char = self.manager.create_character("角色A", str(self.project["id"]))
         variants = self.manager.list_character_variants(str(char["id"]))
         self.assertEqual(len(variants), 1)
         self.assertEqual(variants[0]["name"], "默认")
         self.assertEqual(variants[0]["is_default"], 1)
 
     def test_create_character_with_existing_specs_creates_spec_values(self) -> None:
-        self.manager.create_project_spec(str(self.project["id"]), "full_body")
-        self.manager.create_project_spec(str(self.project["id"]), "half_body")
-        char = self.manager.create_character(str(self.project["id"]), "角色A")
+        self.manager.create_spec("full_body")
+        self.manager.create_spec("half_body")
+        char = self.manager.create_character("角色A", str(self.project["id"]))
         variants = self.manager.list_character_variants(str(char["id"]))
         values = self.manager.list_spec_values_for_variant(str(variants[0]["id"]))
         self.assertEqual(len(values), 2)
 
     def test_character_name_is_cleaned(self) -> None:
         response = self.client.post(
-            f"/api/projects/{self.project['id']}/characters",
+            f"/api/characters?project_id={self.project['id']}",
             json={"name": "  角色  A  "},
         )
         self.assertEqual(response.status_code, 201)
@@ -83,54 +85,61 @@ class CharacterApiTests(unittest.TestCase):
 
     def test_blank_character_name_rejected(self) -> None:
         response = self.client.post(
-            f"/api/projects/{self.project['id']}/characters",
+            f"/api/characters?project_id={self.project['id']}",
             json={"name": "   "},
         )
         self.assertEqual(response.status_code, 422)
 
     def test_too_long_character_name_rejected(self) -> None:
         response = self.client.post(
-            f"/api/projects/{self.project['id']}/characters",
+            f"/api/characters?project_id={self.project['id']}",
             json={"name": "名" * 81},
         )
         self.assertEqual(response.status_code, 422)
 
     def test_duplicate_character_name_in_same_project_rejected(self) -> None:
         self.client.post(
-            f"/api/projects/{self.project['id']}/characters",
+            f"/api/characters?project_id={self.project['id']}",
             json={"name": "同名角色"},
         )
         response = self.client.post(
-            f"/api/projects/{self.project['id']}/characters",
+            f"/api/characters?project_id={self.project['id']}",
             json={"name": "同名角色"},
         )
         self.assertEqual(response.status_code, 409)
 
-    def test_same_character_name_allowed_in_different_projects(self) -> None:
+    def test_character_list_isolated_between_projects(self) -> None:
         other = self.manager.create_project("另一个项目")
         self.client.post(
-            f"/api/projects/{self.project['id']}/characters",
+            f"/api/characters?project_id={self.project['id']}",
             json={"name": "共享名"},
         )
-        response = self.client.post(
-            f"/api/projects/{other['id']}/characters",
-            json={"name": "共享名"},
+        other_response = self.client.get(
+            f"/api/characters?project_id={other['id']}"
         )
-        self.assertEqual(response.status_code, 201)
+        self.assertEqual(other_response.status_code, 200)
+        self.assertEqual(other_response.json()["total"], 0)
+        own_response = self.client.get(
+            f"/api/characters?project_id={self.project['id']}"
+        )
+        self.assertEqual(own_response.json()["total"], 1)
 
     def test_nonexistent_project_returns_404(self) -> None:
         self.assertEqual(
-            self.client.get("/api/projects/missing-id/characters").status_code, 404
+            self.client.get(
+                "/api/characters?project_id=missing-id"
+            ).status_code,
+            404,
         )
         self.assertEqual(
             self.client.post(
-                "/api/projects/missing-id/characters", json={"name": "孤儿"}
+                "/api/characters?project_id=missing-id", json={"name": "孤儿"}
             ).status_code,
             404,
         )
 
     def test_rename_character(self) -> None:
-        char = self.manager.create_character(str(self.project["id"]), "旧名称")
+        char = self.manager.create_character("旧名称", str(self.project["id"]))
         response = self.client.patch(
             f"/api/characters/{char['id']}", json={"name": "新名称"}
         )
@@ -138,8 +147,8 @@ class CharacterApiTests(unittest.TestCase):
         self.assertEqual(response.json()["character"]["name"], "新名称")
 
     def test_rename_character_rejects_duplicate(self) -> None:
-        first = self.manager.create_character(str(self.project["id"]), "角色A")
-        self.manager.create_character(str(self.project["id"]), "角色B")
+        first = self.manager.create_character("角色A", str(self.project["id"]))
+        self.manager.create_character("角色B", str(self.project["id"]))
         response = self.client.patch(
             f"/api/characters/{first['id']}", json={"name": "角色B"}
         )
@@ -152,14 +161,14 @@ class CharacterApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 404)
 
     def test_delete_character(self) -> None:
-        char = self.manager.create_character(str(self.project["id"]), "待删除")
+        char = self.manager.create_character("待删除", str(self.project["id"]))
         response = self.client.delete(f"/api/characters/{char['id']}")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["deleted"]["id"], char["id"])
         self.assertIsNone(self.manager.get_character(str(char["id"])))
 
     def test_delete_character_cascades_to_variants(self) -> None:
-        char = self.manager.create_character(str(self.project["id"]), "级联角色")
+        char = self.manager.create_character("级联角色", str(self.project["id"]))
         variants = self.manager.list_character_variants(str(char["id"]))
         self.assertEqual(len(variants), 1)
         self.client.delete(f"/api/characters/{char['id']}")
@@ -175,11 +184,11 @@ class CharacterApiTests(unittest.TestCase):
     def test_characters_sorted_by_sort_order(self) -> None:
         for name in ("角色C", "角色A", "角色B"):
             self.client.post(
-                f"/api/projects/{self.project['id']}/characters",
+                f"/api/characters?project_id={self.project['id']}",
                 json={"name": name},
             )
         body = self.client.get(
-            f"/api/projects/{self.project['id']}/characters"
+            f"/api/characters?project_id={self.project['id']}"
         ).json()
         self.assertEqual(
             [c["name"] for c in body["items"]], ["角色C", "角色A", "角色B"]
@@ -202,7 +211,7 @@ class CharacterVariantApiTests(unittest.TestCase):
         self.manager = self.app.state.database_manager
         self.project = self.manager.create_project("变体测试项目")
         self.character = self.manager.create_character(
-            str(self.project["id"]), "测试角色"
+            "测试角色", str(self.project["id"])
         )
 
     def test_default_variant_exists(self) -> None:
@@ -227,8 +236,8 @@ class CharacterVariantApiTests(unittest.TestCase):
         self.assertEqual(variant["sort_order"], 2)
 
     def test_create_variant_with_existing_specs_creates_values(self) -> None:
-        self.manager.create_project_spec(str(self.project["id"]), "full_body")
-        self.manager.create_project_spec(str(self.project["id"]), "close_up")
+        self.manager.create_spec("full_body")
+        self.manager.create_spec("close_up")
         response = self.client.post(
             f"/api/characters/{self.character['id']}/variants",
             json={"name": "裙装"},
@@ -294,7 +303,7 @@ class ProjectSpecApiTests(unittest.TestCase):
         self.project = self.manager.create_project("规格测试项目")
 
     def test_empty_project_returns_empty_spec_list(self) -> None:
-        response = self.client.get(f"/api/projects/{self.project['id']}/specs")
+        response = self.client.get("/api/specs")
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertEqual(body["items"], [])
@@ -302,18 +311,19 @@ class ProjectSpecApiTests(unittest.TestCase):
 
     def test_create_standard_spec(self) -> None:
         response = self.client.post(
-            f"/api/projects/{self.project['id']}/specs",
+            "/api/specs",
             json={"spec_type": "full_body"},
         )
         self.assertEqual(response.status_code, 201)
         spec = response.json()["spec"]
+        self.assertNotIn("project_id", spec)
         self.assertEqual(spec["spec_type"], "full_body")
         self.assertEqual(spec["custom_label"], "")
         self.assertEqual(spec["sort_order"], 1)
 
     def test_create_custom_spec(self) -> None:
         response = self.client.post(
-            f"/api/projects/{self.project['id']}/specs",
+            "/api/specs",
             json={"spec_type": "custom", "custom_label": "近景"},
         )
         self.assertEqual(response.status_code, 201)
@@ -323,34 +333,34 @@ class ProjectSpecApiTests(unittest.TestCase):
 
     def test_custom_spec_without_label_rejected(self) -> None:
         response = self.client.post(
-            f"/api/projects/{self.project['id']}/specs",
+            "/api/specs",
             json={"spec_type": "custom"},
         )
         self.assertEqual(response.status_code, 422)
 
     def test_invalid_spec_type_rejected(self) -> None:
         response = self.client.post(
-            f"/api/projects/{self.project['id']}/specs",
+            "/api/specs",
             json={"spec_type": "invalid_type"},
         )
         self.assertEqual(response.status_code, 422)
 
     def test_duplicate_spec_rejected(self) -> None:
         self.client.post(
-            f"/api/projects/{self.project['id']}/specs",
+            "/api/specs",
             json={"spec_type": "full_body"},
         )
         response = self.client.post(
-            f"/api/projects/{self.project['id']}/specs",
+            "/api/specs",
             json={"spec_type": "full_body"},
         )
         self.assertEqual(response.status_code, 409)
 
     def test_create_spec_auto_creates_values_for_existing_variants(self) -> None:
-        char = self.manager.create_character(str(self.project["id"]), "角色A")
+        char = self.manager.create_character("角色A", str(self.project["id"]))
         variants = self.manager.list_character_variants(str(char["id"]))
         self.client.post(
-            f"/api/projects/{self.project['id']}/specs",
+            "/api/specs",
             json={"spec_type": "full_body"},
         )
         values = self.manager.list_spec_values_for_variant(str(variants[0]["id"]))
@@ -359,20 +369,20 @@ class ProjectSpecApiTests(unittest.TestCase):
         self.assertIsNone(values[0]["lora_weight"])
 
     def test_delete_spec_removes_spec_values(self) -> None:
-        self.manager.create_project_spec(str(self.project["id"]), "full_body")
-        self.manager.create_character(str(self.project["id"]), "角色A")
-        specs = self.manager.list_project_specs(str(self.project["id"]))
+        self.manager.create_spec("full_body")
+        self.manager.create_character("角色A", str(self.project["id"]))
+        specs = self.manager.list_specs()
         response = self.client.delete(
-            f"/api/project-specs/{specs[0]['id']}"
+            f"/api/specs/{specs[0]['id']}"
         )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
-            self.manager.list_project_specs(str(self.project["id"])), []
+            self.manager.list_specs(), []
         )
 
     def test_update_character_spec_value(self) -> None:
-        self.manager.create_project_spec(str(self.project["id"]), "full_body")
-        char = self.manager.create_character(str(self.project["id"]), "角色A")
+        self.manager.create_spec("full_body")
+        char = self.manager.create_character("角色A", str(self.project["id"]))
         variants = self.manager.list_character_variants(str(char["id"]))
         values = self.manager.list_spec_values_for_variant(str(variants[0]["id"]))
         response = self.client.patch(
@@ -394,8 +404,8 @@ class ProjectSpecApiTests(unittest.TestCase):
         self.assertEqual(updated["notes"], "主线默认")
 
     def test_lora_weight_out_of_range_rejected(self) -> None:
-        self.manager.create_project_spec(str(self.project["id"]), "full_body")
-        char = self.manager.create_character(str(self.project["id"]), "角色A")
+        self.manager.create_spec("full_body")
+        char = self.manager.create_character("角色A", str(self.project["id"]))
         variants = self.manager.list_character_variants(str(char["id"]))
         values = self.manager.list_spec_values_for_variant(str(variants[0]["id"]))
         response = self.client.patch(
@@ -419,7 +429,7 @@ class CharacterSpecValueIsolationTests(unittest.TestCase):
         self.project = self.manager.create_project("隔离测试项目")
 
     def test_character_data_stays_in_test_database(self) -> None:
-        char = self.manager.create_character(str(self.project["id"]), "角色A")
+        char = self.manager.create_character("角色A", str(self.project["id"]))
         self.assertEqual(
             self.manager.list_characters(str(self.project["id"])),
             [char],

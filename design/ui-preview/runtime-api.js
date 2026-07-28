@@ -417,7 +417,7 @@
         <h2>还没有人物</h2>
         <p>创建人物后，可以为其管理多套形象变体与景别规格。</p>
         <button class="btn primary" data-api-action="open-character-modal">新建人物</button>
-        <small>当前项目未创建任何人物</small>
+        <small>尚未创建任何人物</small>
       </section>
     `;
   }
@@ -498,8 +498,8 @@
         <div class="character-expanded-main">
           <div class="character-expanded-head">
             <div>
-              <div class="character-expanded-title">项目规格</div>
-              <div class="character-expanded-sub">${specs.length} 个规格 · 全项目共享 · 当前变体：${escapeHtml(defaultVariant ? defaultVariant.name : "无")}</div>
+              <div class="character-expanded-title">规格</div>
+              <div class="character-expanded-sub">${specs.length} 个规格 · 全局共享 · 当前变体：${escapeHtml(defaultVariant ? defaultVariant.name : "无")}</div>
             </div>
             <button class="btn small soft" type="button" data-api-action="add-spec" data-project-id="${escapeHtml(character.project_id)}">添加规格</button>
           </div>
@@ -544,9 +544,9 @@
     `;
   }
 
-  async function renderProductionCharacters(project) {
+  async function renderProductionCharacters() {
     const page = document.querySelector(".page-scroll");
-    if (!page || !project) return;
+    if (!page) return;
     const header = page.querySelector(".page-header");
     [...page.children].forEach((child) => {
       if (child !== header) child.remove();
@@ -555,13 +555,13 @@
     const subtitle = header.querySelector(".page-subtitle");
     const actions = header.querySelector(".header-actions");
     if (title) title.textContent = "人物库";
-    if (subtitle) subtitle.textContent = `项目：${project.name}`;
+    if (subtitle) subtitle.textContent = "管理全局人物、形象变体与景别规格。";
     if (actions) {
       actions.innerHTML = '<button class="btn primary" data-api-action="open-character-modal">新建人物</button>';
     }
     const [charactersPayload, specsPayload] = await Promise.all([
-      request(`/api/projects/${project.id}/characters`),
-      request(`/api/projects/${project.id}/specs`),
+      request(`/api/characters`),
+      request(`/api/specs`),
     ]);
     if (!charactersPayload.total) {
       page.insertAdjacentHTML("beforeend", characterEmptyState());
@@ -573,8 +573,8 @@
         <section class="panel real-character-panel">
           <div class="panel-header">
             <div>
-              <div class="panel-title">项目人物</div>
-              <div class="panel-sub">${charactersPayload.total} 个人物 · ${specsPayload.total} 个项目规格</div>
+              <div class="panel-title">全局人物</div>
+              <div class="panel-sub">${charactersPayload.total} 个人物 · ${specsPayload.total} 个规格</div>
             </div>
           </div>
           <div class="character-grid">
@@ -587,6 +587,180 @@
         </section>
       `
     );
+  }
+
+  const characterDatabaseState = {
+    q: "",
+    copyright: "",
+    sort: "count_desc",
+    page: 1,
+    pageSize: 50,
+    totalPages: 1,
+    total: 0,
+  };
+
+  async function renderCharacterDatabasePage() {
+    const page = document.querySelector(".page-scroll");
+    if (!page) return;
+    const form = document.getElementById("character-database-search-form");
+    if (form && !form.dataset.bound) {
+      form.dataset.bound = "1";
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        const qInput = document.getElementById("character-database-q");
+        const copyrightSelect = document.getElementById("character-database-copyright");
+        const sortSelect = document.getElementById("character-database-sort");
+        characterDatabaseState.q = (qInput && qInput.value || "").trim();
+        characterDatabaseState.copyright = (copyrightSelect && copyrightSelect.value || "").trim();
+        characterDatabaseState.sort = (sortSelect && sortSelect.value || "count_desc");
+        characterDatabaseState.page = 1;
+        loadCharacterDatabaseResults();
+      });
+    }
+    await loadCharacterDatabaseCopyrights();
+    await loadCharacterDatabaseResults();
+  }
+
+  async function loadCharacterDatabaseCopyrights() {
+    const select = document.getElementById("character-database-copyright");
+    if (!select) return;
+    try {
+      const payload = await request("/api/character-database/copyrights");
+      const items = Array.isArray(payload.items)
+        ? payload.items
+        : Array.isArray(payload)
+        ? payload
+        : [];
+      const current = characterDatabaseState.copyright;
+      select.innerHTML =
+        '<option value="">全部作品系列</option>' +
+        items
+          .map((item) => {
+            const value =
+              typeof item === "string"
+                ? item
+                : item.value || item.copyright || item.name || "";
+            const label =
+              typeof item === "string"
+                ? item
+                : item.label || item.copyright || item.name || value;
+            return `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`;
+          })
+          .join("");
+      if (current) select.value = current;
+    } catch (error) {
+      select.innerHTML = '<option value="">全部作品系列</option>';
+    }
+  }
+
+  async function loadCharacterDatabaseResults() {
+    const resultsEl = document.getElementById("character-database-results");
+    const metaEl = document.getElementById("character-database-meta");
+    const paginationEl = document.getElementById("character-database-pagination");
+    if (resultsEl)
+      resultsEl.innerHTML =
+        '<div style="padding:18px;text-align:center;color:#8c94a5;">加载中…</div>';
+    if (metaEl) metaEl.textContent = "";
+    if (paginationEl) paginationEl.innerHTML = "";
+    const params = new URLSearchParams();
+    params.set("q", characterDatabaseState.q);
+    if (characterDatabaseState.copyright)
+      params.set("copyright", characterDatabaseState.copyright);
+    params.set("sort", characterDatabaseState.sort);
+    params.set("page", String(characterDatabaseState.page));
+    params.set("page_size", String(characterDatabaseState.pageSize));
+    try {
+      const payload = await request(
+        `/api/character-database/search?${params.toString()}`
+      );
+      const items = Array.isArray(payload.items) ? payload.items : [];
+      characterDatabaseState.total = payload.total || items.length;
+      characterDatabaseState.totalPages =
+        payload.total_pages ||
+        Math.max(1, Math.ceil(characterDatabaseState.total / characterDatabaseState.pageSize));
+      if (metaEl) {
+        metaEl.textContent = `共 ${characterDatabaseState.total} 个角色 · 第 ${characterDatabaseState.page} / ${characterDatabaseState.totalPages} 页`;
+      }
+      if (!items.length) {
+        if (resultsEl)
+          resultsEl.innerHTML =
+            '<div class="character-database-empty">未找到匹配的角色</div>';
+        return;
+      }
+      if (resultsEl) resultsEl.innerHTML = renderCharacterDatabaseTable(items);
+      if (paginationEl)
+        paginationEl.innerHTML = renderCharacterDatabasePagination();
+      bindCharacterDatabasePagination();
+    } catch (error) {
+      if (resultsEl)
+        resultsEl.innerHTML = `<div style="padding:18px;color:#c33;">加载失败：${escapeHtml(error.message)}</div>`;
+    }
+  }
+
+  function renderCharacterDatabaseTable(items) {
+    const rows = items
+      .map((item) => {
+        const character = escapeHtml(item.character || item.name || "");
+        const copyright = escapeHtml(item.copyright || item.series || "");
+        const trigger = escapeHtml(item.trigger || item.trigger_words || "");
+        const coreTagsRaw = item.core_tags || item.coreTags || [];
+        const coreTags = escapeHtml(
+          Array.isArray(coreTagsRaw) ? coreTagsRaw.join(" ") : coreTagsRaw || ""
+        );
+        const count = escapeHtml(String(item.count ?? item.tag_count ?? ""));
+        const danbooruUrl =
+          item.danbooru_url ||
+          (item.character
+            ? `https://danbooru.donmai.us/posts?tags=${encodeURIComponent(item.character)}`
+            : "");
+        const danbooruLink = danbooruUrl
+          ? `<a class="character-database-link" href="${escapeHtml(danbooruUrl)}" target="_blank" rel="noopener noreferrer">查看</a>`
+          : "—";
+        return `<tr>
+          <td class="character-database-name">${character}</td>
+          <td>${copyright}</td>
+          <td>${trigger}</td>
+          <td>${coreTags}</td>
+          <td>${count}</td>
+          <td>${danbooruLink}</td>
+        </tr>`;
+      })
+      .join("");
+    return `<table class="character-database-table">
+      <thead><tr>
+        <th>角色名</th><th>作品系列</th><th>触发词</th><th>核心标签</th><th>标签数</th><th>Danbooru</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+  }
+
+  function renderCharacterDatabasePagination() {
+    const prevDisabled = characterDatabaseState.page <= 1;
+    const nextDisabled = characterDatabaseState.page >= characterDatabaseState.totalPages;
+    return `
+      <button class="btn small" data-character-database-page="prev" ${prevDisabled ? "disabled" : ""}>上一页</button>
+      <span class="character-database-page-info">第 ${characterDatabaseState.page} 页</span>
+      <button class="btn small" data-character-database-page="next" ${nextDisabled ? "disabled" : ""}>下一页</button>
+    `;
+  }
+
+  function bindCharacterDatabasePagination() {
+    const paginationEl = document.getElementById("character-database-pagination");
+    if (!paginationEl) return;
+    paginationEl.querySelectorAll("[data-character-database-page]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        if (btn.disabled) return;
+        const action = btn.dataset.characterDatabasePage;
+        if (action === "prev" && characterDatabaseState.page > 1)
+          characterDatabaseState.page -= 1;
+        else if (
+          action === "next" &&
+          characterDatabaseState.page < characterDatabaseState.totalPages
+        )
+          characterDatabaseState.page += 1;
+        loadCharacterDatabaseResults();
+      });
+    });
   }
 
   function ensureCharacterDetailModal() {
@@ -689,8 +863,6 @@
   }
 
   async function renderCharacterDetail(characterId) {
-    const projectId = document.body.dataset.projectId;
-    if (!projectId) return;
     openCharacterDetailModal();
     const body = document.getElementById("character-detail-modal-body");
     if (body) body.innerHTML = '<div style="padding:24px;text-align:center;color:#8c94a5;">加载中…</div>';
@@ -698,7 +870,7 @@
       const [characterPayload, variantsPayload, specsPayload] = await Promise.all([
         request(`/api/characters/${characterId}`),
         request(`/api/characters/${characterId}/variants`),
-        request(`/api/projects/${projectId}/specs`),
+        request(`/api/specs`),
       ]);
       const character = characterPayload.character;
       const stats = characterPayload.stats || { variant_count: variantsPayload.items.length, spec_total: 0, spec_filled: 0 };
@@ -707,7 +879,7 @@
           <div class="header-thumb"></div>
           <div class="header-name">
             <div class="header-name-text">${escapeHtml(character.name)}</div>
-            <div class="header-name-sub">${stats.variant_count} 个变体 · ${specsPayload.total} 个项目规格 · 规格 ${stats.spec_filled}/${stats.spec_total}</div>
+            <div class="header-name-sub">${stats.variant_count} 个变体 · ${specsPayload.total} 个规格 · 规格 ${stats.spec_filled}/${stats.spec_total}</div>
           </div>
           <button class="character-detail-modal-close" type="button" data-api-action="close-character-detail-modal" aria-label="关闭">×</button>
         </div>
@@ -1059,27 +1231,21 @@
     const submit = form.querySelector('button[type="submit"]');
     const error = form.querySelector(".modal-error");
     const name = input.value.trim().replace(/\s+/g, " ");
-    const projectId = document.body.dataset.projectId;
     if (!name) {
       error.textContent = "请输入人物名称。";
       input.focus();
-      return;
-    }
-    if (!projectId) {
-      error.textContent = "当前项目不可用。";
       return;
     }
     submit.disabled = true;
     submit.textContent = "正在创建…";
     error.textContent = "";
     try {
-      await request(`/api/projects/${projectId}/characters`, {
+      await request(`/api/characters`, {
         method: "POST",
         body: JSON.stringify({ name }),
       });
       closeCharacterModal();
-      const project = await resolveCurrentProject();
-      await renderProductionCharacters(project);
+      await renderProductionCharacters();
       if (typeof showToast === "function") showToast(`人物「${name}」已创建`);
     } catch (requestError) {
       error.textContent = requestError.message;
@@ -1101,8 +1267,7 @@
     }
     try {
       await request(`/api/characters/${characterId}`, { method: "DELETE" });
-      const project = await resolveCurrentProject();
-      await renderProductionCharacters(project);
+      await renderProductionCharacters();
       if (typeof showToast === "function") showToast(`人物「${name}」已删除`);
     } catch (requestError) {
       if (typeof showToast === "function") showToast(requestError.message);
@@ -1136,22 +1301,21 @@
       await renderCharacterDetail(activeCard.dataset.characterId);
       return;
     }
-    const project = await resolveCurrentProject();
-    await renderProductionCharacters(project);
+    await renderProductionCharacters();
   }
 
   async function deleteProjectSpec(specId, name) {
     if (!await confirmDialog({
-      title: `删除项目规格「${name}」`,
+      title: `删除规格「${name}」`,
       message: "所有变体下对应的规格值也会一并删除，此操作无法撤销。",
       confirmText: "删除"
     })) {
       return;
     }
     try {
-      await request(`/api/project-specs/${specId}`, { method: "DELETE" });
+      await request(`/api/specs/${specId}`, { method: "DELETE" });
       await refreshExpandedOrAll();
-      if (typeof showToast === "function") showToast(`项目规格「${name}」已删除`);
+      if (typeof showToast === "function") showToast(`规格「${name}」已删除`);
     } catch (requestError) {
       if (typeof showToast === "function") showToast(requestError.message);
     }
@@ -1241,7 +1405,7 @@
       case "character-variant":
         return `/api/character-variants/${id}`;
       case "project-spec":
-        return `/api/project-specs/${id}`;
+        return `/api/specs/${id}`;
       default:
         return null;
     }
@@ -1295,8 +1459,7 @@
       return;
     }
     if (type === "character") {
-      const project = await resolveCurrentProject();
-      await renderProductionCharacters(project);
+      await renderProductionCharacters();
       if (id) await renderCharacterDetail(id);
       return;
     }
@@ -1572,12 +1735,15 @@
       const pageKey = new URLSearchParams(window.location.search).get("page") || "projects";
       if (pageKey === "projects") {
         await renderProductionProjects();
+      } else if (pageKey === "characters") {
+        await renderProductionCharacters();
+      } else if (pageKey === "character-database") {
+        await renderCharacterDatabasePage();
       } else if (pageKey !== "settings") {
         const project = await resolveCurrentProject();
         applyProjectHeader(project, pageKey);
         if (pageKey === "overview") await renderProductionOverview(project);
         else if (pageKey === "story-canvas") await renderProductionStoryCanvas(project);
-        else if (pageKey === "characters") await renderProductionCharacters(project);
         else applyProductionEmptyState();
       }
       const safety = document.getElementById("database-safety-status");
@@ -1882,7 +2048,6 @@
   }
 
   async function submitInlineSpec(form) {
-    const projectId = form.dataset.projectId;
     const select = form.querySelector("select");
     const labelInput = form.querySelector('input[name="custom_label"]');
     const submit = form.querySelector('button[type="submit"]');
@@ -1898,14 +2063,14 @@
     submit.textContent = "正在创建…";
     error.textContent = "";
     try {
-      await request(`/api/projects/${projectId}/specs`, {
+      await request(`/api/specs`, {
         method: "POST",
         body: JSON.stringify({ spec_type: specType, custom_label: customLabel }),
       });
       form.hidden = true;
       form.reset();
       await refreshCharacterDetail();
-      if (typeof showToast === "function") showToast("项目规格已创建");
+      if (typeof showToast === "function") showToast("规格已创建");
     } catch (requestError) {
       error.textContent = requestError.message;
       select.focus();
