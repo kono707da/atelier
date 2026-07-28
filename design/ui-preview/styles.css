@@ -879,18 +879,18 @@ button {
 }
 
 .atelier-modal.size-sm {
-  width: min(360px, 100%);
+  width: min(380px, 92vw);
   padding: 22px;
   border-radius: 18px;
 }
 
 .atelier-modal.size-md {
-  width: min(420px, 100%);
+  width: min(480px, 92vw);
 }
 
 .atelier-modal.size-lg {
-  width: min(920px, 100%);
-  max-height: min(86vh, 780px);
+  width: 92vw;
+  max-height: 90vh;
   padding: 0;
   display: flex;
   flex-direction: column;
@@ -1889,8 +1889,8 @@ button {
 }
 
 .atelier-modal.character-detail-modal {
-  width: min(920px, 100%);
-  max-height: min(86vh, 780px);
+  width: 92vw;
+  max-height: 90vh;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -1968,6 +1968,17 @@ button {
   display: flex;
   flex-direction: column;
   gap: 14px;
+}
+
+@media (min-width: 900px) {
+  .character-expanded {
+    flex-direction: row;
+    align-items: stretch;
+  }
+  .character-expanded-column {
+    flex: 1 1 0;
+    min-width: 0;
+  }
 }
 
 .atelier-modal.confirm-dialog .confirm-icon {
