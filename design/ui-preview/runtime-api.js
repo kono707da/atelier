@@ -43,6 +43,22 @@
     "shot-inspector": "分镜检查器",
   };
 
+  const storyCanvasView = {
+    projectId: "",
+    x: 0,
+    y: 0,
+    scale: 1,
+    pointerId: null,
+    pointerStartX: 0,
+    pointerStartY: 0,
+    viewStartX: 0,
+    viewStartY: 0,
+    persistTimer: null,
+  };
+
+  const STORY_CANVAS_MIN_SCALE = 0.45;
+  const STORY_CANVAS_MAX_SCALE = 1.6;
+
   function formatBytes(bytes) {
     if (!bytes) return "0 KB";
     const units = ["B", "KB", "MB", "GB"];
@@ -351,6 +367,214 @@
     `;
   }
 
+  function storyCanvasStorageKey(projectId) {
+    return `atelier:story-canvas-view:${projectId}`;
+  }
+
+  function clampStoryCanvasScale(scale) {
+    return Math.min(
+      STORY_CANVAS_MAX_SCALE,
+      Math.max(STORY_CANVAS_MIN_SCALE, Number(scale) || 1)
+    );
+  }
+
+  function saveStoryCanvasView() {
+    if (!storyCanvasView.projectId) return;
+    window.clearTimeout(storyCanvasView.persistTimer);
+    storyCanvasView.persistTimer = window.setTimeout(() => {
+      try {
+        window.localStorage.setItem(
+          storyCanvasStorageKey(storyCanvasView.projectId),
+          JSON.stringify({
+            x: Math.round(storyCanvasView.x * 10) / 10,
+            y: Math.round(storyCanvasView.y * 10) / 10,
+            scale: Math.round(storyCanvasView.scale * 1000) / 1000,
+          })
+        );
+      } catch (error) {
+        // View persistence is optional; the canvas remains usable without storage.
+      }
+    }, 120);
+  }
+
+  function restoreStoryCanvasView(projectId) {
+    try {
+      const saved = JSON.parse(
+        window.localStorage.getItem(storyCanvasStorageKey(projectId)) || "null"
+      );
+      if (
+        saved &&
+        Number.isFinite(saved.x) &&
+        Number.isFinite(saved.y) &&
+        Number.isFinite(saved.scale)
+      ) {
+        storyCanvasView.x = saved.x;
+        storyCanvasView.y = saved.y;
+        storyCanvasView.scale = clampStoryCanvasScale(saved.scale);
+        return true;
+      }
+    } catch (error) {
+      // Ignore invalid or unavailable browser storage.
+    }
+    return false;
+  }
+
+  function applyStoryCanvasView({ persist = true } = {}) {
+    const viewport = document.getElementById("story-canvas-viewport");
+    const surface = document.getElementById("story-canvas-surface");
+    const zoomLabel = document.getElementById("story-canvas-zoom-label");
+    if (!viewport || !surface) return;
+    surface.style.transform = `translate3d(${storyCanvasView.x}px, ${storyCanvasView.y}px, 0) scale(${storyCanvasView.scale})`;
+    viewport.style.setProperty(
+      "--story-grid-size",
+      `${Math.max(9, 22 * storyCanvasView.scale)}px`
+    );
+    viewport.style.setProperty(
+      "--story-grid-x",
+      `${storyCanvasView.x % (22 * storyCanvasView.scale)}px`
+    );
+    viewport.style.setProperty(
+      "--story-grid-y",
+      `${storyCanvasView.y % (22 * storyCanvasView.scale)}px`
+    );
+    if (zoomLabel) zoomLabel.textContent = `${Math.round(storyCanvasView.scale * 100)}%`;
+    if (persist) saveStoryCanvasView();
+  }
+
+  function setStoryCanvasScale(nextScale, clientX, clientY) {
+    const viewport = document.getElementById("story-canvas-viewport");
+    if (!viewport) return;
+    const rect = viewport.getBoundingClientRect();
+    const originX = Number.isFinite(clientX) ? clientX - rect.left : rect.width / 2;
+    const originY = Number.isFinite(clientY) ? clientY - rect.top : rect.height / 2;
+    const previousScale = storyCanvasView.scale;
+    const scale = clampStoryCanvasScale(nextScale);
+    const worldX = (originX - storyCanvasView.x) / previousScale;
+    const worldY = (originY - storyCanvasView.y) / previousScale;
+    storyCanvasView.scale = scale;
+    storyCanvasView.x = originX - worldX * scale;
+    storyCanvasView.y = originY - worldY * scale;
+    applyStoryCanvasView();
+  }
+
+  function fitStoryCanvas({ persist = true } = {}) {
+    const viewport = document.getElementById("story-canvas-viewport");
+    const stack = document.querySelector("#story-canvas-surface .real-story-stack");
+    if (!viewport || !stack) return;
+    const viewportWidth = viewport.clientWidth;
+    const viewportHeight = viewport.clientHeight;
+    const contentWidth = stack.offsetWidth;
+    const contentHeight = stack.offsetHeight;
+    if (!viewportWidth || !viewportHeight || !contentWidth || !contentHeight) return;
+    const inset = 44;
+    storyCanvasView.scale = clampStoryCanvasScale(
+      Math.min(
+        1,
+        (viewportWidth - inset * 2) / contentWidth,
+        (viewportHeight - inset * 2) / contentHeight
+      )
+    );
+    storyCanvasView.x = Math.max(inset, (viewportWidth - contentWidth * storyCanvasView.scale) / 2);
+    storyCanvasView.y = Math.max(inset, (viewportHeight - contentHeight * storyCanvasView.scale) / 2);
+    applyStoryCanvasView({ persist });
+  }
+
+  function bindStoryCanvas(projectId) {
+    const viewport = document.getElementById("story-canvas-viewport");
+    const toolbar = document.querySelector(".story-canvas-toolbar");
+    if (!viewport || !toolbar) return;
+    storyCanvasView.projectId = projectId;
+
+    const stopPanning = (event) => {
+      if (storyCanvasView.pointerId === null) return;
+      if (
+        event &&
+        viewport.hasPointerCapture?.(storyCanvasView.pointerId)
+      ) {
+        viewport.releasePointerCapture(storyCanvasView.pointerId);
+      }
+      storyCanvasView.pointerId = null;
+      viewport.classList.remove("is-panning");
+      saveStoryCanvasView();
+    };
+
+    viewport.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0 && event.button !== 1) return;
+      if (
+        event.target.closest(
+          "button, input, select, textarea, a, .large-scene-block, .real-chapter-block"
+        )
+      ) {
+        return;
+      }
+      event.preventDefault();
+      storyCanvasView.pointerId = event.pointerId;
+      storyCanvasView.pointerStartX = event.clientX;
+      storyCanvasView.pointerStartY = event.clientY;
+      storyCanvasView.viewStartX = storyCanvasView.x;
+      storyCanvasView.viewStartY = storyCanvasView.y;
+      viewport.setPointerCapture?.(event.pointerId);
+      viewport.classList.add("is-panning");
+    });
+
+    viewport.addEventListener("pointermove", (event) => {
+      if (event.pointerId !== storyCanvasView.pointerId) return;
+      storyCanvasView.x =
+        storyCanvasView.viewStartX + event.clientX - storyCanvasView.pointerStartX;
+      storyCanvasView.y =
+        storyCanvasView.viewStartY + event.clientY - storyCanvasView.pointerStartY;
+      applyStoryCanvasView({ persist: false });
+    });
+
+    viewport.addEventListener("pointerup", stopPanning);
+    viewport.addEventListener("pointercancel", stopPanning);
+
+    viewport.addEventListener(
+      "wheel",
+      (event) => {
+        event.preventDefault();
+        if (event.ctrlKey || event.metaKey) {
+          const factor = Math.exp(-event.deltaY * 0.002);
+          setStoryCanvasScale(storyCanvasView.scale * factor, event.clientX, event.clientY);
+          return;
+        }
+        storyCanvasView.x -= event.deltaX;
+        storyCanvasView.y -= event.deltaY;
+        applyStoryCanvasView();
+      },
+      { passive: false }
+    );
+
+    viewport.addEventListener("click", (event) => {
+      const selected = event.target.closest(".large-scene-block, .real-chapter-block");
+      viewport
+        .querySelectorAll(".canvas-node-selected")
+        .forEach((node) => node.classList.remove("canvas-node-selected"));
+      if (selected) selected.classList.add("canvas-node-selected");
+    });
+
+    toolbar.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-story-canvas-action]");
+      if (!button) return;
+      const action = button.dataset.storyCanvasAction;
+      if (action === "zoom-in") {
+        setStoryCanvasScale(storyCanvasView.scale + 0.1);
+      } else if (action === "zoom-out") {
+        setStoryCanvasScale(storyCanvasView.scale - 0.1);
+      } else if (action === "zoom-reset") {
+        setStoryCanvasScale(1);
+      } else if (action === "fit") {
+        fitStoryCanvas();
+      }
+    });
+
+    const restored = restoreStoryCanvasView(projectId);
+    window.requestAnimationFrame(() => {
+      if (restored) applyStoryCanvasView({ persist: false });
+      else fitStoryCanvas({ persist: false });
+    });
+  }
+
   async function renderProductionStoryCanvas(project) {
     const page = document.querySelector(".page-scroll");
     if (!page || !project) return;
@@ -384,21 +608,33 @@
     page.insertAdjacentHTML(
       "beforeend",
       `
-        <section class="panel real-story-panel">
-          <div class="panel-header">
-            <div>
-              <div class="panel-title">章节与大场景</div>
-              <div class="panel-sub">${chapters.total} 个章节 · ${largeSceneTotal} 个大场景 · 自动规整排列</div>
+        <section class="real-story-canvas-shell">
+          <div class="story-canvas-toolbar">
+            <div class="story-canvas-summary">
+              <span class="story-canvas-summary-dot"></span>
+              <span>${chapters.total} 个章节 · ${largeSceneTotal} 个大场景</span>
+              <small>自动对齐画布</small>
+            </div>
+            <div class="story-canvas-tools" role="toolbar" aria-label="画布视图">
+              <button type="button" data-story-canvas-action="zoom-out" title="缩小画布" aria-label="缩小画布">−</button>
+              <button type="button" data-story-canvas-action="zoom-reset" id="story-canvas-zoom-label" title="恢复 100%">100%</button>
+              <button type="button" data-story-canvas-action="zoom-in" title="放大画布" aria-label="放大画布">＋</button>
+              <span class="story-canvas-tool-divider"></span>
+              <button class="story-canvas-fit-button" type="button" data-story-canvas-action="fit">适应全部</button>
             </div>
           </div>
-          <div class="real-story-viewport">
-            <div class="real-story-stack">
-              ${chapterItems.map(chapterBlock).join("")}
+          <div class="real-story-viewport" id="story-canvas-viewport" aria-label="剧本结构画布">
+            <div class="story-canvas-surface" id="story-canvas-surface">
+              <div class="real-story-stack">
+                ${chapterItems.map(chapterBlock).join("")}
+              </div>
             </div>
+            <div class="story-canvas-hint">拖动空白处移动画布 · 滚轮移动 · Ctrl/⌘ + 滚轮缩放</div>
           </div>
         </section>
       `
     );
+    bindStoryCanvas(project.id);
   }
 
   const specTypeLabels = {

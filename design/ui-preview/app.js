@@ -887,7 +887,8 @@ document.addEventListener("click", (event) => {
     button.type === "submit" ||
     button.closest("[data-page]") ||
     button.closest(".atelier-modal-backdrop") ||
-    button.dataset.apiAction
+    button.dataset.apiAction ||
+    button.dataset.storyCanvasAction
   ) return;
   const label = button.textContent.trim();
   const route = buttonRoutes.get(label);
