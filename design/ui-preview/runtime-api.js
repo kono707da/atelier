@@ -561,63 +561,155 @@
               <div class="panel-sub">${charactersPayload.total} 个人物 · ${specsPayload.total} 个项目规格</div>
             </div>
           </div>
-          <div class="character-workspace">
-            <div class="character-list-pane">
-              <div class="character-grid" id="character-grid-list">
-                ${charactersPayload.items
-                  .map((character) =>
-                    characterCard(character, character.stats, specsPayload.total)
-                  )
-                  .join("")}
-              </div>
-            </div>
-            <div class="character-detail-pane" id="character-detail-pane">
-              <div class="character-detail-empty">
-                <div class="empty-icon">CH</div>
-                <div class="empty-text">点击左侧人物卡片<br>查看与管理形象变体和规格</div>
-              </div>
-            </div>
+          <div class="character-grid">
+            ${charactersPayload.items
+              .map((character) =>
+                characterCard(character, character.stats, specsPayload.total)
+              )
+              .join("")}
           </div>
         </section>
       `
     );
   }
 
+  function ensureCharacterDetailModal() {
+    let modal = document.getElementById("character-detail-modal");
+    if (modal) return modal;
+    modal = document.createElement("div");
+    modal.id = "character-detail-modal";
+    modal.className = "atelier-modal-backdrop";
+    modal.hidden = true;
+    modal.innerHTML = `
+      <section class="atelier-modal character-detail-modal size-lg" role="dialog" aria-modal="true">
+        <div class="character-detail-modal-body" id="character-detail-modal-body"></div>
+      </section>
+    `;
+    document.body.appendChild(modal);
+    modal.addEventListener("click", (event) => {
+      if (event.target === modal) closeCharacterDetailModal();
+    });
+    return modal;
+  }
+
+  let confirmDialogResolver = null;
+  function confirmDialog({ title, message, confirmText = "确认", cancelText = "取消", danger = true }) {
+    closeConfirmDialog();
+    let modal = document.getElementById("confirm-dialog");
+    if (!modal) {
+      modal = document.createElement("div");
+      modal.id = "confirm-dialog";
+      modal.className = "atelier-modal-backdrop";
+      modal.hidden = true;
+      modal.innerHTML = `
+        <section class="atelier-modal size-sm confirm-dialog" role="dialog" aria-modal="true">
+          <div class="confirm-icon">!</div>
+          <h2 id="confirm-dialog-title"></h2>
+          <p id="confirm-dialog-message"></p>
+          <div class="confirm-actions">
+            <button type="button" class="btn" data-confirm-action="cancel"></button>
+            <button type="button" class="btn primary" data-confirm-action="confirm"></button>
+          </div>
+        </section>
+      `;
+      document.body.appendChild(modal);
+      modal.addEventListener("click", (event) => {
+        if (event.target === modal) resolveConfirmDialog(false);
+      });
+      modal.querySelectorAll("[data-confirm-action]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          resolveConfirmDialog(btn.dataset.confirmAction === "confirm");
+        });
+      });
+    }
+    modal.querySelector("#confirm-dialog-title").textContent = title || "请确认";
+    modal.querySelector("#confirm-dialog-message").textContent = message || "";
+    const confirmBtn = modal.querySelector('[data-confirm-action="confirm"]');
+    const cancelBtn = modal.querySelector('[data-confirm-action="cancel"]');
+    confirmBtn.textContent = confirmText;
+    cancelBtn.textContent = cancelText;
+    if (danger) {
+      confirmBtn.classList.add("danger");
+    } else {
+      confirmBtn.classList.remove("danger");
+    }
+    return new Promise((resolve) => {
+      confirmDialogResolver = resolve;
+      modal.hidden = false;
+      requestAnimationFrame(() => modal.classList.add("show"));
+      setTimeout(() => confirmBtn.focus(), 60);
+    });
+  }
+
+  function resolveConfirmDialog(result) {
+    const modal = document.getElementById("confirm-dialog");
+    if (!modal || modal.hidden) return;
+    modal.classList.remove("show");
+    modal.hidden = true;
+    const resolver = confirmDialogResolver;
+    confirmDialogResolver = null;
+    if (resolver) resolver(result);
+  }
+
+  function closeConfirmDialog() {
+    resolveConfirmDialog(false);
+  }
+
+  function openCharacterDetailModal() {
+    const modal = ensureCharacterDetailModal();
+    modal.hidden = false;
+    requestAnimationFrame(() => modal.classList.add("show"));
+  }
+
+  function closeCharacterDetailModal() {
+    const modal = document.getElementById("character-detail-modal");
+    if (!modal) return;
+    modal.classList.remove("show");
+    setTimeout(() => {
+      modal.hidden = true;
+      const body = document.getElementById("character-detail-modal-body");
+      if (body) body.innerHTML = "";
+    }, 150);
+  }
+
   async function renderCharacterDetail(characterId) {
-    const pane = document.getElementById("character-detail-pane");
-    if (!pane) return;
     const projectId = document.body.dataset.projectId;
     if (!projectId) return;
-    document.querySelectorAll(".character-block.active").forEach((el) => el.classList.remove("active"));
-    const card = document.querySelector(`.character-block[data-character-id="${characterId}"]`);
-    if (card) card.classList.add("active");
-    const [character, variantsPayload, specsPayload] = await Promise.all([
-      request(`/api/characters/${characterId}`),
-      request(`/api/characters/${characterId}/variants`),
-      request(`/api/projects/${projectId}/specs`),
-    ]);
-    const stats = character.stats || { variant_count: variantsPayload.items.length, spec_total: 0, spec_filled: 0 };
-    pane.innerHTML = `
-      <div class="character-detail-card">
-        <div class="character-detail-header">
+    openCharacterDetailModal();
+    const body = document.getElementById("character-detail-modal-body");
+    if (body) body.innerHTML = '<div style="padding:24px;text-align:center;color:#8c94a5;">加载中…</div>';
+    try {
+      const [characterPayload, variantsPayload, specsPayload] = await Promise.all([
+        request(`/api/characters/${characterId}`),
+        request(`/api/characters/${characterId}/variants`),
+        request(`/api/projects/${projectId}/specs`),
+      ]);
+      const character = characterPayload.character;
+      const stats = characterPayload.stats || { variant_count: variantsPayload.items.length, spec_total: 0, spec_filled: 0 };
+      body.innerHTML = `
+        <div class="character-detail-modal-header">
           <div class="header-thumb"></div>
           <div class="header-name">
             <div class="header-name-text">${escapeHtml(character.name)}</div>
             <div class="header-name-sub">${stats.variant_count} 个变体 · ${specsPayload.total} 个项目规格 · 规格 ${stats.spec_filled}/${stats.spec_total}</div>
           </div>
+          <button class="character-detail-modal-close" type="button" data-api-action="close-character-detail-modal" aria-label="关闭">×</button>
         </div>
-        <div class="character-detail-body">
+        <div class="character-detail-modal-scroll" id="character-detail-modal-scroll">
           ${characterExpandedPanel(character, variantsPayload.items, specsPayload.items)}
         </div>
-      </div>
-    `;
+      `;
+    } catch (error) {
+      body.innerHTML = `<div style="padding:24px;color:#c33;">加载失败：${escapeHtml(error.message)}</div>`;
+    }
   }
 
   async function refreshCharacterDetail() {
-    const activeCard = document.querySelector(".character-block.active");
-    if (activeCard && activeCard.dataset.characterId) {
-      await renderCharacterDetail(activeCard.dataset.characterId);
-    }
+    const modal = document.getElementById("character-detail-modal");
+    if (!modal || modal.hidden) return;
+    const scroll = document.getElementById("character-detail-modal-scroll");
+    const characterId = scroll && scroll.querySelector("[data-character-id]")?.dataset.characterId;
+    if (characterId) await renderCharacterDetail(characterId);
   }
 
   function ensureProjectModal() {
@@ -983,7 +1075,12 @@
   }
 
   async function deleteCharacter(characterId, name) {
-    if (!window.confirm(`确定删除人物「${name}」吗？该人物的所有形象变体与规格值也会一并删除，此操作无法撤销。`)) {
+    const confirmed = await confirmDialog({
+      title: `删除人物「${name}」`,
+      message: "该人物的所有形象变体与规格值也会一并删除，此操作无法撤销。",
+      confirmText: "删除"
+    });
+    if (!confirmed) {
       return;
     }
     try {
@@ -1001,7 +1098,11 @@
       if (typeof showToast === "function") showToast("默认形象变体不可删除");
       return;
     }
-    if (!window.confirm(`确定删除形象变体「${name}」吗？此操作无法撤销。`)) {
+    if (!await confirmDialog({
+      title: `删除形象变体「${name}」`,
+      message: "此操作无法撤销。",
+      confirmText: "删除"
+    })) {
       return;
     }
     try {
@@ -1024,7 +1125,11 @@
   }
 
   async function deleteProjectSpec(specId, name) {
-    if (!window.confirm(`确定删除项目规格「${name}」吗？所有变体下对应的规格值也会一并删除，此操作无法撤销。`)) {
+    if (!await confirmDialog({
+      title: `删除项目规格「${name}」`,
+      message: "所有变体下对应的规格值也会一并删除，此操作无法撤销。",
+      confirmText: "删除"
+    })) {
       return;
     }
     try {
@@ -1184,9 +1289,13 @@
 
   async function deleteChapter(chapterId, name, largeSceneCount) {
     const sceneWarning = largeSceneCount
-      ? `，其中 ${largeSceneCount} 个大场景也会一并删除`
+      ? `其中 ${largeSceneCount} 个大场景也会一并删除，`
       : "";
-    if (!window.confirm(`确定删除章节「${name}」吗${sceneWarning}？此操作无法撤销。`)) {
+    if (!await confirmDialog({
+      title: `删除章节「${name}」`,
+      message: `${sceneWarning}此操作无法撤销。`,
+      confirmText: "删除"
+    })) {
       return;
     }
     try {
@@ -1200,7 +1309,11 @@
   }
 
   async function deleteLargeScene(largeSceneId, name) {
-    if (!window.confirm(`确定删除大场景「${name}」吗？此操作无法撤销。`)) {
+    if (!await confirmDialog({
+      title: `删除大场景「${name}」`,
+      message: "此操作无法撤销。",
+      confirmText: "删除"
+    })) {
       return;
     }
     try {
@@ -1557,6 +1670,11 @@
       return;
     }
 
+    if (button.dataset.apiAction === "close-character-detail-modal") {
+      closeCharacterDetailModal();
+      return;
+    }
+
     if (button.dataset.apiAction === "select-character") {
       const card = button.closest(".character-block");
       if (card && card.dataset.characterId) {
@@ -1566,8 +1684,8 @@
     }
 
     if (button.dataset.apiAction === "add-variant") {
-      const detailPane = document.getElementById("character-detail-pane");
-      const form = detailPane && detailPane.querySelector('form[data-inline-action="create-variant"]');
+      const modal = document.getElementById("character-detail-modal");
+      const form = modal && modal.querySelector('form[data-inline-action="create-variant"]');
       if (form) {
         form.hidden = false;
         form.querySelector("input").focus();
@@ -1585,8 +1703,8 @@
     }
 
     if (button.dataset.apiAction === "add-spec") {
-      const detailPane = document.getElementById("character-detail-pane");
-      const form = detailPane && detailPane.querySelector('form[data-inline-action="create-spec"]');
+      const modal = document.getElementById("character-detail-modal");
+      const form = modal && modal.querySelector('form[data-inline-action="create-spec"]');
       if (form) {
         form.hidden = false;
         form.querySelector("select").focus();
@@ -1610,10 +1728,16 @@
 
     if (button.dataset.apiAction === "activate-database") {
       const environment = button.dataset.environment;
-      const warning = environment === "production"
-        ? "将切换到生产数据库。这里保存的内容会成为你的正式数据，确认继续吗？"
-        : "将切换到测试数据库。这里的数据只用于开发测试，不会进入你的正式项目，确认继续吗？";
-      if (!window.confirm(warning)) return;
+      const isProduction = environment === "production";
+      const confirmed = await confirmDialog({
+        title: isProduction ? "切换到生产数据库" : "切换到测试数据库",
+        message: isProduction
+          ? "这里保存的内容会成为你的正式数据，确认继续吗？"
+          : "这里的数据只用于开发测试，不会进入你的正式项目，确认继续吗？",
+        confirmText: "切换",
+        danger: isProduction
+      });
+      if (!confirmed) return;
       button.disabled = true;
       try {
         await request("/api/settings/databases/activate", {
@@ -1681,6 +1805,7 @@
       closeLargeSceneModal();
       closeCharacterModal();
       closeRenameModal();
+      closeConfirmDialog();
     }
   });
 
