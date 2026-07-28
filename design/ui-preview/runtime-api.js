@@ -296,8 +296,8 @@
         data-context-menu="large-scene"
         data-name="${escapeHtml(largeScene.name)}"
         draggable="true"
+        aria-label="拖动大场景调整顺序或跨章节移动"
       >
-        <div class="large-scene-drag-handle" aria-label="拖动大场景调整顺序或跨章节移动" title="拖动以调整顺序"></div>
         <div class="large-scene-kicker">大场景 ${String(largeScene.sort_order).padStart(2, "0")}</div>
         <div class="large-scene-type-badge" data-scene-type="${escapeHtml(sceneType)}">${typeLabel}</div>
         <div class="large-scene-name">${escapeHtml(largeScene.name)}</div>
