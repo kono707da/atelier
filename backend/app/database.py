@@ -130,6 +130,7 @@ class DatabaseManager:
                     id TEXT PRIMARY KEY,
                     name TEXT NOT NULL COLLATE NOCASE UNIQUE,
                     status TEXT NOT NULL DEFAULT 'draft',
+                    revision INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -139,6 +140,7 @@ class DatabaseManager:
                     project_id TEXT NOT NULL,
                     name TEXT NOT NULL,
                     sort_order INTEGER NOT NULL,
+                    revision INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     FOREIGN KEY (project_id)
@@ -155,6 +157,7 @@ class DatabaseManager:
                     name TEXT NOT NULL,
                     scene_type TEXT NOT NULL DEFAULT 'content',
                     sort_order INTEGER NOT NULL,
+                    revision INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     FOREIGN KEY (chapter_id)
@@ -169,6 +172,7 @@ class DatabaseManager:
                     id TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
                     sort_order INTEGER NOT NULL,
+                    revision INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     UNIQUE (name)
@@ -197,6 +201,7 @@ class DatabaseManager:
                     name TEXT NOT NULL,
                     is_default INTEGER NOT NULL DEFAULT 0,
                     sort_order INTEGER NOT NULL,
+                    revision INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     FOREIGN KEY (character_id)
@@ -253,6 +258,7 @@ class DatabaseManager:
                     notes TEXT NOT NULL DEFAULT '',
                     preview_original_path TEXT,
                     preview_thumbnail_path TEXT,
+                    revision INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     UNIQUE (material_type, name),
@@ -305,6 +311,7 @@ class DatabaseManager:
                     scene_type TEXT NOT NULL DEFAULT 'content',
                     description TEXT NOT NULL DEFAULT '',
                     sort_order INTEGER NOT NULL,
+                    revision INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     FOREIGN KEY (large_scene_id)
@@ -342,6 +349,7 @@ class DatabaseManager:
                     prompt_text TEXT NOT NULL DEFAULT '',
                     negative_prompt TEXT NOT NULL DEFAULT '',
                     sort_order INTEGER NOT NULL,
+                    revision INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     FOREIGN KEY (small_scene_id)
@@ -395,6 +403,7 @@ class DatabaseManager:
                     prompt_text TEXT NOT NULL DEFAULT '',
                     negative_prompt TEXT NOT NULL DEFAULT '',
                     sort_order INTEGER NOT NULL,
+                    revision INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     FOREIGN KEY (material_id)
@@ -423,14 +432,47 @@ class DatabaseManager:
                     ON small_scene_page_mappings(material_page_id, scene_page_id);
                 """
             )
-            # Migrate legacy tables if they exist (pre-v0.1.7 schema)
-            self._migrate_legacy_character_schema(connection)
-            # Add scene_type column to large_scenes for pre-v0.2.0 databases
-            self._migrate_large_scenes_scene_type(connection)
-            self._migrate_v040_tables(connection)
-            self._migrate_v041_tables(connection)
-            self._migrate_default_material_pages(connection)
-            self._migrate_fix_empty_link_ids(connection)
+            # schema_migrations table for versioned migration tracking
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS schema_migrations (
+                    version TEXT PRIMARY KEY,
+                    description TEXT NOT NULL,
+                    applied_at TEXT NOT NULL
+                )
+                """
+            )
+            # Versioned migrations: each is idempotent and registered with a version.
+            # For databases that predate schema_migrations, all existing migrations
+            # run once (they are idempotent) and get marked as applied.
+            self._run_migration(
+                connection, "v0.1.7", "Migrate legacy character schema",
+                self._migrate_legacy_character_schema,
+            )
+            self._run_migration(
+                connection, "v0.2.0", "Add scene_type to large_scenes",
+                self._migrate_large_scenes_scene_type,
+            )
+            self._run_migration(
+                connection, "v0.4.0", "Create materials/small_scenes/branches/shot_pages tables",
+                self._migrate_v040_tables,
+            )
+            self._run_migration(
+                connection, "v0.4.1", "Create material_pages and small_scene_page_mappings tables",
+                self._migrate_v041_tables,
+            )
+            self._run_migration(
+                connection, "v0.4.1.1", "Create default material pages for existing materials",
+                self._migrate_default_material_pages,
+            )
+            self._run_migration(
+                connection, "v0.4.1.2", "Fix empty link IDs in small_scene_materials",
+                self._migrate_fix_empty_link_ids,
+            )
+            self._run_migration(
+                connection, "v0.5.0", "Add revision column to core editing tables",
+                self._migrate_add_revision_columns,
+            )
             marker = connection.execute(
                 "SELECT value FROM atelier_meta WHERE key = 'environment'"
             ).fetchone()
@@ -856,6 +898,57 @@ class DatabaseManager:
                 "UPDATE small_scene_materials SET id = ? WHERE small_scene_id = ? AND material_id = ?",
                 (str(uuid4()), row["small_scene_id"], row["material_id"]),
             )
+
+    def _run_migration(
+        self, connection, version: str, description: str, migration_func
+    ) -> None:
+        """Run a versioned migration.
+
+        迁移函数必须幂等。每次 initialize 都会执行迁移函数（幂等检查），
+        以便修复手动破坏或历史遗留的数据不一致；版本记录只插入一次，
+        用于追踪迁移历史。这保证了：
+        - 新数据库：所有迁移执行并记录
+        - 已有数据库：迁移函数仍执行（幂等），版本不重复插入
+        - 手动破坏后的修复：迁移函数检测并修复不一致
+        """
+        migration_func(connection)
+        already = connection.execute(
+            "SELECT version FROM schema_migrations WHERE version = ?", (version,)
+        ).fetchone()
+        if not already:
+            now = datetime.now(timezone.utc).isoformat()
+            connection.execute(
+                "INSERT INTO schema_migrations(version, description, applied_at) VALUES (?, ?, ?)",
+                (version, description, now),
+            )
+
+    def _migrate_add_revision_columns(self, connection) -> None:
+        """Add revision INTEGER NOT NULL DEFAULT 1 to core editing tables.
+
+        Idempotent: uses PRAGMA table_info to check column existence before
+        adding. Existing rows get revision=1 automatically via DEFAULT.
+        """
+        revision_tables = [
+            "projects",
+            "chapters",
+            "large_scenes",
+            "small_scenes",
+            "shot_pages",
+            "materials",
+            "material_pages",
+            "characters",
+            "character_variants",
+        ]
+        for table in revision_tables:
+            exists = connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()
+            if not exists:
+                continue
+            cols = [row["name"] for row in connection.execute(f"PRAGMA table_info({table})").fetchall()]
+            if "revision" not in cols:
+                connection.execute(f"ALTER TABLE {table} ADD COLUMN revision INTEGER NOT NULL DEFAULT 1")
 
     def activate(self, environment: DatabaseEnvironment) -> None:
         target_environment = self._validate_environment(environment)

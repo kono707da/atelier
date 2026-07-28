@@ -4,6 +4,54 @@
     test: "测试数据库",
   };
 
+  // API 路径常量：新代码应使用 API.* 而非硬编码字符串，避免 URL 分散。
+  // 现有调用逐步迁移，不强制一次性全部替换。
+  const API = {
+    health: "/api/health",
+    developerProgress: "/api/developer/progress",
+    databases: {
+      settings: "/api/settings/databases",
+      verifyIsolation: "/api/settings/databases/verify-isolation",
+    },
+    projects: "/api/projects",
+    project: (id) => `/api/projects/${id}`,
+    chapters: (projectId) => `/api/projects/${projectId}/chapters`,
+    chapter: (id) => `/api/chapters/${id}`,
+    largeScenes: (chapterId) => `/api/chapters/${chapterId}/large-scenes`,
+    largeScene: (id) => `/api/large-scenes/${id}`,
+    largeSceneMove: (id) => `/api/large-scenes/${id}/move`,
+    smallScenes: (largeSceneId) => `/api/large-scenes/${largeSceneId}/small-scenes`,
+    smallScene: (id) => `/api/small-scenes/${id}`,
+    smallSceneMove: (id) => `/api/small-scenes/${id}/move`,
+    smallSceneMaterials: (id) => `/api/small-scenes/${id}/materials`,
+    smallSceneResources: (id) => `/api/small-scenes/${id}/resources`,
+    smallSceneWorkspace: (id) => `/api/small-scenes/${id}/workspace`,
+    smallScenePages: (id) => `/api/small-scenes/${id}/pages`,
+    smallScenePagesOrder: (id) => `/api/small-scenes/${id}/pages/order`,
+    smallSceneResourceLink: (linkId) => `/api/small-scene-resource-links/${linkId}`,
+    shotPages: (smallSceneId) => `/api/small-scenes/${smallSceneId}/shot-pages`,
+    shotPage: (id) => `/api/shot-pages/${id}`,
+    shotPageMove: (id) => `/api/shot-pages/${id}/move`,
+    scenePage: (id) => `/api/small-scene-pages/${id}`,
+    scenePageMapping: (pageId, materialType) => `/api/small-scene-pages/${pageId}/mappings/${materialType}`,
+    branches: (parentType, parentId) => `/api/${parentType}/${parentId}/branches`,
+    branch: (id) => `/api/branches/${id}`,
+    materials: "/api/materials",
+    material: (id) => `/api/materials/${id}`,
+    materialPreview: (id) => `/api/materials/${id}/preview`,
+    materialThumbnail: (id) => `/api/materials/${id}/thumbnail`,
+    materialPages: (id) => `/api/materials/${id}/pages`,
+    materialPagesOrder: (id) => `/api/materials/${id}/pages/order`,
+    materialPage: (id) => `/api/material-pages/${id}`,
+    materialTags: "/api/material-tags",
+    storyTree: (projectId) => `/api/projects/${projectId}/story-tree`,
+    characters: "/api/characters",
+    character: (id) => `/api/characters/${id}`,
+    characterDatabase: {
+      status: "/api/character-database/status",
+    },
+  };
+
   const emptyStateCopy = {
     projects: ["还没有项目", "生产数据库目前为空。创建第一个项目后，项目进度会显示在这里。", "新建项目"],
     overview: ["还没有项目概览", "先在项目中心创建或打开一个项目。", "返回项目中心"],
@@ -74,13 +122,6 @@
       '"': "&quot;",
       "'": "&#039;",
     })[character]);
-  }
-
-  function setEnvironmentPill(environment, locked) {
-    const pill = document.getElementById("environment-pill");
-    if (!pill) return;
-    pill.className = `environment-pill ${environment}`;
-    pill.innerHTML = `<span class="environment-dot"></span><span>${environmentNames[environment]}${locked ? " · 已锁定" : ""}</span>`;
   }
 
   function applyProductionEmptyState() {
@@ -4574,9 +4615,14 @@
       payload = {};
     }
     if (!response.ok) {
-      const requestError = new Error(payload.detail || `请求失败（${response.status}）`);
+      // 后端统一错误格式: {detail, error: {code, message, details, request_id}}
+      const errorObj = payload.error || {};
+      const message = errorObj.message || payload.detail || `请求失败（${response.status}）`;
+      const requestError = new Error(message);
       requestError.status = response.status;
       requestError.payload = payload;
+      requestError.errorCode = errorObj.code || "";
+      requestError.requestId = errorObj.request_id || response.headers.get("X-Request-ID") || "";
       throw requestError;
     }
     return payload;
@@ -4698,7 +4744,6 @@
   async function refreshDatabaseState() {
     try {
       const payload = await request("/api/settings/databases");
-      setEnvironmentPill(payload.active_environment, Boolean(payload.locked_environment));
       payload.databases.forEach(renderDatabaseCard);
       document.body.dataset.databaseEnvironment = payload.active_environment;
       const pageKey = new URLSearchParams(window.location.search).get("page") || "projects";
@@ -4726,11 +4771,6 @@
       document.body.classList.remove("runtime-pending");
       return payload;
     } catch (error) {
-      const pill = document.getElementById("environment-pill");
-      if (pill) {
-        pill.className = "environment-pill offline";
-        pill.innerHTML = '<span class="environment-dot"></span><span>后端未连接</span>';
-      }
       const safety = document.getElementById("database-safety-status");
       if (safety) safety.innerHTML = '<span class="status orange">后端未连接</span>';
       document.body.classList.remove("runtime-pending");
@@ -4966,35 +5006,6 @@
     if (button.dataset.apiAction === "close-rename-modal") {
       closeRenameModal();
       return;
-    }
-
-    if (button.dataset.apiAction === "activate-database") {
-      const environment = button.dataset.environment;
-      const isProduction = environment === "production";
-      const confirmed = await confirmDialog({
-        title: isProduction ? "切换到生产数据库" : "切换到测试数据库",
-        message: isProduction
-          ? "这里保存的内容会成为你的正式数据，确认继续吗？"
-          : "这里的数据只用于开发测试，不会进入你的正式项目，确认继续吗？",
-        confirmText: "切换",
-        danger: isProduction
-      });
-      if (!confirmed) return;
-      button.disabled = true;
-      try {
-        await request("/api/settings/databases/activate", {
-          method: "POST",
-          body: JSON.stringify({
-            environment,
-            confirmation: environment === "production" ? "USE PRODUCTION" : null,
-          }),
-        });
-        await refreshDatabaseState();
-        if (typeof showToast === "function") showToast(`已切换到${environmentNames[environment]}`);
-      } catch (error) {
-        button.disabled = false;
-        if (typeof showToast === "function") showToast(error.message);
-      }
     }
 
     if (button.dataset.apiAction === "verify-isolation") {

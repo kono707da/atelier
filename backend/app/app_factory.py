@@ -9,16 +9,20 @@ from __future__ import annotations
 import io
 import re
 import shutil
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, status
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, status
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, Field, field_validator, model_validator
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .database import DatabaseManager, DatabaseSafetyError
 from . import character_database
@@ -630,6 +634,42 @@ class ReorderMaterialPagesRequest(BaseModel):
     page_ids: list[str] = Field(min_length=1)
 
 
+# 状态码到错误码的映射，保持 API 错误响应统一可追溯。
+_STATUS_CODE_TO_ERROR_CODE: dict[int, str] = {
+    400: "VALIDATION_ERROR",
+    404: "NOT_FOUND",
+    409: "CONFLICT",
+    422: "BUSINESS_RULE_VIOLATION",
+    500: "INTERNAL_ERROR",
+    503: "SERVICE_UNAVAILABLE",
+}
+
+
+def _build_error_payload(
+    status_code: int,
+    message: str,
+    *,
+    details: dict | None = None,
+    request_id: str | None = None,
+) -> dict[str, object]:
+    """构建统一错误响应 payload。
+
+    保留 ``detail`` 字段以兼容旧测试，同时提供 ``error`` 结构以满足
+    《Atelier 全功能产品与技术开发需求》10.1 节的统一错误契约。
+    """
+    code = _STATUS_CODE_TO_ERROR_CODE.get(status_code, "INTERNAL_ERROR")
+    payload: dict[str, object] = {
+        "detail": message,
+        "error": {
+            "code": code,
+            "message": message,
+            "details": details or {},
+            "request_id": request_id or "",
+        },
+    }
+    return payload
+
+
 def create_app(
     *,
     data_root: Path | None = None,
@@ -639,7 +679,7 @@ def create_app(
 ) -> FastAPI:
     app = FastAPI(
         title="Atelier API",
-        version="0.4.3",
+        version="0.5.0",
         docs_url="/api/docs",
         redoc_url=None,
     )
@@ -660,6 +700,97 @@ def create_app(
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.middleware("http")
+    async def request_id_middleware(request: Request, call_next):
+        """为每个请求注入唯一 request_id，并在响应头返回。
+
+        - 优先复用客户端传入的 X-Request-ID（截断到 64 字符）。
+        - 否则生成 UUID4。
+        - 将 request_id 写入 request.state，供异常处理器使用。
+        """
+        incoming = request.headers.get("X-Request-ID")
+        if incoming and len(incoming) <= 64:
+            request_id = incoming
+        else:
+            request_id = uuid.uuid4().hex
+        request.state.request_id = request_id
+        try:
+            response = await call_next(request)
+        except Exception:
+            # 兜底异常由下面的 exception handler 处理；这里只确保响应头存在。
+            raise
+        response.headers["X-Request-ID"] = request_id
+        return response
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+        """统一 HTTP 异常响应格式。
+
+        兼容 FastAPI/Starlette 的 HTTPException，保留 detail 字段（可能是
+        字符串或字典），同时附加 error 结构。
+        """
+        request_id = getattr(request.state, "request_id", "") or ""
+        if isinstance(exc.detail, dict) and "error" in exc.detail:
+            # 已经是统一格式，直接返回。
+            payload = exc.detail
+            if request_id and payload.get("error", {}).get("request_id") in (None, ""):
+                payload["error"]["request_id"] = request_id
+            return JSONResponse(status_code=exc.status_code, content=payload, headers={"X-Request-ID": request_id})
+        message = str(exc.detail) if exc.detail is not None else f"HTTP {exc.status_code}"
+        payload = _build_error_payload(exc.status_code, message, request_id=request_id)
+        return JSONResponse(status_code=exc.status_code, content=payload, headers={"X-Request-ID": request_id})
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_exception_handler(request: Request, exc: RequestValidationError):
+        """请求体或参数校验失败统一返回 422，并附加 error 结构。
+
+        保持 422 状态码以兼容现有测试和 FastAPI 默认行为；
+        Pydantic 校验失败（空白、超长、枚举不匹配）本质属于业务规则校验。
+        """
+        request_id = getattr(request.state, "request_id", "") or ""
+        raw_errors = exc.errors()
+        # errors() 的 ctx 字段可能包含 ValueError 等不可 JSON 序列化的对象，
+        # 用 jsonable_encoder 转换；失败时降级为只保留基本字段。
+        try:
+            safe_errors = jsonable_encoder(raw_errors)
+        except (TypeError, ValueError):
+            safe_errors = [
+                {
+                    "loc": list(err.get("loc", [])),
+                    "msg": err.get("msg", ""),
+                    "type": err.get("type", ""),
+                }
+                for err in raw_errors
+            ]
+        first_message = "请求参数校验失败。"
+        if safe_errors:
+            first = safe_errors[0]
+            loc = first.get("loc", [])
+            msg = first.get("msg", "")
+            loc_str = ".".join(str(p) for p in loc if p not in ("body", "query", "path"))
+            first_message = f"{loc_str} {msg}".strip() if loc_str else msg
+        payload = _build_error_payload(
+            422,
+            first_message,
+            details={"validation_errors": safe_errors},
+            request_id=request_id,
+        )
+        return JSONResponse(status_code=422, content=payload, headers={"X-Request-ID": request_id})
+
+    @app.exception_handler(DatabaseSafetyError)
+    async def database_safety_handler(request: Request, exc: DatabaseSafetyError):
+        """数据库安全错误返回 403，防止误操作生产库。"""
+        request_id = getattr(request.state, "request_id", "") or ""
+        payload = _build_error_payload(403, str(exc), request_id=request_id)
+        return JSONResponse(status_code=403, content=payload, headers={"X-Request-ID": request_id})
+
+    @app.exception_handler(Exception)
+    async def unhandled_exception_handler(request: Request, exc: Exception):
+        """兜底未捕获异常，返回 500 并附带 request_id 以便追踪。"""
+        request_id = getattr(request.state, "request_id", "") or ""
+        payload = _build_error_payload(500, "服务器内部错误。", request_id=request_id)
+        return JSONResponse(status_code=500, content=payload, headers={"X-Request-ID": request_id})
 
     @app.get("/api/health")
     def health() -> dict[str, object]:

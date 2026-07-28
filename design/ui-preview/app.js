@@ -123,7 +123,6 @@ function shell(content) {
       <header class="topbar">
         <div class="breadcrumb"><span>Atelier</span><span class="chevron">›</span><span>${meta[2]}</span><span class="chevron">›</span><strong>${meta[1]}</strong></div>
         <div class="topbar-spacer"></div>
-        <div class="environment-pill loading" id="environment-pill"><span class="environment-dot"></span><span>正在连接数据库</span></div>
         <div class="save-state"><span class="save-check">✓</span>所有更改已保存</div>
         <button class="icon-button">⌘</button>
         <button class="icon-button">?</button>
@@ -609,48 +608,18 @@ function settingsPage() {
     ${pageHeader("设置", "管理生产数据、测试数据和运行环境。", '<button class="btn soft" data-api-action="verify-isolation">验证数据库隔离</button>' + button("保存设置", "primary"))}
     <section class="panel database-settings">
       <div class="panel-header">
-        <div><div class="panel-title">数据库环境</div><div class="panel-sub">两套数据库使用不同物理文件；普通启动始终默认进入生产库。</div></div>
-        <div id="database-safety-status">${status("正在检查","orange")}</div>
+        <div><div class="panel-title">数据库与存储</div><div class="panel-sub">应用始终使用生产数据库，自动化测试使用独立隔离的临时目录。</div></div>
+        <div id="database-safety-status">${status("已隔离","green")}</div>
       </div>
       <div class="database-guide">
         <span class="database-guide-icon">i</span>
-        <div><strong>你平时只使用生产数据库。</strong><br>测试数据库供开发验证和自动化测试使用，测试进程会锁定到测试库，无法切换到生产库。</div>
+        <div><strong>界面只连接生产数据库。</strong>自动化测试通过临时数据目录隔离，不会写入生产数据。</div>
       </div>
-      <div class="database-grid">
-        <article class="database-card production" id="database-production">
-          <div class="database-card-top">
-            <span class="database-symbol">P</span>
-            <div><div class="database-name">生产数据库</div><div class="database-purpose">你的真实项目、素材索引和作品数据</div></div>
-            <span class="status blue database-state">等待连接</span>
-          </div>
-          <div class="database-path">正在读取数据库路径…</div>
-          <div class="database-facts">
-            <div><span>存储格式</span><strong class="database-journal">SQLite WAL</strong></div>
-            <div><span>当前大小</span><strong class="database-size">—</strong></div>
-            <div><span>测试记录</span><strong class="database-events">—</strong></div>
-          </div>
-          <button class="btn primary database-action" data-api-action="activate-database" data-environment="production">使用生产数据库</button>
-        </article>
-        <article class="database-card test" id="database-test">
-          <div class="database-card-top">
-            <span class="database-symbol">T</span>
-            <div><div class="database-name">测试数据库</div><div class="database-purpose">开发检查、自动化测试和可清空的演示数据</div></div>
-            <span class="status orange database-state">等待连接</span>
-          </div>
-          <div class="database-path">正在读取数据库路径…</div>
-          <div class="database-facts">
-            <div><span>存储格式</span><strong class="database-journal">SQLite WAL</strong></div>
-            <div><span>当前大小</span><strong class="database-size">—</strong></div>
-            <div><span>测试记录</span><strong class="database-events">—</strong></div>
-          </div>
-          <button class="btn soft database-action" data-api-action="activate-database" data-environment="test">切换到测试数据库</button>
-        </article>
-      </div>
-      <div class="database-result" id="database-result">尚未执行隔离验证。</div>
+      <div class="database-result" id="database-result">生产数据库已就绪。</div>
     </section>
     <div class="grid cols-3">
       <div class="setting-card"><div style="display:flex;justify-content:space-between">${status("尚未检测","orange")}${chip("默认实例","blue")}</div><div class="setting-title" style="margin-top:12px">ComfyUI 主实例</div><div class="setting-desc">运行生成任务并提供节点定义。</div><div class="setting-value">192.168.3.5:8188</div><div class="kv"><span>延迟</span><strong>连接后读取</strong></div><div class="kv"><span>GPU</span><strong>连接后读取</strong></div><div class="kv"><span>节点</span><strong>连接后读取</strong></div></div>
-      <div class="setting-card"><div style="display:flex;justify-content:space-between">${status("已隔离","green")}${chip("双数据库")}</div><div class="setting-title" style="margin-top:12px">数据安全策略</div><div class="setting-desc">生产数据与测试写入使用不同数据库文件。</div><div class="setting-value">Production + Test</div><div class="kv"><span>普通启动</span><strong>生产数据库</strong></div><div class="kv"><span>测试启动</span><strong>锁定测试数据库</strong></div><div class="kv"><span>跨库写入</span><strong>禁止</strong></div></div>
+      <div class="setting-card"><div style="display:flex;justify-content:space-between">${status("已隔离","green")}${chip("测试隔离")}</div><div class="setting-title" style="margin-top:12px">数据安全策略</div><div class="setting-desc">界面只连接生产数据库，测试使用临时目录。</div><div class="setting-value">生产数据库</div><div class="kv"><span>普通启动</span><strong>生产数据库</strong></div><div class="kv"><span>自动化测试</span><strong>临时数据目录</strong></div><div class="kv"><span>跨库写入</span><strong>禁止</strong></div></div>
       <div class="setting-card"><div style="display:flex;justify-content:space-between">${status("未配置","orange")}${chip("双层缩略图")}</div><div class="setting-title" style="margin-top:12px">图库缓存</div><div class="setting-desc">256px 列表缩略图与 640px 快速预览。</div><div class="setting-value">尚未设置缓存目录</div><div class="kv"><span>缓存占用</span><strong>0 KB</strong></div><div class="kv"><span>待生成</span><strong>0</strong></div><div class="kv"><span>浏览器策略</span><strong>长缓存 + ETag</strong></div></div>
     </div>
     <div class="grid cols-2" style="margin-top:14px">
