@@ -240,6 +240,63 @@ class DatabaseManager:
 
                 CREATE INDEX IF NOT EXISTS idx_character_spec_values_variant
                     ON character_spec_values(variant_id);
+
+                CREATE TABLE IF NOT EXISTS materials (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL COLLATE NOCASE,
+                    material_type TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    content TEXT NOT NULL,
+                    prompt_text TEXT NOT NULL DEFAULT '',
+                    negative_prompt TEXT NOT NULL DEFAULT '',
+                    validation_status TEXT NOT NULL DEFAULT 'unverified',
+                    notes TEXT NOT NULL DEFAULT '',
+                    preview_original_path TEXT,
+                    preview_thumbnail_path TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE (material_type, name),
+                    CHECK (
+                        material_type IN (
+                            'composition',
+                            'expression',
+                            'scene',
+                            'lighting',
+                            'prompt',
+                            'composite_template'
+                        )
+                    ),
+                    CHECK (validation_status IN ('unverified', 'verified'))
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_materials_type_updated
+                    ON materials(material_type, updated_at DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_materials_status_updated
+                    ON materials(validation_status, updated_at DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_materials_name
+                    ON materials(name);
+
+                CREATE TABLE IF NOT EXISTS material_tags (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS material_tag_links (
+                    material_id TEXT NOT NULL,
+                    tag_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (material_id, tag_id),
+                    FOREIGN KEY (material_id)
+                        REFERENCES materials(id) ON DELETE CASCADE,
+                    FOREIGN KEY (tag_id)
+                        REFERENCES material_tags(id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_material_tag_links_tag
+                    ON material_tag_links(tag_id, material_id);
                 """
             )
             # Migrate legacy tables if they exist (pre-v0.1.7 schema)
@@ -1638,6 +1695,523 @@ class DatabaseManager:
                 (variant_id,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    # ── Materials ──────────────────────────────────────────────
+
+    VALID_MATERIAL_TYPES: tuple[str, ...] = (
+        "composition",
+        "expression",
+        "scene",
+        "lighting",
+        "prompt",
+        "composite_template",
+    )
+    VALID_MATERIAL_SORTS: tuple[str, ...] = (
+        "updated_desc",
+        "created_desc",
+        "name_asc",
+        "name_desc",
+    )
+    VALID_MATERIAL_STATUSES: tuple[str, ...] = ("unverified", "verified")
+
+    def _normalize_material_name(self, name: str) -> str:
+        clean = " ".join(name.split())
+        if not clean:
+            raise ValueError("素材名称不能为空。")
+        if len(clean) > 80:
+            raise ValueError("素材名称不能超过 80 个字符。")
+        return clean
+
+    def _normalize_material_tags(self, tags: list[str] | None) -> list[str]:
+        if not tags:
+            return []
+        if len(tags) > 30:
+            raise ValueError("素材标签最多 30 个。")
+        seen: set[str] = set()
+        result: list[str] = []
+        for raw in tags:
+            if not isinstance(raw, str):
+                continue
+            clean = " ".join(raw.split())
+            if not clean:
+                continue
+            if len(clean) > 40:
+                raise ValueError("单个素材标签不能超过 40 个字符。")
+            key = clean.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(clean)
+        return result
+
+    def _validate_material_type(self, material_type: str) -> str:
+        if material_type not in self.VALID_MATERIAL_TYPES:
+            raise ValueError("素材类型不合法。")
+        return material_type
+
+    def _validate_material_status(self, validation_status: str) -> str:
+        if validation_status not in self.VALID_MATERIAL_STATUSES:
+            raise ValueError("素材验证状态不合法。")
+        return validation_status
+
+    def _validate_material_text(
+        self,
+        *,
+        content: str,
+        description: str = "",
+        prompt_text: str = "",
+        negative_prompt: str = "",
+        notes: str = "",
+    ) -> None:
+        if not content.strip():
+            raise ValueError("素材正文不能为空。")
+        if len(content) > 50000:
+            raise ValueError("素材正文不能超过 50,000 字。")
+        if len(description) > 300:
+            raise ValueError("素材简介不能超过 300 字。")
+        if len(prompt_text) > 50000:
+            raise ValueError("提示词内容不能超过 50,000 字。")
+        if len(negative_prompt) > 20000:
+            raise ValueError("负面提示词不能超过 20,000 字。")
+        if len(notes) > 5000:
+            raise ValueError("备注不能超过 5,000 字。")
+
+    def _material_row_to_dict(self, row: sqlite3.Row) -> dict[str, object]:
+        return dict(row)
+
+    def _get_material_tags(
+        self, connection: sqlite3.Connection, material_id: str
+    ) -> list[str]:
+        rows = connection.execute(
+            """
+            SELECT t.name
+            FROM material_tag_links l
+            JOIN material_tags t ON t.id = l.tag_id
+            WHERE l.material_id = ?
+            ORDER BY t.name ASC
+            """,
+            (material_id,),
+        ).fetchall()
+        return [row["name"] for row in rows]
+
+    def _sync_material_tags(
+        self,
+        connection: sqlite3.Connection,
+        material_id: str,
+        tags: list[str],
+        now: str,
+    ) -> None:
+        connection.execute(
+            "DELETE FROM material_tag_links WHERE material_id = ?",
+            (material_id,),
+        )
+        for tag_name in tags:
+            row = connection.execute(
+                "SELECT id FROM material_tags WHERE name = ?",
+                (tag_name,),
+            ).fetchone()
+            if row is None:
+                tag_id = str(uuid4())
+                connection.execute(
+                    """
+                    INSERT INTO material_tags(id, name, created_at)
+                    VALUES(?, ?, ?)
+                    """,
+                    (tag_id, tag_name, now),
+                )
+            else:
+                tag_id = row["id"]
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO material_tag_links(material_id, tag_id, created_at)
+                VALUES(?, ?, ?)
+                """,
+                (material_id, tag_id, now),
+            )
+
+    def list_materials(
+        self,
+        *,
+        query: str = "",
+        material_type: str = "",
+        validation_status: str = "",
+        tag: str = "",
+        limit: int = 60,
+        offset: int = 0,
+        sort: str = "updated_desc",
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        target_environment = environment or self._active_environment
+        if limit < 1:
+            limit = 1
+        if limit > 100:
+            limit = 100
+        if offset < 0:
+            offset = 0
+        if sort not in self.VALID_MATERIAL_SORTS:
+            sort = "updated_desc"
+
+        order_clause = {
+            "updated_desc": "m.updated_at DESC, m.name ASC",
+            "created_desc": "m.created_at DESC, m.name ASC",
+            "name_asc": "m.name ASC, m.updated_at DESC",
+            "name_desc": "m.name DESC, m.updated_at DESC",
+        }[sort]
+
+        where_parts: list[str] = []
+        params: list[object] = []
+        if query:
+            q = query.strip()
+            if q:
+                if len(q) > 100:
+                    q = q[:100]
+                escaped = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                like = f"%{escaped}%"
+                where_parts.append(
+                    "(m.name LIKE ? ESCAPE '\\' OR m.description LIKE ? ESCAPE '\\' "
+                    "OR m.content LIKE ? ESCAPE '\\' OR EXISTS ("
+                    "SELECT 1 FROM material_tag_links l "
+                    "JOIN material_tags t ON t.id = l.tag_id "
+                    "WHERE l.material_id = m.id AND t.name LIKE ? ESCAPE '\\'"
+                    "))"
+                )
+                params.extend([like, like, like, like])
+        if material_type:
+            if material_type not in self.VALID_MATERIAL_TYPES:
+                material_type = ""
+            else:
+                where_parts.append("m.material_type = ?")
+                params.append(material_type)
+        if validation_status:
+            if validation_status in self.VALID_MATERIAL_STATUSES:
+                where_parts.append("m.validation_status = ?")
+                params.append(validation_status)
+        if tag:
+            clean_tag = " ".join(tag.split())
+            if clean_tag:
+                where_parts.append(
+                    "EXISTS (SELECT 1 FROM material_tag_links l "
+                    "JOIN material_tags t ON t.id = l.tag_id "
+                    "WHERE l.material_id = m.id AND t.name = ?)"
+                )
+                params.append(clean_tag)
+
+        where_sql = (" WHERE " + " AND ".join(where_parts)) if where_parts else ""
+
+        with self.connection(target_environment) as connection:
+            count_row = connection.execute(
+                f"SELECT COUNT(*) AS total FROM materials m{where_sql}",
+                params,
+            ).fetchone()
+            total = int(count_row["total"])
+            rows = connection.execute(
+                f"""
+                SELECT m.id, m.name, m.material_type, m.description,
+                       m.validation_status, m.preview_thumbnail_path,
+                       m.created_at, m.updated_at
+                FROM materials m
+                {where_sql}
+                ORDER BY {order_clause}
+                LIMIT ? OFFSET ?
+                """,
+                params + [limit, offset],
+            ).fetchall()
+            items: list[dict[str, object]] = []
+            for row in rows:
+                item = dict(row)
+                tags = self._get_material_tags(connection, row["id"])
+                item["tags"] = tags
+                thumbnail_path = item.get("preview_thumbnail_path")
+                item["thumbnail_url"] = (
+                    f"/api/materials/{item['id']}/thumbnail" if thumbnail_path else None
+                )
+                items.append(item)
+
+        has_more = (offset + limit) < total
+        return {
+            "items": items,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "has_more": has_more,
+        }
+
+    def get_material(
+        self,
+        material_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        target_environment = environment or self._active_environment
+        with self.connection(target_environment) as connection:
+            row = connection.execute(
+                """
+                SELECT id, name, material_type, description, content,
+                       prompt_text, negative_prompt, validation_status, notes,
+                       preview_original_path, preview_thumbnail_path,
+                       created_at, updated_at
+                FROM materials
+                WHERE id = ?
+                """,
+                (material_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            material = dict(row)
+            material["tags"] = self._get_material_tags(connection, material_id)
+        material["preview_url"] = (
+            f"/api/materials/{material_id}/preview"
+            if material.get("preview_original_path")
+            else None
+        )
+        material["thumbnail_url"] = (
+            f"/api/materials/{material_id}/thumbnail"
+            if material.get("preview_thumbnail_path")
+            else None
+        )
+        return material
+
+    def create_material(
+        self,
+        *,
+        name: str,
+        material_type: str,
+        content: str,
+        description: str = "",
+        prompt_text: str = "",
+        negative_prompt: str = "",
+        validation_status: str = "unverified",
+        notes: str = "",
+        tags: list[str] | None = None,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        target_environment = environment or self._active_environment
+        clean_name = self._normalize_material_name(name)
+        self._validate_material_type(material_type)
+        self._validate_material_status(validation_status)
+        self._validate_material_text(
+            content=content,
+            description=description,
+            prompt_text=prompt_text,
+            negative_prompt=negative_prompt,
+            notes=notes,
+        )
+        clean_tags = self._normalize_material_tags(tags)
+        now = datetime.now(timezone.utc).isoformat()
+        material = {
+            "id": str(uuid4()),
+            "name": clean_name,
+            "material_type": material_type,
+            "description": description,
+            "content": content,
+            "prompt_text": prompt_text,
+            "negative_prompt": negative_prompt,
+            "validation_status": validation_status,
+            "notes": notes,
+            "preview_original_path": None,
+            "preview_thumbnail_path": None,
+            "created_at": now,
+            "updated_at": now,
+        }
+        try:
+            with self._lock, self.connection(target_environment) as connection:
+                connection.execute(
+                    """
+                    INSERT INTO materials(
+                        id, name, material_type, description, content,
+                        prompt_text, negative_prompt, validation_status, notes,
+                        preview_original_path, preview_thumbnail_path,
+                        created_at, updated_at
+                    )
+                    VALUES(
+                        :id, :name, :material_type, :description, :content,
+                        :prompt_text, :negative_prompt, :validation_status, :notes,
+                        :preview_original_path, :preview_thumbnail_path,
+                        :created_at, :updated_at
+                    )
+                    """,
+                    material,
+                )
+                self._sync_material_tags(connection, material["id"], clean_tags, now)
+        except sqlite3.IntegrityError as error:
+            raise ValueError("该类型下已存在同名素材。") from error
+        material["tags"] = clean_tags
+        material["preview_url"] = None
+        material["thumbnail_url"] = None
+        return material
+
+    def update_material(
+        self,
+        material_id: str,
+        *,
+        environment: DatabaseEnvironment | None = None,
+        **updates,
+    ) -> dict[str, object] | None:
+        target_environment = environment or self._active_environment
+        allowed = {
+            "name",
+            "material_type",
+            "description",
+            "content",
+            "prompt_text",
+            "negative_prompt",
+            "validation_status",
+            "notes",
+            "tags",
+        }
+        unknown = set(updates) - allowed
+        if unknown:
+            raise ValueError(f"不允许更新的字段: {', '.join(sorted(unknown))}")
+        if not updates:
+            raise ValueError("至少需要提供一个更新字段。")
+
+        if "name" in updates and updates["name"] is not None:
+            updates["name"] = self._normalize_material_name(updates["name"])
+        if "material_type" in updates and updates["material_type"] is not None:
+            self._validate_material_type(updates["material_type"])
+        if "validation_status" in updates and updates["validation_status"] is not None:
+            self._validate_material_status(updates["validation_status"])
+        if "description" in updates and updates["description"] is not None:
+            if len(updates["description"]) > 300:
+                raise ValueError("素材简介不能超过 300 字。")
+        if "content" in updates and updates["content"] is not None:
+            if not updates["content"].strip():
+                raise ValueError("素材正文不能为空。")
+            if len(updates["content"]) > 50000:
+                raise ValueError("素材正文不能超过 50,000 字。")
+        if "prompt_text" in updates and updates["prompt_text"] is not None:
+            if len(updates["prompt_text"]) > 50000:
+                raise ValueError("提示词内容不能超过 50,000 字。")
+        if "negative_prompt" in updates and updates["negative_prompt"] is not None:
+            if len(updates["negative_prompt"]) > 20000:
+                raise ValueError("负面提示词不能超过 20,000 字。")
+        if "notes" in updates and updates["notes"] is not None:
+            if len(updates["notes"]) > 5000:
+                raise ValueError("备注不能超过 5,000 字。")
+        if "tags" in updates and updates["tags"] is not None:
+            updates["tags"] = self._normalize_material_tags(updates["tags"])
+
+        with self._lock, self.connection(target_environment) as connection:
+            row = connection.execute(
+                "SELECT id FROM materials WHERE id = ?",
+                (material_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            now = datetime.now(timezone.utc).isoformat()
+            set_parts: list[str] = []
+            params: list[object] = []
+            tag_list: list[str] | None = None
+            for key, value in updates.items():
+                if key == "tags":
+                    tag_list = value if value is not None else []
+                    continue
+                set_parts.append(f"{key} = ?")
+                params.append(value)
+            set_parts.append("updated_at = ?")
+            params.append(now)
+            params.append(material_id)
+            try:
+                connection.execute(
+                    f"""
+                    UPDATE materials
+                    SET {', '.join(set_parts)}
+                    WHERE id = ?
+                    """,
+                    params,
+                )
+            except sqlite3.IntegrityError as error:
+                raise ValueError("该类型下已存在同名素材。") from error
+            if tag_list is not None:
+                self._sync_material_tags(connection, material_id, tag_list, now)
+        return self.get_material(material_id, target_environment)
+
+    def delete_material(
+        self,
+        material_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        target_environment = environment or self._active_environment
+        with self._lock, self.connection(target_environment) as connection:
+            row = connection.execute(
+                "SELECT id, preview_original_path, preview_thumbnail_path FROM materials WHERE id = ?",
+                (material_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            connection.execute(
+                "DELETE FROM materials WHERE id = ?",
+                (material_id,),
+            )
+        return {
+            "deleted": True,
+            "material_id": material_id,
+            "preview_original_path": row["preview_original_path"],
+            "preview_thumbnail_path": row["preview_thumbnail_path"],
+        }
+
+    def list_material_tags(
+        self,
+        query: str = "",
+        limit: int = 30,
+        environment: DatabaseEnvironment | None = None,
+    ) -> list[dict[str, object]]:
+        target_environment = environment or self._active_environment
+        if limit < 1:
+            limit = 1
+        if limit > 100:
+            limit = 100
+        q = query.strip()
+        params: list[object] = []
+        where_sql = ""
+        if q:
+            if len(q) > 100:
+                q = q[:100]
+            escaped = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            where_sql = "WHERE t.name LIKE ? ESCAPE '\\'"
+            params.append(f"{escaped}%")
+        with self.connection(target_environment) as connection:
+            rows = connection.execute(
+                f"""
+                SELECT t.name AS name, COUNT(l.material_id) AS material_count
+                FROM material_tags t
+                LEFT JOIN material_tag_links l ON l.tag_id = t.id
+                LEFT JOIN materials m ON m.id = l.material_id
+                {where_sql}
+                GROUP BY t.id, t.name
+                HAVING material_count > 0
+                ORDER BY material_count DESC, t.name ASC
+                LIMIT ?
+                """,
+                params + [limit],
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def set_material_preview_paths(
+        self,
+        material_id: str,
+        *,
+        original_path: str | None,
+        thumbnail_path: str | None,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        target_environment = environment or self._active_environment
+        with self._lock, self.connection(target_environment) as connection:
+            row = connection.execute(
+                "SELECT id FROM materials WHERE id = ?",
+                (material_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            now = datetime.now(timezone.utc).isoformat()
+            connection.execute(
+                """
+                UPDATE materials
+                SET preview_original_path = ?, preview_thumbnail_path = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (original_path, thumbnail_path, now, material_id),
+            )
+        return self.get_material(material_id, target_environment)
 
     def database_info(self, environment: DatabaseEnvironment) -> dict[str, object]:
         descriptor = self.descriptor(environment)
