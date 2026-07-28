@@ -43,7 +43,9 @@ if ($Listeners.Count -gt 0) {
     foreach ($ProcessId in $ProcessIds) {
         $ProcessInfo = Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId"
         $CommandLine = [string]$ProcessInfo.CommandLine
-        $IsAtelier = $CommandLine.Contains("--atelier-server") -and $CommandLine.Contains($ProjectRoot)
+        # --atelier-server is an Atelier-only flag; path comparison is unreliable
+        # because Windows path casing differs between launchers (e.g. C:\ vs c:\).
+        $IsAtelier = $CommandLine.Contains("--atelier-server")
         if (-not $IsAtelier) {
             Write-Host "Port $Port is used by another application (PID $ProcessId)."
             Write-Host "Atelier startup stopped without terminating that process."
