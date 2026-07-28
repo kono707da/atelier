@@ -285,14 +285,21 @@
   }
 
   function largeSceneBlock(largeScene) {
+    const sceneType = largeScene.scene_type || "content";
+    const typeLabel = sceneType === "transition" ? "过渡段" : "内容段";
     return `
       <article
-        class="large-scene-block"
+        class="large-scene-block scene-type-${sceneType}"
         data-large-scene-id="${escapeHtml(largeScene.id)}"
+        data-chapter-id="${escapeHtml(largeScene.chapter_id)}"
+        data-scene-type="${escapeHtml(sceneType)}"
         data-context-menu="large-scene"
         data-name="${escapeHtml(largeScene.name)}"
+        draggable="true"
       >
+        <div class="large-scene-drag-handle" aria-label="拖动大场景调整顺序或跨章节移动" title="拖动以调整顺序"></div>
         <div class="large-scene-kicker">大场景 ${String(largeScene.sort_order).padStart(2, "0")}</div>
+        <div class="large-scene-type-badge" data-scene-type="${escapeHtml(sceneType)}">${typeLabel}</div>
         <div class="large-scene-name">${escapeHtml(largeScene.name)}</div>
         <div class="large-scene-meta">尚未添加小场景</div>
       </article>
@@ -323,17 +330,17 @@
           <div class="real-chapter-meta">${largeScenes.length} 个大场景</div>
         </article>
         <div class="chapter-scene-connector" aria-hidden="true"></div>
-        <div class="large-scene-lane">
+        <div class="large-scene-lane" data-drop-zone data-chapter-id="${escapeHtml(chapter.id)}">
           ${
             largeScenes.length
               ? `
-                <div class="large-scene-track">
+                <div class="large-scene-track" data-drop-zone data-chapter-id="${escapeHtml(chapter.id)}">
                   ${largeScenes.map(largeSceneBlock).join("")}
                   <div class="large-scene-add-card">${addLargeSceneButton}</div>
                 </div>
               `
               : `
-                <div class="large-scene-empty">
+                <div class="large-scene-empty" data-drop-zone data-chapter-id="${escapeHtml(chapter.id)}">
                   <span>这个章节还没有大场景</span>
                   ${addLargeSceneButton}
                 </div>
@@ -1169,13 +1176,18 @@
     modal.className = "atelier-modal-backdrop";
     modal.hidden = true;
     modal.innerHTML = `
-      <section class="atelier-modal" role="dialog" aria-modal="true" aria-labelledby="new-large-scene-title">
+      <section class="atelier-modal size-md" role="dialog" aria-modal="true" aria-labelledby="new-large-scene-title">
         <div class="atelier-modal-icon scene">SC</div>
         <h2 id="new-large-scene-title">新建大场景</h2>
         <p id="new-large-scene-context">大场景会按照创建顺序排列在所属章节中。</p>
         <form id="new-large-scene-form">
           <label class="label" for="new-large-scene-name">大场景名称</label>
           <input id="new-large-scene-name" class="modal-input" name="name" maxlength="80" autocomplete="off" placeholder="例如：公共沙滩" required />
+          <label class="label" for="new-large-scene-type">类型</label>
+          <select id="new-large-scene-type" class="modal-input" name="scene_type">
+            <option value="content">内容段</option>
+            <option value="transition">过渡段</option>
+          </select>
           <div class="modal-error" id="new-large-scene-error" role="alert"></div>
           <div class="modal-actions">
             <button class="btn" type="button" data-api-action="close-large-scene-modal">取消</button>
@@ -1196,11 +1208,13 @@
     const modal = ensureLargeSceneModal();
     const error = modal.querySelector(".modal-error");
     const input = modal.querySelector("input");
+    const select = modal.querySelector("select");
     const context = modal.querySelector("#new-large-scene-context");
     modal.dataset.chapterId = chapterId;
     context.textContent = `添加到章节「${chapterName}」，并按照创建顺序排列。`;
     error.textContent = "";
     input.value = "";
+    if (select) select.value = "content";
     modal.hidden = false;
     requestAnimationFrame(() => {
       modal.classList.add("show");
@@ -1217,14 +1231,143 @@
     }, 150);
   }
 
+  async function openLargeSceneEditModal(largeSceneId, currentName) {
+    let modal = document.getElementById("large-scene-edit-modal");
+    if (!modal) {
+      modal = document.createElement("div");
+      modal.id = "large-scene-edit-modal";
+      modal.className = "atelier-modal-backdrop";
+      modal.hidden = true;
+      modal.innerHTML = `
+        <section class="atelier-modal size-md" role="dialog" aria-modal="true" aria-labelledby="large-scene-edit-title">
+          <div class="atelier-modal-icon scene">SC</div>
+          <h2 id="large-scene-edit-title">编辑大场景</h2>
+          <p id="large-scene-edit-context">修改大场景的名称、类型或所属章节。</p>
+          <form id="large-scene-edit-form">
+            <label class="label" for="large-scene-edit-name">大场景名称</label>
+            <input id="large-scene-edit-name" class="modal-input" name="name" maxlength="80" autocomplete="off" required />
+            <label class="label" for="large-scene-edit-type">类型</label>
+            <select id="large-scene-edit-type" class="modal-input" name="scene_type">
+              <option value="content">内容段</option>
+              <option value="transition">过渡段</option>
+            </select>
+            <label class="label" for="large-scene-edit-chapter">所属章节</label>
+            <select id="large-scene-edit-chapter" class="modal-input" name="chapter_id"></select>
+            <div class="modal-error" id="large-scene-edit-error" role="alert"></div>
+            <div class="modal-actions">
+              <button class="btn" type="button" data-api-action="close-large-scene-edit-modal">取消</button>
+              <button class="btn primary" type="submit">保存修改</button>
+            </div>
+          </form>
+        </section>
+      `;
+      document.body.appendChild(modal);
+      modal.addEventListener("click", (event) => {
+        if (event.target === modal) closeLargeSceneEditModal();
+      });
+      modal.querySelector("form").addEventListener("submit", submitLargeSceneEdit);
+    }
+    modal.dataset.largeSceneId = largeSceneId;
+    const error = modal.querySelector(".modal-error");
+    const nameInput = modal.querySelector("#large-scene-edit-name");
+    const typeSelect = modal.querySelector("#large-scene-edit-type");
+    const chapterSelect = modal.querySelector("#large-scene-edit-chapter");
+    const context = modal.querySelector("#large-scene-edit-context");
+    const submitBtn = modal.querySelector('button[type="submit"]');
+    error.textContent = "";
+    nameInput.value = currentName;
+    context.textContent = `正在编辑大场景「${currentName}」。`;
+    if (submitBtn) submitBtn.disabled = false;
+    // Fetch current scene + chapter list in parallel
+    try {
+      const project = await resolveCurrentProject();
+      const [sceneRes, chaptersRes] = await Promise.all([
+        request(`/api/large-scenes/${largeSceneId}`),
+        request(`/api/projects/${project.id}/chapters`),
+      ]);
+      const scene = sceneRes.large_scene || sceneRes;
+      typeSelect.value = scene.scene_type || "content";
+      chapterSelect.innerHTML = chaptersRes.items
+        .map(
+          (ch) =>
+            `<option value="${escapeHtml(ch.id)}"${ch.id === scene.chapter_id ? " selected" : ""}>${escapeHtml(ch.name)}</option>`
+        )
+        .join("");
+      modal.dataset.currentChapterId = scene.chapter_id;
+    } catch (err) {
+      error.textContent = "加载大场景信息失败：" + err.message;
+    }
+    modal.hidden = false;
+    requestAnimationFrame(() => {
+      modal.classList.add("show");
+      nameInput.focus();
+      nameInput.select();
+    });
+  }
+
+  function closeLargeSceneEditModal() {
+    const modal = document.getElementById("large-scene-edit-modal");
+    if (!modal) return;
+    modal.classList.remove("show");
+    window.setTimeout(() => {
+      modal.hidden = true;
+    }, 150);
+  }
+
+  async function submitLargeSceneEdit(event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const modal = form.closest(".atelier-modal-backdrop");
+    const nameInput = form.querySelector("#large-scene-edit-name");
+    const typeSelect = form.querySelector("#large-scene-edit-type");
+    const chapterSelect = form.querySelector("#large-scene-edit-chapter");
+    const submit = form.querySelector('button[type="submit"]');
+    const error = form.querySelector(".modal-error");
+    const largeSceneId = modal.dataset.largeSceneId;
+    const originalChapterId = modal.dataset.currentChapterId;
+    const name = nameInput.value.trim().replace(/\s+/g, " ");
+    const sceneType = typeSelect.value;
+    const chapterId = chapterSelect.value;
+    if (!name) {
+      error.textContent = "请输入大场景名称。";
+      nameInput.focus();
+      return;
+    }
+    const body = { name, scene_type: sceneType };
+    if (chapterId && chapterId !== originalChapterId) {
+      body.chapter_id = chapterId;
+    }
+    submit.disabled = true;
+    submit.textContent = "正在保存…";
+    error.textContent = "";
+    try {
+      await request(`/api/large-scenes/${largeSceneId}`, {
+        method: "PATCH",
+        body: JSON.stringify(body),
+      });
+      closeLargeSceneEditModal();
+      const project = await resolveCurrentProject();
+      await renderProductionStoryCanvas(project);
+      if (typeof showToast === "function") showToast(`大场景「${name}」已更新`);
+    } catch (requestError) {
+      error.textContent = requestError.message;
+      nameInput.focus();
+    } finally {
+      submit.disabled = false;
+      submit.textContent = "保存修改";
+    }
+  }
+
   async function submitLargeScene(event) {
     event.preventDefault();
     const form = event.currentTarget;
     const modal = form.closest(".atelier-modal-backdrop");
     const input = form.querySelector("input");
+    const select = form.querySelector("select");
     const submit = form.querySelector('button[type="submit"]');
     const error = form.querySelector(".modal-error");
     const name = input.value.trim().replace(/\s+/g, " ");
+    const sceneType = select ? select.value : "content";
     const chapterId = modal.dataset.chapterId;
     if (!name) {
       error.textContent = "请输入大场景名称。";
@@ -1241,7 +1384,7 @@
     try {
       await request(`/api/chapters/${chapterId}/large-scenes`, {
         method: "POST",
-        body: JSON.stringify({ name }),
+        body: JSON.stringify({ name, scene_type: sceneType }),
       });
       closeLargeSceneModal();
       const project = await resolveCurrentProject();
@@ -1780,6 +1923,138 @@
 
   initContextMenu();
 
+  // ── 大场景拖动交互 ─────────────────────────────────────────
+  let dragState = null;
+
+  function initLargeSceneDrag() {
+    document.addEventListener("dragstart", (event) => {
+      const card = event.target.closest?.(".large-scene-block[draggable='true']");
+      if (!card) return;
+      const largeSceneId = card.dataset.largeSceneId;
+      const sourceChapterId = card.dataset.chapterId;
+      if (!largeSceneId || !sourceChapterId) return;
+      dragState = {
+        largeSceneId,
+        sourceChapterId,
+        card,
+      };
+      card.classList.add("dragging");
+      event.dataTransfer.effectAllowed = "move";
+      // Set empty image as drag image to use our own visual
+      try {
+        const dragImage = document.createElement("div");
+        dragImage.style.width = "1px";
+        dragImage.style.height = "1px";
+        document.body.appendChild(dragImage);
+        event.dataTransfer.setDragImage(dragImage, 0, 0);
+        window.setTimeout(() => dragImage.remove(), 0);
+      } catch (e) {
+        // Fallback to default drag image
+      }
+    });
+
+    document.addEventListener("dragend", () => {
+      if (!dragState) return;
+      dragState.card?.classList.remove("dragging");
+      clearDropIndicators();
+      dragState = null;
+    });
+
+    document.addEventListener("dragover", (event) => {
+      if (!dragState) return;
+      const dropZone = event.target.closest?.("[data-drop-zone]");
+      if (!dropZone) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+      const targetChapterId = dropZone.dataset.chapterId;
+      if (!targetChapterId) return;
+      // Compute insertion position within this drop zone
+      const cards = Array.from(
+        dropZone.querySelectorAll(".large-scene-block:not(.dragging)")
+      );
+      let insertIndex = cards.length;
+      let insertBeforeEl = null;
+      for (let i = 0; i < cards.length; i++) {
+        const rect = cards[i].getBoundingClientRect();
+        const midX = rect.left + rect.width / 2;
+        if (event.clientX < midX) {
+          insertIndex = i;
+          insertBeforeEl = cards[i];
+          break;
+        }
+      }
+      clearDropIndicators();
+      const indicator = document.createElement("div");
+      indicator.className = "large-scene-drop-indicator";
+      indicator.setAttribute("aria-hidden", "true");
+      if (insertBeforeEl) {
+        dropZone.insertBefore(indicator, insertBeforeEl);
+      } else {
+        // Append at end, but before the "add card" if present
+        const addCard = dropZone.querySelector(".large-scene-add-card");
+        if (addCard) {
+          dropZone.insertBefore(indicator, addCard);
+        } else {
+          dropZone.appendChild(indicator);
+        }
+      }
+      dragState.targetChapterId = targetChapterId;
+      dragState.targetIndex = insertIndex;
+    });
+
+    document.addEventListener("dragleave", (event) => {
+      if (!dragState) return;
+      // Only clear if leaving the document entirely
+      if (event.relatedTarget === null) {
+        clearDropIndicators();
+      }
+    });
+
+    document.addEventListener("drop", async (event) => {
+      if (!dragState) return;
+      const dropZone = event.target.closest?.("[data-drop-zone]");
+      if (!dropZone) {
+        clearDropIndicators();
+        return;
+      }
+      event.preventDefault();
+      const { largeSceneId, sourceChapterId, targetChapterId, targetIndex } = dragState;
+      dragState.card?.classList.remove("dragging");
+      clearDropIndicators();
+      dragState = null;
+      if (!targetChapterId) return;
+      // targetIndex is 0-based; convert to 1-based sort_order for API
+      const targetSortOrder = (targetIndex ?? 0) + 1;
+      try {
+        await request(`/api/large-scenes/${largeSceneId}/move`, {
+          method: "POST",
+          body: JSON.stringify({
+            target_chapter_id: targetChapterId,
+            target_sort_order: targetSortOrder,
+          }),
+        });
+        const project = await resolveCurrentProject();
+        await renderProductionStoryCanvas(project);
+        if (typeof showToast === "function") showToast("大场景已移动");
+      } catch (requestError) {
+        // Restore canvas to last server state
+        const project = await resolveCurrentProject();
+        await renderProductionStoryCanvas(project);
+        if (typeof showToast === "function") {
+          showToast("移动失败：" + requestError.message);
+        } else {
+          alert("移动失败：" + requestError.message);
+        }
+      }
+    });
+  }
+
+  function clearDropIndicators() {
+    document.querySelectorAll(".large-scene-drop-indicator").forEach((el) => el.remove());
+  }
+
+  initLargeSceneDrag();
+
   function renderDatabaseCard(database) {
     const card = document.getElementById(`database-${database.environment}`);
     if (!card) return;
@@ -1872,7 +2147,11 @@
         if (type === "character-variant" && isDefault) {
           if (typeof showToast === "function") showToast("默认变体可改名但不会取消默认");
         }
-        openRenameModal(type, id, name);
+        if (type === "large-scene") {
+          openLargeSceneEditModal(id, name);
+        } else {
+          openRenameModal(type, id, name);
+        }
       } else if (action === "delete") {
         if (type === "chapter") {
           await deleteChapter(id, name, largeSceneCount);
@@ -1924,6 +2203,11 @@
 
     if (button.dataset.apiAction === "close-large-scene-modal") {
       closeLargeSceneModal();
+      return;
+    }
+
+    if (button.dataset.apiAction === "close-large-scene-edit-modal") {
+      closeLargeSceneEditModal();
       return;
     }
 
@@ -2081,6 +2365,7 @@
       closeProjectModal();
       closeChapterModal();
       closeLargeSceneModal();
+      closeLargeSceneEditModal();
       closeCharacterModal();
       closeRenameModal();
       closeConfirmDialog();

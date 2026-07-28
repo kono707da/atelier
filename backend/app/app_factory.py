@@ -45,6 +45,7 @@ class CreateChapterRequest(BaseModel):
 
 class CreateLargeSceneRequest(BaseModel):
     name: str = Field(min_length=1, max_length=80)
+    scene_type: Literal["content", "transition"] = "content"
 
     @field_validator("name")
     @classmethod
@@ -52,6 +53,30 @@ class CreateLargeSceneRequest(BaseModel):
         if not value.strip():
             raise ValueError("大场景名称不能为空。")
         return value
+
+
+class UpdateLargeSceneRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    scene_type: Literal["content", "transition"] | None = None
+    chapter_id: str | None = None
+
+    @field_validator("name")
+    @classmethod
+    def name_not_blank(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("大场景名称不能为空。")
+        return value
+
+    @model_validator(mode="after")
+    def at_least_one_field(self):
+        if self.name is None and self.scene_type is None and self.chapter_id is None:
+            raise ValueError("至少需要提供一个更新字段。")
+        return self
+
+
+class MoveLargeSceneRequest(BaseModel):
+    target_chapter_id: str
+    target_sort_order: int = Field(ge=1)
 
 
 class RenameChapterRequest(BaseModel):
@@ -173,7 +198,7 @@ def create_app(
 ) -> FastAPI:
     app = FastAPI(
         title="Atelier API",
-        version="0.1.7",
+        version="0.2.0",
         docs_url="/api/docs",
         redoc_url=None,
     )
@@ -341,6 +366,16 @@ def create_app(
             "total": len(large_scenes),
         }
 
+    @app.get("/api/large-scenes/{large_scene_id}")
+    def get_large_scene(large_scene_id: str) -> dict[str, object]:
+        large_scene = manager.get_large_scene(large_scene_id)
+        if large_scene is None:
+            raise HTTPException(status_code=404, detail="大场景不存在。")
+        return {
+            "database_environment": manager.active_environment,
+            "large_scene": large_scene,
+        }
+
     @app.post(
         "/api/chapters/{chapter_id}/large-scenes",
         status_code=status.HTTP_201_CREATED,
@@ -351,7 +386,9 @@ def create_app(
         if manager.get_chapter(chapter_id) is None:
             raise HTTPException(status_code=404, detail="章节不存在。")
         try:
-            large_scene = manager.create_large_scene(chapter_id, request.name)
+            large_scene = manager.create_large_scene(
+                chapter_id, request.name, request.scene_type
+            )
         except ValueError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         return {
@@ -360,20 +397,48 @@ def create_app(
         }
 
     @app.patch("/api/large-scenes/{large_scene_id}")
-    def rename_large_scene(
-        large_scene_id: str, request: RenameLargeSceneRequest
+    def update_large_scene(
+        large_scene_id: str, request: UpdateLargeSceneRequest
     ) -> dict[str, object]:
         if manager.get_large_scene(large_scene_id) is None:
             raise HTTPException(status_code=404, detail="大场景不存在。")
         try:
-            large_scene = manager.rename_large_scene(
-                large_scene_id, request.name
+            large_scene = manager.update_large_scene(
+                large_scene_id,
+                name=request.name,
+                scene_type=request.scene_type,
+                chapter_id=request.chapter_id,
             )
         except ValueError as error:
-            raise HTTPException(status_code=409, detail=str(error)) from error
+            message = str(error)
+            if "不存在" in message:
+                raise HTTPException(status_code=404, detail=message) from error
+            raise HTTPException(status_code=409, detail=message) from error
         return {
             "database_environment": manager.active_environment,
             "large_scene": large_scene,
+        }
+
+    @app.post("/api/large-scenes/{large_scene_id}/move")
+    def move_large_scene(
+        large_scene_id: str, request: MoveLargeSceneRequest
+    ) -> dict[str, object]:
+        if manager.get_large_scene(large_scene_id) is None:
+            raise HTTPException(status_code=404, detail="大场景不存在。")
+        try:
+            result = manager.move_large_scene(
+                large_scene_id,
+                request.target_chapter_id,
+                request.target_sort_order,
+            )
+        except ValueError as error:
+            message = str(error)
+            if "不存在" in message:
+                raise HTTPException(status_code=404, detail=message) from error
+            raise HTTPException(status_code=409, detail=message) from error
+        return {
+            "database_environment": manager.active_environment,
+            **result,
         }
 
     @app.delete("/api/large-scenes/{large_scene_id}")
