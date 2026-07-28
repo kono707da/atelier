@@ -4213,6 +4213,10 @@ class DatabaseManager:
     ) -> dict[str, object] | None:
         """Set or replace the mapping for (scene_page_id, material_type).
 
+        Third-round contract (2026-07-29):
+        - Validation order: material_type -> scene_page existence -> branch_id check -> material_page handling.
+        - Branch pages (branch_id IS NOT NULL) are rejected with 422 for both set and cancel.
+        - Non-existent pages are rejected with 404 for both set and cancel.
         - If material_page_id is None, removes the mapping (PUT + null contract).
           Returns None to signal the API layer that the response should be `mapping: null`.
         - Validates that the material is already associated to the same small_scene.
@@ -4222,21 +4226,25 @@ class DatabaseManager:
         valid_types = ('composition', 'expression', 'scene', 'lighting', 'prompt', 'composite_template')
         if material_type not in valid_types:
             raise ValueError(f"素材类型无效，允许值: {', '.join(valid_types)}")
-        # If material_page_id is None, treat as unset - always return None
-        # per second-round contract 8.5 (cancel returns mapping: null)
-        if material_page_id is None:
-            self.unset_small_scene_page_mapping(scene_page_id, material_type, environment)
-            return None
         target_environment = environment or self._active_environment
         now = datetime.now(timezone.utc).isoformat()
         mapping_id = str(uuid4())
         with self._lock, self.connection(target_environment) as connection:
             page = connection.execute(
-                "SELECT id, small_scene_id FROM shot_pages WHERE id = ?", (scene_page_id,)
+                "SELECT id, small_scene_id, branch_id FROM shot_pages WHERE id = ?",
+                (scene_page_id,),
             ).fetchone()
             if not page:
                 raise ValueError("场景页不存在")
+            if page["branch_id"] is not None:
+                raise ValueError("分支页面不能设置素材页映射")
             small_scene_id = page["small_scene_id"]
+            if material_page_id is None:
+                connection.execute(
+                    "DELETE FROM small_scene_page_mappings WHERE scene_page_id = ? AND material_type = ?",
+                    (scene_page_id, material_type),
+                )
+                return None
             mp = connection.execute(
                 "SELECT id, material_id FROM material_pages WHERE id = ?",
                 (material_page_id,),
@@ -4251,7 +4259,6 @@ class DatabaseManager:
                 raise ValueError("素材不存在")
             if mat["material_type"] != material_type:
                 raise ValueError(f"素材页所属素材类型({mat['material_type']})与指定类型({material_type})不匹配")
-            # Validate the material is associated to this small_scene
             link = connection.execute(
                 "SELECT id FROM small_scene_materials WHERE small_scene_id = ? AND material_id = ?",
                 (small_scene_id, mp["material_id"]),
