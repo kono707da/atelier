@@ -859,6 +859,7 @@ document.addEventListener("click", (event) => {
   const button = event.target.closest("button");
   if (
     !button ||
+    button.type === "submit" ||
     button.closest("[data-page]") ||
     button.closest(".atelier-modal-backdrop") ||
     button.dataset.apiAction
