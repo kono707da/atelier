@@ -190,6 +190,155 @@ class UpdateCharacterSpecValueRequest(BaseModel):
         return value
 
 
+class CreateMaterialRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    material_type: Literal["composition", "expression", "scene", "lighting", "prompt", "composite_template"] = "composition"
+    description: str = ""
+    validation_status: Literal["verified", "unverified"] = "unverified"
+    preview_path: str = ""
+    tags: list[str] | None = None
+
+    @field_validator("name")
+    @classmethod
+    def name_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("素材名称不能为空。")
+        return value
+
+
+class UpdateMaterialRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    material_type: Literal["composition", "expression", "scene", "lighting", "prompt", "composite_template"] | None = None
+    description: str | None = None
+    validation_status: Literal["verified", "unverified"] | None = None
+    preview_path: str | None = None
+    tags: list[str] | None = None
+
+    @field_validator("name")
+    @classmethod
+    def name_not_blank(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("素材名称不能为空。")
+        return value
+
+    @model_validator(mode="after")
+    def at_least_one_field(self):
+        if all(v is None for v in (self.name, self.material_type, self.description, self.validation_status, self.preview_path, self.tags)):
+            raise ValueError("至少需要提供一个更新字段。")
+        return self
+
+
+class CreateSmallSceneRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    scene_type: Literal["content", "transition"] = "content"
+    description: str = ""
+
+    @field_validator("name")
+    @classmethod
+    def name_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("小场景名称不能为空。")
+        return value
+
+
+class UpdateSmallSceneRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    scene_type: Literal["content", "transition"] | None = None
+    description: str | None = None
+
+    @field_validator("name")
+    @classmethod
+    def name_not_blank(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("小场景名称不能为空。")
+        return value
+
+    @model_validator(mode="after")
+    def at_least_one_field(self):
+        if all(v is None for v in (self.name, self.scene_type, self.description)):
+            raise ValueError("至少需要提供一个更新字段。")
+        return self
+
+
+class MoveSmallSceneRequest(BaseModel):
+    target_sort_order: int = Field(ge=1)
+
+
+class CreateShotPageRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+    branch_id: str | None = None
+    description: str = Field(default="", max_length=500)
+    prompt_text: str = Field(default="", max_length=50000)
+    negative_prompt: str = Field(default="", max_length=20000)
+
+    @field_validator("title")
+    @classmethod
+    def title_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("分镜页标题不能为空。")
+        return value
+
+
+class UpdateShotPageRequest(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = Field(default=None, max_length=500)
+    prompt_text: str | None = Field(default=None, max_length=50000)
+    negative_prompt: str | None = Field(default=None, max_length=20000)
+
+    @field_validator("title")
+    @classmethod
+    def title_not_blank(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("分镜页标题不能为空。")
+        return value
+
+    @model_validator(mode="after")
+    def at_least_one_field(self):
+        if all(v is None for v in (self.title, self.description, self.prompt_text, self.negative_prompt)):
+            raise ValueError("至少需要提供一个更新字段。")
+        return self
+
+
+class MoveShotPageRequest(BaseModel):
+    target_sort_order: int = Field(ge=1)
+
+
+class CreateBranchRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    description: str = Field(default="", max_length=500)
+    is_enabled: bool = True
+
+    @field_validator("name")
+    @classmethod
+    def name_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("分支名称不能为空。")
+        return value
+
+
+class UpdateBranchRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    description: str | None = Field(default=None, max_length=500)
+    is_enabled: bool | None = None
+
+    @field_validator("name")
+    @classmethod
+    def name_not_blank(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("分支名称不能为空。")
+        return value
+
+    @model_validator(mode="after")
+    def at_least_one_field(self):
+        if all(v is None for v in (self.name, self.description, self.is_enabled)):
+            raise ValueError("至少需要提供一个更新字段。")
+        return self
+
+
+class SetMaterialsRequest(BaseModel):
+    material_ids: list[str]
+
+
 def create_app(
     *,
     data_root: Path | None = None,
@@ -198,7 +347,7 @@ def create_app(
 ) -> FastAPI:
     app = FastAPI(
         title="Atelier API",
-        version="0.2.0",
+        version="0.4.0",
         docs_url="/api/docs",
         redoc_url=None,
     )
@@ -745,6 +894,397 @@ def create_app(
     @app.get("/api/character-database/stats")
     def character_database_stats() -> dict[str, object]:
         return character_database.stats()
+
+    # ── Materials ─────────────────────────────────────────────────────
+
+    @app.get("/api/materials")
+    def list_materials(
+        material_type: str | None = None,
+        validation_status: str | None = None,
+        tag: str | None = None,
+        q: str | None = None,
+        sort: str = "updated_desc",
+    ) -> dict[str, object]:
+        items = manager.list_materials(
+            material_type=material_type,
+            validation_status=validation_status,
+            tag=tag,
+            q=q,
+            sort=sort,
+        )
+        return {
+            "database_environment": manager.active_environment,
+            "items": items,
+            "total": len(items),
+        }
+
+    @app.post("/api/materials", status_code=status.HTTP_201_CREATED)
+    def create_material(request: CreateMaterialRequest) -> dict[str, object]:
+        try:
+            material = manager.create_material(
+                request.name,
+                request.material_type,
+                description=request.description,
+                validation_status=request.validation_status,
+                preview_path=request.preview_path,
+                tags=request.tags,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return {
+            "database_environment": manager.active_environment,
+            "material": material,
+        }
+
+    @app.get("/api/materials/{material_id}")
+    def get_material(material_id: str) -> dict[str, object]:
+        material = manager.get_material(material_id)
+        if material is None:
+            raise HTTPException(status_code=404, detail="素材不存在")
+        return {
+            "database_environment": manager.active_environment,
+            "material": material,
+        }
+
+    @app.patch("/api/materials/{material_id}")
+    def update_material(material_id: str, request: UpdateMaterialRequest) -> dict[str, object]:
+        try:
+            material = manager.update_material(
+                material_id,
+                name=request.name,
+                material_type=request.material_type,
+                description=request.description,
+                validation_status=request.validation_status,
+                preview_path=request.preview_path,
+                tags=request.tags,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        if material is None:
+            raise HTTPException(status_code=404, detail="素材不存在")
+        return {
+            "database_environment": manager.active_environment,
+            "material": material,
+        }
+
+    @app.delete("/api/materials/{material_id}")
+    def delete_material(material_id: str) -> dict[str, object]:
+        result = manager.delete_material(material_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail="素材不存在")
+        return {
+            "database_environment": manager.active_environment,
+            "deleted": result,
+        }
+
+    # ── Small Scenes ──────────────────────────────────────────────────
+
+    @app.get("/api/large-scenes/{large_scene_id}/small-scenes")
+    def list_small_scenes(large_scene_id: str) -> dict[str, object]:
+        items = manager.list_small_scenes(large_scene_id)
+        return {
+            "database_environment": manager.active_environment,
+            "large_scene_id": large_scene_id,
+            "items": items,
+            "total": len(items),
+        }
+
+    @app.post("/api/large-scenes/{large_scene_id}/small-scenes", status_code=status.HTTP_201_CREATED)
+    def create_small_scene(large_scene_id: str, request: CreateSmallSceneRequest) -> dict[str, object]:
+        try:
+            small_scene = manager.create_small_scene(
+                large_scene_id,
+                request.name,
+                scene_type=request.scene_type,
+                description=request.description,
+            )
+        except ValueError as error:
+            msg = str(error)
+            code = 404 if "不存在" in msg else 409
+            raise HTTPException(status_code=code, detail=msg) from error
+        return {
+            "database_environment": manager.active_environment,
+            "small_scene": small_scene,
+        }
+
+    @app.get("/api/small-scenes/{small_scene_id}")
+    def get_small_scene(small_scene_id: str) -> dict[str, object]:
+        small_scene = manager.get_small_scene(small_scene_id)
+        if small_scene is None:
+            raise HTTPException(status_code=404, detail="小场景不存在")
+        return {
+            "database_environment": manager.active_environment,
+            "small_scene": small_scene,
+        }
+
+    @app.patch("/api/small-scenes/{small_scene_id}")
+    def update_small_scene(small_scene_id: str, request: UpdateSmallSceneRequest) -> dict[str, object]:
+        try:
+            small_scene = manager.update_small_scene(
+                small_scene_id,
+                name=request.name,
+                scene_type=request.scene_type,
+                description=request.description,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        if small_scene is None:
+            raise HTTPException(status_code=404, detail="小场景不存在")
+        return {
+            "database_environment": manager.active_environment,
+            "small_scene": small_scene,
+        }
+
+    @app.post("/api/small-scenes/{small_scene_id}/move")
+    def move_small_scene(small_scene_id: str, request: MoveSmallSceneRequest) -> dict[str, object]:
+        try:
+            small_scene = manager.move_small_scene(small_scene_id, request.target_sort_order)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        items = manager.list_small_scenes(small_scene["large_scene_id"])
+        return {
+            "database_environment": manager.active_environment,
+            "small_scene": small_scene,
+            "items": items,
+        }
+
+    @app.delete("/api/small-scenes/{small_scene_id}")
+    def delete_small_scene(small_scene_id: str) -> dict[str, object]:
+        result = manager.delete_small_scene(small_scene_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail="小场景不存在")
+        return {
+            "database_environment": manager.active_environment,
+            "deleted": result,
+        }
+
+    # ── Shot Pages ────────────────────────────────────────────────────
+
+    @app.get("/api/small-scenes/{small_scene_id}/shot-pages")
+    def list_shot_pages(small_scene_id: str, branch_id: str | None = None) -> dict[str, object]:
+        items = manager.list_shot_pages(small_scene_id, branch_id=branch_id)
+        return {
+            "database_environment": manager.active_environment,
+            "small_scene_id": small_scene_id,
+            "branch_id": branch_id,
+            "items": items,
+            "total": len(items),
+        }
+
+    @app.post("/api/small-scenes/{small_scene_id}/shot-pages", status_code=status.HTTP_201_CREATED)
+    def create_shot_page(small_scene_id: str, request: CreateShotPageRequest) -> dict[str, object]:
+        try:
+            shot_page = manager.create_shot_page(
+                small_scene_id,
+                request.title,
+                branch_id=request.branch_id,
+                description=request.description,
+                prompt_text=request.prompt_text,
+                negative_prompt=request.negative_prompt,
+            )
+        except ValueError as error:
+            msg = str(error)
+            if "不存在" in msg:
+                code = 404 if "小场景" in msg else 422
+            elif "重名" in msg or "同名" in msg:
+                code = 409
+            else:
+                code = 422
+            raise HTTPException(status_code=code, detail=msg) from error
+        return {
+            "database_environment": manager.active_environment,
+            "shot_page": shot_page,
+        }
+
+    @app.get("/api/shot-pages/{shot_page_id}")
+    def get_shot_page(shot_page_id: str) -> dict[str, object]:
+        shot_page = manager.get_shot_page(shot_page_id)
+        if shot_page is None:
+            raise HTTPException(status_code=404, detail="分镜页不存在")
+        return {
+            "database_environment": manager.active_environment,
+            "shot_page": shot_page,
+        }
+
+    @app.patch("/api/shot-pages/{shot_page_id}")
+    def update_shot_page(shot_page_id: str, request: UpdateShotPageRequest) -> dict[str, object]:
+        try:
+            shot_page = manager.update_shot_page(
+                shot_page_id,
+                title=request.title,
+                description=request.description,
+                prompt_text=request.prompt_text,
+                negative_prompt=request.negative_prompt,
+            )
+        except ValueError as error:
+            msg = str(error)
+            code = 409 if "同名" in msg else 422
+            raise HTTPException(status_code=code, detail=msg) from error
+        if shot_page is None:
+            raise HTTPException(status_code=404, detail="分镜页不存在")
+        return {
+            "database_environment": manager.active_environment,
+            "shot_page": shot_page,
+        }
+
+    @app.post("/api/shot-pages/{shot_page_id}/move")
+    def move_shot_page(shot_page_id: str, request: MoveShotPageRequest) -> dict[str, object]:
+        try:
+            shot_page = manager.move_shot_page(shot_page_id, request.target_sort_order)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        if shot_page["branch_id"] is None:
+            items = manager.list_shot_pages(shot_page["small_scene_id"])
+        else:
+            items = manager.list_shot_pages(shot_page["small_scene_id"], branch_id=shot_page["branch_id"])
+        return {
+            "database_environment": manager.active_environment,
+            "shot_page": shot_page,
+            "items": items,
+        }
+
+    @app.delete("/api/shot-pages/{shot_page_id}")
+    def delete_shot_page(shot_page_id: str) -> dict[str, object]:
+        result = manager.delete_shot_page(shot_page_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail="分镜页不存在")
+        return {
+            "database_environment": manager.active_environment,
+            "deleted": result,
+        }
+
+    # ── Branches ──────────────────────────────────────────────────────
+
+    @app.get("/api/{parent_type}/{parent_id}/branches")
+    def list_branches(parent_type: str, parent_id: str) -> dict[str, object]:
+        mapped = {"large-scenes": "large_scene", "small-scenes": "small_scene"}
+        pt = mapped.get(parent_type)
+        if pt is None:
+            raise HTTPException(status_code=422, detail="分支父级类型无效，允许值: large-scenes, small-scenes")
+        try:
+            items = manager.list_branches(pt, parent_id)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return {
+            "database_environment": manager.active_environment,
+            "parent_type": pt,
+            "parent_id": parent_id,
+            "items": items,
+            "total": len(items),
+        }
+
+    @app.post("/api/{parent_type}/{parent_id}/branches", status_code=status.HTTP_201_CREATED)
+    def create_branch(parent_type: str, parent_id: str, request: CreateBranchRequest) -> dict[str, object]:
+        mapped = {"large-scenes": "large_scene", "small-scenes": "small_scene"}
+        pt = mapped.get(parent_type)
+        if pt is None:
+            raise HTTPException(status_code=422, detail="分支父级类型无效，允许值: large-scenes, small-scenes")
+        try:
+            branch = manager.create_branch(
+                pt, parent_id, request.name,
+                description=request.description,
+                is_enabled=request.is_enabled,
+            )
+        except ValueError as error:
+            msg = str(error)
+            code = 404 if "不存在" in msg else 409
+            raise HTTPException(status_code=code, detail=msg) from error
+        return {
+            "database_environment": manager.active_environment,
+            "branch": branch,
+        }
+
+    @app.get("/api/branches/{branch_id}")
+    def get_branch(branch_id: str) -> dict[str, object]:
+        branch = manager.get_branch(branch_id)
+        if branch is None:
+            raise HTTPException(status_code=404, detail="分支不存在")
+        return {
+            "database_environment": manager.active_environment,
+            "branch": branch,
+        }
+
+    @app.patch("/api/branches/{branch_id}")
+    def update_branch(branch_id: str, request: UpdateBranchRequest) -> dict[str, object]:
+        try:
+            branch = manager.update_branch(
+                branch_id,
+                name=request.name,
+                description=request.description,
+                is_enabled=request.is_enabled,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        if branch is None:
+            raise HTTPException(status_code=404, detail="分支不存在")
+        return {
+            "database_environment": manager.active_environment,
+            "branch": branch,
+        }
+
+    @app.delete("/api/branches/{branch_id}")
+    def delete_branch(branch_id: str) -> dict[str, object]:
+        result = manager.delete_branch(branch_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail="分支不存在")
+        return {
+            "database_environment": manager.active_environment,
+            "deleted": result,
+        }
+
+    # ── Small Scene Materials ─────────────────────────────────────────
+
+    @app.get("/api/small-scenes/{small_scene_id}/materials")
+    def list_small_scene_materials(small_scene_id: str) -> dict[str, object]:
+        scene = manager.get_small_scene(small_scene_id)
+        if scene is None:
+            raise HTTPException(status_code=404, detail="小场景不存在")
+        materials = manager.list_small_scene_materials(small_scene_id)
+        return {
+            "database_environment": manager.active_environment,
+            "small_scene_id": small_scene_id,
+            "materials": materials,
+        }
+
+    @app.put("/api/small-scenes/{small_scene_id}/materials")
+    def set_small_scene_materials(small_scene_id: str, request: SetMaterialsRequest) -> dict[str, object]:
+        try:
+            result = manager.set_small_scene_materials(small_scene_id, request.material_ids)
+        except ValueError as error:
+            msg = str(error)
+            code = 404 if "不存在" in msg else 422
+            raise HTTPException(status_code=code, detail=msg) from error
+        return {
+            "database_environment": manager.active_environment,
+            **result,
+        }
+
+    # ── Shot Page Materials ───────────────────────────────────────────
+
+    @app.get("/api/shot-pages/{shot_page_id}/materials")
+    def list_shot_page_materials(shot_page_id: str) -> dict[str, object]:
+        page = manager.get_shot_page(shot_page_id)
+        if page is None:
+            raise HTTPException(status_code=404, detail="分镜页不存在")
+        materials = manager.list_shot_page_materials(shot_page_id)
+        return {
+            "database_environment": manager.active_environment,
+            "shot_page_id": shot_page_id,
+            "materials": materials,
+        }
+
+    @app.put("/api/shot-pages/{shot_page_id}/materials")
+    def set_shot_page_materials(shot_page_id: str, request: SetMaterialsRequest) -> dict[str, object]:
+        try:
+            result = manager.set_shot_page_materials(shot_page_id, request.material_ids)
+        except ValueError as error:
+            msg = str(error)
+            code = 404 if "不存在" in msg else 422
+            raise HTTPException(status_code=code, detail=msg) from error
+        return {
+            "database_environment": manager.active_environment,
+            **result,
+        }
 
     # Warm the production lookup cache before the first page request. Test
     # application factories must not start a shared background import thread.
