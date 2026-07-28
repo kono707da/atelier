@@ -841,6 +841,880 @@
     bindStoryCanvas(project.id);
   }
 
+  const storyWorkspaceState = {
+    project: null,
+    tree: null,
+    smallSceneBackendAvailable: false,
+    smallSceneWorkspace: null,
+  };
+
+  const storyResourceTypeLabels = {
+    composition: "构图",
+    expression: "表情",
+    scene: "场景",
+    lighting: "光线",
+    prompt: "提示词",
+    composite_template: "复合模板",
+  };
+
+  async function requestOptional(path) {
+    try {
+      return await request(path);
+    } catch (error) {
+      if ([404, 405, 501].includes(error.status)) return null;
+      throw error;
+    }
+  }
+
+  function storyTreeSmallSceneDirectory(smallScene) {
+    const pages = Array.isArray(smallScene.pages) ? smallScene.pages : [];
+    const resources = Array.isArray(smallScene.resources) ? smallScene.resources : [];
+    return `
+      <li class="story-tree-branch">
+        <button
+          class="story-tree-row story-tree-small-scene"
+          type="button"
+          data-small-scene-id="${escapeHtml(smallScene.id)}"
+          data-story-tree-action="open-small-scene"
+          title="双击进入小场景画布"
+        >
+          <span class="story-tree-chevron">⌄</span>
+          <span class="story-tree-icon small-scene">SS</span>
+          <span class="story-tree-name">${escapeHtml(smallScene.name)}</span>
+          <span class="story-tree-count">${pages.length || Number(smallScene.page_count || 0)}</span>
+        </button>
+        <ul class="story-tree-children">
+          <li class="story-tree-branch">
+            <div class="story-tree-row story-tree-folder-row">
+              <span class="story-tree-chevron">⌄</span>
+              <span class="story-tree-icon folder">PG</span>
+              <span class="story-tree-name">场景页</span>
+              <span class="story-tree-count">${pages.length || Number(smallScene.page_count || 0)}</span>
+            </div>
+            ${
+              pages.length
+                ? `<ul class="story-tree-children">${pages.map((page) => `
+                    <li>
+                      <button
+                        class="story-tree-row story-tree-leaf"
+                        type="button"
+                        data-small-scene-id="${escapeHtml(smallScene.id)}"
+                        data-scene-page-id="${escapeHtml(page.id)}"
+                        data-story-tree-action="open-small-scene"
+                      >
+                        <span class="story-tree-spacer"></span>
+                        <span class="story-tree-icon page">${String(page.sort_order || 0).padStart(2, "0")}</span>
+                        <span class="story-tree-name">${escapeHtml(page.name)}</span>
+                      </button>
+                    </li>
+                  `).join("")}</ul>`
+                : ""
+            }
+          </li>
+          <li class="story-tree-branch">
+            <div class="story-tree-row story-tree-folder-row">
+              <span class="story-tree-chevron">⌄</span>
+              <span class="story-tree-icon folder">MT</span>
+              <span class="story-tree-name">关联素材</span>
+              <span class="story-tree-count">${resources.length || Number(smallScene.resource_count || 0)}</span>
+            </div>
+            ${
+              resources.length
+                ? `<ul class="story-tree-children">${resources.map((resource) => `
+                    <li class="story-tree-resource">
+                      <div class="story-tree-row story-tree-leaf">
+                        <span class="story-tree-spacer"></span>
+                        <span class="story-tree-icon resource">${escapeHtml((storyResourceTypeLabels[resource.material_type] || "素材").slice(0, 1))}</span>
+                        <span class="story-tree-name">${escapeHtml(resource.name)}</span>
+                        <span class="story-tree-count">${Array.isArray(resource.pages) ? resource.pages.length : Number(resource.page_count || 0)}</span>
+                      </div>
+                    </li>
+                  `).join("")}</ul>`
+                : ""
+            }
+          </li>
+        </ul>
+      </li>
+    `;
+  }
+
+  function storyDirectoryTree(project, chapters, backendAvailable) {
+    return `
+      <section class="panel story-directory-panel" aria-label="剧本目录">
+        <div class="story-directory-heading">
+          <div>
+            <div class="panel-title">剧本目录</div>
+            <div class="panel-sub">章节 / 大场景 / 小场景 / 页面与素材</div>
+          </div>
+          <button class="story-directory-add" type="button" data-api-action="open-chapter-modal" aria-label="新建章节">＋</button>
+        </div>
+        <div class="story-directory-scroll">
+          <ul class="story-tree">
+            <li class="story-tree-branch story-tree-root">
+              <div class="story-tree-row story-tree-root-row">
+                <span class="story-tree-chevron">⌄</span>
+                <span class="story-tree-icon root">A</span>
+                <span class="story-tree-name">${escapeHtml(project.name)}</span>
+              </div>
+              <ul class="story-tree-children">
+                ${chapters.map((chapter) => `
+                  <li class="story-tree-branch">
+                    <button
+                      class="story-tree-row story-tree-chapter"
+                      type="button"
+                      data-story-tree-node="chapter"
+                      data-chapter-id="${escapeHtml(chapter.id)}"
+                    >
+                      <span class="story-tree-chevron">⌄</span>
+                      <span class="story-tree-icon chapter">CH</span>
+                      <span class="story-tree-name">${escapeHtml(chapter.name)}</span>
+                      <span class="story-tree-count">${chapter.large_scenes.length}</span>
+                    </button>
+                    <ul class="story-tree-children">
+                      ${chapter.large_scenes.map((largeScene) => `
+                        <li class="story-tree-branch">
+                          <button
+                            class="story-tree-row story-tree-large-scene"
+                            type="button"
+                            data-story-tree-node="large-scene"
+                            data-large-scene-id="${escapeHtml(largeScene.id)}"
+                          >
+                            <span class="story-tree-chevron">⌄</span>
+                            <span class="story-tree-icon large-scene">LS</span>
+                            <span class="story-tree-name">${escapeHtml(largeScene.name)}</span>
+                            <span class="story-tree-count">${largeScene.small_scenes.length}</span>
+                          </button>
+                          <ul class="story-tree-children">
+                            ${largeScene.small_scenes.map(storyTreeSmallSceneDirectory).join("")}
+                            ${
+                              backendAvailable
+                                ? `<li><button
+                                    class="story-tree-row story-tree-add-row"
+                                    type="button"
+                                    data-story-small-scene-action="create"
+                                    data-large-scene-id="${escapeHtml(largeScene.id)}"
+                                    data-large-scene-name="${escapeHtml(largeScene.name)}"
+                                  ><span class="story-tree-spacer"></span><span class="story-tree-icon add">＋</span><span class="story-tree-name">添加小场景</span></button></li>`
+                                : ""
+                            }
+                          </ul>
+                        </li>
+                      `).join("")}
+                    </ul>
+                  </li>
+                `).join("")}
+              </ul>
+            </li>
+          </ul>
+          ${
+            backendAvailable
+              ? ""
+              : `<div class="story-directory-backend-note"><span>API</span><p>章节和大场景已载入。小场景、页面与素材映射等待后端接口。</p></div>`
+          }
+        </div>
+      </section>
+    `;
+  }
+
+  function storySmallSceneCard(smallScene) {
+    const pageCount = Array.isArray(smallScene.pages)
+      ? smallScene.pages.length
+      : Number(smallScene.page_count || 0);
+    const resourceCount = Array.isArray(smallScene.resources)
+      ? smallScene.resources.length
+      : Number(smallScene.resource_count || 0);
+    return `
+      <button
+        class="story-small-scene-card"
+        type="button"
+        data-small-scene-id="${escapeHtml(smallScene.id)}"
+        data-story-tree-action="open-small-scene"
+        title="双击进入小场景画布"
+      >
+        <span class="story-small-scene-kicker">小场景 ${String(smallScene.sort_order || 0).padStart(2, "0")}</span>
+        <strong>${escapeHtml(smallScene.name)}</strong>
+        <span>${pageCount} 页 · ${resourceCount} 个关联素材</span>
+        <small>双击管理页面与素材映射</small>
+      </button>
+    `;
+  }
+
+  function storyLargeSceneWrapper(largeScene, backendAvailable) {
+    const typeLabel = largeScene.scene_type === "transition" ? "过渡段" : "内容段";
+    return `
+      <section
+        class="story-large-scene-wrapper scene-type-${escapeHtml(largeScene.scene_type || "content")}"
+        data-large-scene-id="${escapeHtml(largeScene.id)}"
+      >
+        <header
+          class="story-wrapper-heading large-scene-block"
+          data-context-menu="large-scene"
+          data-large-scene-id="${escapeHtml(largeScene.id)}"
+          data-chapter-id="${escapeHtml(largeScene.chapter_id)}"
+          data-name="${escapeHtml(largeScene.name)}"
+          data-sort-order="${escapeHtml(largeScene.sort_order)}"
+          data-scene-type="${escapeHtml(largeScene.scene_type || "content")}"
+          draggable="false"
+        >
+          <span class="story-wrapper-index">LS ${String(largeScene.sort_order || 0).padStart(2, "0")}</span>
+          <strong>${escapeHtml(largeScene.name)}</strong>
+          <span class="large-scene-type-badge" data-scene-type="${escapeHtml(largeScene.scene_type || "content")}">${typeLabel}</span>
+        </header>
+        <div class="story-small-scene-grid">
+          ${largeScene.small_scenes.map(storySmallSceneCard).join("")}
+          ${
+            backendAvailable
+              ? `<button
+                  class="story-small-scene-add"
+                  type="button"
+                  data-story-small-scene-action="create"
+                  data-large-scene-id="${escapeHtml(largeScene.id)}"
+                  data-large-scene-name="${escapeHtml(largeScene.name)}"
+                ><span>＋</span><strong>添加小场景</strong><small>固定加入当前大场景</small></button>`
+              : `<div class="story-small-scene-pending"><span>API</span><strong>小场景待接入</strong><small>后端完成后在这里显示和添加</small></div>`
+          }
+        </div>
+      </section>
+    `;
+  }
+
+  function storyChapterWrapper(chapter, backendAvailable) {
+    return `
+      <section class="story-chapter-wrapper" data-chapter-id="${escapeHtml(chapter.id)}">
+        <header
+          class="story-wrapper-heading story-chapter-wrapper-heading real-chapter-block"
+          data-context-menu="chapter"
+          data-chapter-id="${escapeHtml(chapter.id)}"
+          data-name="${escapeHtml(chapter.name)}"
+          data-sort-order="${escapeHtml(chapter.sort_order)}"
+          data-large-scene-count="${chapter.large_scenes.length}"
+        >
+          <span class="story-wrapper-index">CH ${String(chapter.sort_order || 0).padStart(2, "0")}</span>
+          <strong>${escapeHtml(chapter.name)}</strong>
+          <small>${chapter.large_scenes.length} 个大场景</small>
+        </header>
+        <div class="story-large-scene-grid">
+          ${chapter.large_scenes.map((scene) => storyLargeSceneWrapper(scene, backendAvailable)).join("")}
+          <button
+            class="story-large-scene-add"
+            type="button"
+            data-api-action="open-large-scene-modal"
+            data-chapter-id="${escapeHtml(chapter.id)}"
+            data-chapter-name="${escapeHtml(chapter.name)}"
+          ><span>＋</span><strong>添加大场景</strong></button>
+        </div>
+      </section>
+    `;
+  }
+
+  function storyHierarchyCanvas(project, chapters, backendAvailable) {
+    const largeSceneTotal = chapters.reduce((total, chapter) => total + chapter.large_scenes.length, 0);
+    const smallSceneTotal = chapters.reduce(
+      (total, chapter) => total + chapter.large_scenes.reduce(
+        (chapterTotal, scene) => chapterTotal + scene.small_scenes.length,
+        0
+      ),
+      0
+    );
+    return `
+      <section class="panel story-canvas-center-panel story-hierarchy-panel">
+        <div class="toolbar story-canvas-toolbar">
+          <span class="tool active">项目结构</span>
+          <span class="story-toolbar-count">${chapters.length} 个章节 · ${largeSceneTotal} 个大场景 · ${smallSceneTotal} 个小场景</span>
+          <span class="spacer"></span>
+          <button class="tool" type="button" data-story-canvas-action="zoom-out" title="缩小画布">−</button>
+          <button class="tool story-zoom-label" type="button" data-story-canvas-action="zoom-reset" id="story-canvas-zoom-label">100%</button>
+          <button class="tool" type="button" data-story-canvas-action="zoom-in" title="放大画布">＋</button>
+          <button class="tool" type="button" data-story-canvas-action="fit">适合画布</button>
+        </div>
+        <div class="canvas real-story-viewport story-hierarchy-viewport" id="story-canvas-viewport">
+          <div class="story-canvas-surface" id="story-canvas-surface">
+            <div class="real-story-stack story-hierarchy-stage">
+              ${
+                chapters.length
+                  ? `<section class="story-project-wrapper">
+                      <header class="story-project-wrapper-heading">
+                        <span class="story-project-mark">${escapeHtml(project.name.slice(0, 1).toUpperCase())}</span>
+                        <div><small>画布根节点</small><strong>${escapeHtml(project.name)}</strong></div>
+                        <span>${chapters.length} 个章节</span>
+                      </header>
+                      <div class="story-chapter-wrapper-list">
+                        ${chapters.map((chapter) => storyChapterWrapper(chapter, backendAvailable)).join("")}
+                      </div>
+                    </section>`
+                  : storyCanvasEmptyStage()
+              }
+            </div>
+          </div>
+          <div class="story-canvas-hint">拖动画布空白处移动 · Ctrl/⌘ + 滚轮缩放 · 双击小场景进入</div>
+        </div>
+      </section>
+    `;
+  }
+
+  function storyWorkspaceShell(project, chapters, backendAvailable) {
+    return `
+      <div class="story-workspace-layout">
+        ${storyDirectoryTree(project, chapters, backendAvailable)}
+        ${storyHierarchyCanvas(project, chapters, backendAvailable)}
+      </div>
+    `;
+  }
+
+  async function loadStoryHierarchy(projectId) {
+    const aggregate = await requestOptional(`/api/projects/${projectId}/story-tree`);
+    if (aggregate && Array.isArray(aggregate.chapters)) {
+      return { chapters: aggregate.chapters, backendAvailable: true };
+    }
+    const chaptersPayload = await request(`/api/projects/${projectId}/chapters`);
+    const chapters = await Promise.all(
+      chaptersPayload.items.map(async (chapter) => {
+        const largeScenes = await request(`/api/chapters/${chapter.id}/large-scenes`);
+        return {
+          ...chapter,
+          large_scenes: largeScenes.items.map((largeScene) => ({
+            ...largeScene,
+            small_scenes: [],
+          })),
+        };
+      })
+    );
+    return { chapters, backendAvailable: false };
+  }
+
+  function openSmallSceneRoute(smallSceneId, scenePageId = "") {
+    const params = new URLSearchParams(window.location.search);
+    params.set("page", "story-canvas");
+    params.set("smallScene", smallSceneId);
+    if (scenePageId) params.set("scenePage", scenePageId);
+    else params.delete("scenePage");
+    window.location.search = `?${params.toString()}`;
+  }
+
+  function bindStoryHierarchy(projectId) {
+    bindStoryCanvas(projectId);
+    const workspace = document.querySelector(".story-workspace-layout");
+    if (!workspace) return;
+    workspace.addEventListener("dblclick", (event) => {
+      const target = event.target.closest("[data-small-scene-id]");
+      if (!target) return;
+      openSmallSceneRoute(target.dataset.smallSceneId, target.dataset.scenePageId || "");
+    });
+    workspace.addEventListener("click", (event) => {
+      const treeNode = event.target.closest("[data-story-tree-node]");
+      if (treeNode) {
+        const id = treeNode.dataset.chapterId || treeNode.dataset.largeSceneId;
+        const canvasNode = !id
+          ? null
+          : treeNode.dataset.storyTreeNode === "chapter"
+            ? document.querySelector(
+                `#story-canvas-surface .story-chapter-wrapper[data-chapter-id="${CSS.escape(id)}"]`
+              )
+            : document.querySelector(
+                `#story-canvas-surface .story-large-scene-wrapper[data-large-scene-id="${CSS.escape(id)}"]`
+              );
+        document
+          .querySelectorAll("#story-canvas-surface .story-tree-canvas-focus")
+          .forEach((node) => node.classList.remove("story-tree-canvas-focus"));
+        canvasNode?.classList.add("story-tree-canvas-focus");
+        canvasNode?.scrollIntoView({ block: "center", inline: "center", behavior: "smooth" });
+      }
+      const smallSceneAction = event.target.closest("[data-story-small-scene-action='create']");
+      if (smallSceneAction) {
+        openSmallSceneCreateDialog(
+          smallSceneAction.dataset.largeSceneId,
+          smallSceneAction.dataset.largeSceneName || ""
+        );
+      }
+    });
+  }
+
+  function smallSceneBackendState(project, message) {
+    return `
+      <div class="story-workspace-layout small-scene-backend-layout">
+        <section class="panel story-directory-panel">
+          <div class="story-directory-heading">
+            <div><div class="panel-title">小场景画布</div><div class="panel-sub">${escapeHtml(project.name)}</div></div>
+          </div>
+          <div class="story-directory-back-link">
+            <button class="btn soft" type="button" data-small-scene-workspace-action="back">返回项目结构</button>
+          </div>
+        </section>
+        <section class="panel small-scene-backend-state">
+          <span>API</span>
+          <h2>小场景后端待开发</h2>
+          <p>${escapeHtml(message || "前端画布已经就绪。后端完成工作区接口后，这里会显示场景页、素材页和映射关系。")}</p>
+          <button class="btn primary" type="button" data-small-scene-workspace-action="back">返回项目结构</button>
+        </section>
+      </div>
+    `;
+  }
+
+  function scenePageMappingSummary(page, workspace) {
+    const mappings = (workspace.mappings || []).filter((mapping) => mapping.scene_page_id === page.id);
+    if (!mappings.length) return '<span class="scene-page-no-mapping">尚未绑定素材页</span>';
+    return mappings.map((mapping) => {
+      const resource = (workspace.resources || []).find((item) =>
+        (item.pages || []).some((materialPage) => materialPage.id === mapping.material_page_id)
+      );
+      const materialPage = resource?.pages?.find((item) => item.id === mapping.material_page_id);
+      return `<span class="scene-page-mapping-chip type-${escapeHtml(resource?.material_type || "")}">
+        ${escapeHtml(storyResourceTypeLabels[resource?.material_type] || "素材")} · ${escapeHtml(materialPage?.name || "未命名页")}
+      </span>`;
+    }).join("");
+  }
+
+  function smallScenePageCard(page, workspace) {
+    return `
+      <article class="small-scene-page-card" data-scene-page-id="${escapeHtml(page.id)}">
+        <header>
+          <span>P${String(page.sort_order || 0).padStart(2, "0")}</span>
+          <div class="small-scene-page-actions">
+            <button type="button" data-small-scene-page-action="move-left" aria-label="前移">←</button>
+            <button type="button" data-small-scene-page-action="move-right" aria-label="后移">→</button>
+            <button type="button" data-small-scene-page-action="edit">编辑</button>
+            <button class="danger" type="button" data-small-scene-page-action="delete">删除</button>
+          </div>
+        </header>
+        <strong>${escapeHtml(page.name)}</strong>
+        <p>${escapeHtml(page.description || "尚未填写画面描述")}</p>
+        <div class="small-scene-page-mappings">${scenePageMappingSummary(page, workspace)}</div>
+      </article>
+    `;
+  }
+
+  function materialPageMappingButtons(resource, materialPage, workspace) {
+    return (workspace.pages || []).map((scenePage) => {
+      const selected = (workspace.mappings || []).some(
+        (mapping) =>
+          mapping.scene_page_id === scenePage.id &&
+          mapping.material_page_id === materialPage.id
+      );
+      return `
+        <button
+          class="material-page-map-button ${selected ? "selected" : ""}"
+          type="button"
+          data-material-map-action="toggle"
+          data-scene-page-id="${escapeHtml(scenePage.id)}"
+          data-material-page-id="${escapeHtml(materialPage.id)}"
+          data-material-type="${escapeHtml(resource.material_type)}"
+          title="${selected ? "取消绑定" : "绑定到该场景页；同类型已有绑定会被替换"}"
+        >P${String(scenePage.sort_order || 0).padStart(2, "0")}</button>
+      `;
+    }).join("");
+  }
+
+  function smallSceneResourceRow(resource, workspace) {
+    const pages = Array.isArray(resource.pages) ? resource.pages : [];
+    return `
+      <section class="small-scene-resource-group type-${escapeHtml(resource.material_type)}">
+        <header>
+          <span class="small-scene-resource-type">${escapeHtml(storyResourceTypeLabels[resource.material_type] || resource.material_type)}</span>
+          <strong>${escapeHtml(resource.name)}</strong>
+          <span>${pages.length} 个只读素材页</span>
+          <button
+            type="button"
+            data-small-scene-resource-action="remove"
+            data-resource-link-id="${escapeHtml(resource.link_id || resource.id)}"
+          >移除关联</button>
+        </header>
+        <div class="small-scene-material-pages">
+          ${pages.map((materialPage) => `
+            <article class="small-scene-material-page">
+              <div class="small-scene-material-page-index">M${String(materialPage.sort_order || 0).padStart(2, "0")}</div>
+              <div class="small-scene-material-page-copy">
+                <strong>${escapeHtml(materialPage.name)}</strong>
+                <p>${escapeHtml(materialPage.description || "素材页内容由素材库维护")}</p>
+              </div>
+              <div class="small-scene-material-page-map">
+                <span>绑定到场景页</span>
+                <div>${materialPageMappingButtons(resource, materialPage, workspace)}</div>
+              </div>
+            </article>
+          `).join("")}
+        </div>
+      </section>
+    `;
+  }
+
+  function smallSceneWorkspaceShell(project, workspace) {
+    const pages = Array.isArray(workspace.pages) ? workspace.pages : [];
+    const resources = Array.isArray(workspace.resources) ? workspace.resources : [];
+    return `
+      <div class="small-scene-workspace">
+        <section class="panel small-scene-directory">
+          <div class="story-directory-heading">
+            <div><div class="panel-title">${escapeHtml(workspace.small_scene.name)}</div><div class="panel-sub">小场景目录</div></div>
+            <button class="story-directory-add" type="button" data-small-scene-page-action="create" aria-label="添加场景页">＋</button>
+          </div>
+          <div class="small-scene-directory-scroll">
+            <button class="small-scene-back-button" type="button" data-small-scene-workspace-action="back">‹ 返回项目结构</button>
+            <div class="small-scene-directory-section">
+              <strong>场景页</strong>
+              ${pages.map((page) => `
+                <button
+                  type="button"
+                  data-scene-page-focus="${escapeHtml(page.id)}"
+                ><span>P${String(page.sort_order || 0).padStart(2, "0")}</span>${escapeHtml(page.name)}</button>
+              `).join("")}
+              ${pages.length ? "" : "<p>还没有场景页</p>"}
+            </div>
+            <div class="small-scene-directory-section">
+              <strong>关联素材</strong>
+              ${resources.map((resource) => `
+                <div><span>${escapeHtml((storyResourceTypeLabels[resource.material_type] || "素材").slice(0, 1))}</span>${escapeHtml(resource.name)}</div>
+              `).join("")}
+              ${resources.length ? "" : "<p>还没有关联素材</p>"}
+            </div>
+          </div>
+        </section>
+        <section class="panel small-scene-canvas-panel">
+          <div class="small-scene-toolbar">
+            <div>
+              <small>${escapeHtml(project.name)} / ${escapeHtml(workspace.chapter?.name || "")} / ${escapeHtml(workspace.large_scene?.name || "")}</small>
+              <strong>${escapeHtml(workspace.small_scene.name)}</strong>
+            </div>
+            <span class="small-scene-toolbar-rule">同一场景页：每种素材类型最多绑定 1 页</span>
+            <button class="btn soft" type="button" data-small-scene-resource-action="attach">关联素材</button>
+            <button class="btn primary" type="button" data-small-scene-page-action="create">添加场景页</button>
+          </div>
+          <div class="small-scene-canvas-scroll">
+            <section class="small-scene-pages-section">
+              <div class="small-scene-section-heading">
+                <div><span>01</span><div><strong>场景页</strong><small>可添加、修改、删除和调整顺序</small></div></div>
+                <span>${pages.length} 页</span>
+              </div>
+              <div class="small-scene-page-strip">
+                ${pages.map((page) => smallScenePageCard(page, workspace)).join("")}
+                <button class="small-scene-page-add-card" type="button" data-small-scene-page-action="create">
+                  <span>＋</span><strong>添加场景页</strong>
+                </button>
+              </div>
+            </section>
+            <section class="small-scene-resources-section">
+              <div class="small-scene-section-heading">
+                <div><span>02</span><div><strong>素材页映射</strong><small>素材页只读；点击 P 编号绑定或替换同类型映射</small></div></div>
+                <span>${resources.length} 个素材</span>
+              </div>
+              ${
+                resources.length
+                  ? resources.map((resource) => smallSceneResourceRow(resource, workspace)).join("")
+                  : `<div class="small-scene-resource-empty"><span>MT</span><strong>还没有关联素材</strong><p>先从素材库选择素材。素材自身的页面在这里保持只读。</p><button class="btn soft" type="button" data-small-scene-resource-action="attach">关联素材</button></div>`
+              }
+            </section>
+          </div>
+        </section>
+      </div>
+    `;
+  }
+
+  function openSmallSceneCreateDialog(largeSceneId, largeSceneName) {
+    openStoryEditorDialog({
+      title: "添加小场景",
+      description: `添加到大场景「${largeSceneName || "未命名"}」`,
+      nameLabel: "小场景名称",
+      nameValue: "",
+      descriptionValue: "",
+      showDescription: false,
+      submitText: "创建小场景",
+      onSubmit: async ({ name }) => {
+        await request(`/api/large-scenes/${largeSceneId}/small-scenes`, {
+          method: "POST",
+          body: JSON.stringify({ name }),
+        });
+        await renderProductionStoryCanvasV3(storyWorkspaceState.project);
+      },
+    });
+  }
+
+  function openStoryEditorDialog({
+    title,
+    description,
+    nameLabel,
+    nameValue,
+    descriptionValue,
+    showDescription,
+    submitText,
+    onSubmit,
+  }) {
+    document.getElementById("story-editor-modal")?.remove();
+    const modal = document.createElement("div");
+    modal.id = "story-editor-modal";
+    modal.className = "atelier-modal-backdrop show";
+    modal.innerHTML = `
+      <section class="atelier-modal size-md" role="dialog" aria-modal="true" aria-labelledby="story-editor-title">
+        <div class="atelier-modal-icon scene">SC</div>
+        <h2 id="story-editor-title">${escapeHtml(title)}</h2>
+        <p>${escapeHtml(description || "")}</p>
+        <form id="story-editor-form">
+          <label class="label" for="story-editor-name">${escapeHtml(nameLabel)}</label>
+          <input id="story-editor-name" class="modal-input" name="name" maxlength="80" value="${escapeHtml(nameValue || "")}" required />
+          ${
+            showDescription
+              ? `<label class="label" for="story-editor-description">画面描述</label>
+                 <textarea id="story-editor-description" class="modal-input story-editor-description" name="description" maxlength="2000">${escapeHtml(descriptionValue || "")}</textarea>`
+              : ""
+          }
+          <div class="modal-error" role="alert"></div>
+          <div class="modal-actions">
+            <button class="btn" type="button" data-story-editor-close>取消</button>
+            <button class="btn primary" type="submit">${escapeHtml(submitText)}</button>
+          </div>
+        </form>
+      </section>
+    `;
+    document.body.appendChild(modal);
+    const close = () => modal.remove();
+    modal.querySelector("[data-story-editor-close]").addEventListener("click", close);
+    modal.addEventListener("click", (event) => {
+      if (event.target === modal) close();
+    });
+    modal.querySelector("form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const submit = form.querySelector("[type='submit']");
+      const error = form.querySelector(".modal-error");
+      submit.disabled = true;
+      try {
+        await onSubmit({
+          name: form.elements.name.value.trim(),
+          description: showDescription ? form.elements.description.value.trim() : "",
+        });
+        close();
+      } catch (requestError) {
+        error.textContent = requestError.message;
+        submit.disabled = false;
+      }
+    });
+    modal.querySelector("#story-editor-name").focus();
+  }
+
+  async function refreshSmallSceneWorkspace() {
+    const smallSceneId = new URLSearchParams(window.location.search).get("smallScene");
+    if (!smallSceneId || !storyWorkspaceState.project) return;
+    await renderSmallSceneWorkspace(storyWorkspaceState.project, smallSceneId);
+  }
+
+  function bindSmallSceneWorkspace(project, workspace) {
+    const shell = document.querySelector(".small-scene-workspace, .small-scene-backend-layout");
+    if (!shell) return;
+    shell.addEventListener("click", async (event) => {
+      try {
+      const back = event.target.closest("[data-small-scene-workspace-action='back']");
+      if (back) {
+        const params = new URLSearchParams(window.location.search);
+        params.delete("smallScene");
+        params.delete("scenePage");
+        window.location.search = `?${params.toString()}`;
+        return;
+      }
+      const focus = event.target.closest("[data-scene-page-focus]");
+      if (focus) {
+        document.querySelector(`[data-scene-page-id="${CSS.escape(focus.dataset.scenePageFocus)}"]`)
+          ?.scrollIntoView({ behavior: "smooth", inline: "center", block: "center" });
+        return;
+      }
+      const pageAction = event.target.closest("[data-small-scene-page-action]");
+      if (pageAction) {
+        const action = pageAction.dataset.smallScenePageAction;
+        const card = pageAction.closest("[data-scene-page-id]");
+        const page = card
+          ? (workspace.pages || []).find((item) => item.id === card.dataset.scenePageId)
+          : null;
+        if (action === "create" || action === "edit") {
+          openStoryEditorDialog({
+            title: action === "create" ? "添加场景页" : "编辑场景页",
+            description: action === "create" ? "新页面会加入当前小场景末尾。" : `正在编辑 P${String(page.sort_order).padStart(2, "0")}`,
+            nameLabel: "页面名称",
+            nameValue: page?.name || "",
+            descriptionValue: page?.description || "",
+            showDescription: true,
+            submitText: action === "create" ? "创建页面" : "保存修改",
+            onSubmit: async (values) => {
+              await request(
+                action === "create"
+                  ? `/api/small-scenes/${workspace.small_scene.id}/pages`
+                  : `/api/small-scene-pages/${page.id}`,
+                {
+                  method: action === "create" ? "POST" : "PATCH",
+                  body: JSON.stringify(values),
+                }
+              );
+              await refreshSmallSceneWorkspace();
+            },
+          });
+          return;
+        }
+        if (action === "delete" && page) {
+          const confirmed = await confirmDialog({
+            title: "删除场景页",
+            message: `确定删除「${page.name}」吗？该页的所有素材映射会一并删除，其余页面会自动连续编号。`,
+            confirmText: "删除",
+            danger: true,
+          });
+          if (!confirmed) return;
+          await request(`/api/small-scene-pages/${page.id}`, { method: "DELETE" });
+          await refreshSmallSceneWorkspace();
+          return;
+        }
+        if (["move-left", "move-right"].includes(action) && page) {
+          const ids = (workspace.pages || []).map((item) => item.id);
+          const index = ids.indexOf(page.id);
+          const target = action === "move-left" ? index - 1 : index + 1;
+          if (target < 0 || target >= ids.length) return;
+          [ids[index], ids[target]] = [ids[target], ids[index]];
+          await request(`/api/small-scenes/${workspace.small_scene.id}/pages/order`, {
+            method: "PUT",
+            body: JSON.stringify({ page_ids: ids }),
+          });
+          await refreshSmallSceneWorkspace();
+          return;
+        }
+      }
+      const mapAction = event.target.closest("[data-material-map-action='toggle']");
+      if (mapAction) {
+        const selected = mapAction.classList.contains("selected");
+        await request(
+          `/api/small-scene-pages/${mapAction.dataset.scenePageId}/mappings/${mapAction.dataset.materialType}`,
+          {
+            method: "PUT",
+            body: JSON.stringify({
+              material_page_id: selected ? null : mapAction.dataset.materialPageId,
+            }),
+          }
+        );
+        await refreshSmallSceneWorkspace();
+        return;
+      }
+      const resourceAction = event.target.closest("[data-small-scene-resource-action]");
+      if (resourceAction?.dataset.smallSceneResourceAction === "attach") {
+        await openSmallSceneMaterialDialog(workspace);
+        return;
+      }
+      if (resourceAction?.dataset.smallSceneResourceAction === "remove") {
+        const confirmed = await confirmDialog({
+          title: "移除关联素材",
+          message: "素材本身不会被删除，但它在当前小场景内的所有页面映射会被移除。",
+          confirmText: "移除",
+          danger: true,
+        });
+        if (!confirmed) return;
+        await request(`/api/small-scene-resource-links/${resourceAction.dataset.resourceLinkId}`, {
+          method: "DELETE",
+        });
+        await refreshSmallSceneWorkspace();
+      }
+      } catch (error) {
+        if (typeof showToast === "function") showToast(error.message || "操作失败");
+      }
+    });
+  }
+
+  async function openSmallSceneMaterialDialog(workspace) {
+    const materials = await request("/api/materials?limit=100&offset=0&sort=name_asc");
+    document.getElementById("small-scene-material-modal")?.remove();
+    const linkedIds = new Set((workspace.resources || []).map((resource) => resource.material_id || resource.id));
+    const choices = materials.items.filter((item) => !linkedIds.has(item.id));
+    const modal = document.createElement("div");
+    modal.id = "small-scene-material-modal";
+    modal.className = "atelier-modal-backdrop show";
+    modal.innerHTML = `
+      <section class="atelier-modal size-md small-scene-material-dialog" role="dialog" aria-modal="true">
+        <div class="atelier-modal-icon scene">MT</div>
+        <h2>关联素材</h2>
+        <p>素材关联后，其素材页会只读显示在小场景画布中。</p>
+        <div class="small-scene-material-choices">
+          ${choices.map((item) => `
+            <button type="button" data-material-choice-id="${escapeHtml(item.id)}">
+              <span>${escapeHtml(storyResourceTypeLabels[item.material_type] || item.material_type)}</span>
+              <strong>${escapeHtml(item.name)}</strong>
+              <small>${escapeHtml(item.description || "暂无简介")}</small>
+            </button>
+          `).join("") || "<div class='small-scene-material-choice-empty'>没有可继续关联的素材</div>"}
+        </div>
+        <div class="modal-actions"><button class="btn" type="button" data-material-choice-close>关闭</button></div>
+      </section>
+    `;
+    document.body.appendChild(modal);
+    const close = () => modal.remove();
+    modal.querySelector("[data-material-choice-close]").addEventListener("click", close);
+    modal.addEventListener("click", async (event) => {
+      if (event.target === modal) close();
+      const choice = event.target.closest("[data-material-choice-id]");
+      if (!choice) return;
+      choice.disabled = true;
+      try {
+        await request(`/api/small-scenes/${workspace.small_scene.id}/resources`, {
+          method: "POST",
+          body: JSON.stringify({ material_id: choice.dataset.materialChoiceId }),
+        });
+        close();
+        await refreshSmallSceneWorkspace();
+      } catch (error) {
+        choice.disabled = false;
+        if (typeof showToast === "function") showToast(error.message);
+      }
+    });
+  }
+
+  async function renderSmallSceneWorkspace(project, smallSceneId) {
+    const page = document.querySelector(".page-scroll");
+    if (!page) return;
+    const header = page.querySelector(".page-header");
+    [...page.children].forEach((child) => {
+      if (child !== header) child.remove();
+    });
+    const title = header.querySelector(".page-title");
+    const subtitle = header.querySelector(".page-subtitle");
+    const actions = header.querySelector(".header-actions");
+    if (title) title.textContent = "小场景画布";
+    if (subtitle) subtitle.textContent = `项目：${project.name}`;
+    if (actions) actions.innerHTML = "";
+    const payload = await requestOptional(`/api/small-scenes/${smallSceneId}/workspace`);
+    if (!payload) {
+      page.insertAdjacentHTML(
+        "beforeend",
+        smallSceneBackendState(project, "缺少 GET /api/small-scenes/{id}/workspace 接口。请按后端开发需求书完成后端。")
+      );
+      bindSmallSceneWorkspace(project, null);
+      return;
+    }
+    storyWorkspaceState.smallSceneWorkspace = payload;
+    page.insertAdjacentHTML("beforeend", smallSceneWorkspaceShell(project, payload));
+    bindSmallSceneWorkspace(project, payload);
+  }
+
+  async function renderProductionStoryCanvasV3(project) {
+    const page = document.querySelector(".page-scroll");
+    if (!page || !project) return;
+    storyWorkspaceState.project = project;
+    const smallSceneId = new URLSearchParams(window.location.search).get("smallScene");
+    if (smallSceneId) {
+      await renderSmallSceneWorkspace(project, smallSceneId);
+      return;
+    }
+    const header = page.querySelector(".page-header");
+    [...page.children].forEach((child) => {
+      if (child !== header) child.remove();
+    });
+    const title = header.querySelector(".page-title");
+    const subtitle = header.querySelector(".page-subtitle");
+    const actions = header.querySelector(".header-actions");
+    if (title) title.textContent = "剧本画布";
+    if (subtitle) subtitle.textContent = `项目：${project.name}`;
+    if (actions) {
+      actions.innerHTML = '<button class="btn primary" data-api-action="open-chapter-modal">新建章节</button>';
+    }
+    const hierarchy = await loadStoryHierarchy(project.id);
+    storyWorkspaceState.tree = hierarchy.chapters;
+    storyWorkspaceState.smallSceneBackendAvailable = hierarchy.backendAvailable;
+    page.insertAdjacentHTML(
+      "beforeend",
+      storyWorkspaceShell(project, hierarchy.chapters, hierarchy.backendAvailable)
+    );
+    bindStoryHierarchy(project.id);
+  }
+
   const specTypeLabels = {
     full_body: "全身",
     half_body: "半身",
@@ -3723,7 +4597,7 @@
         const project = await resolveCurrentProject();
         applyProjectHeader(project, pageKey);
         if (pageKey === "overview") await renderProductionOverview(project);
-        else if (pageKey === "story-canvas") await renderProductionStoryCanvas(project);
+        else if (pageKey === "story-canvas") await renderProductionStoryCanvasV3(project);
         else applyProductionEmptyState();
       }
       const safety = document.getElementById("database-safety-status");

@@ -888,7 +888,12 @@ document.addEventListener("click", (event) => {
     button.closest("[data-page]") ||
     button.closest(".atelier-modal-backdrop") ||
     button.dataset.apiAction ||
-    button.dataset.storyCanvasAction
+    button.dataset.storyCanvasAction ||
+    button.closest(
+      "[data-story-tree-action], [data-story-small-scene-action], [data-small-scene-workspace-action], " +
+      "[data-small-scene-page-action], [data-small-scene-resource-action], [data-material-map-action], " +
+      "[data-story-editor-close], [data-material-choice-id], [data-material-choice-close], [data-scene-page-focus]"
+    )
   ) return;
   const label = button.textContent.trim();
   const route = buttonRoutes.get(label);
