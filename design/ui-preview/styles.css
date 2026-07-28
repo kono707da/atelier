@@ -5547,6 +5547,31 @@ button.story-tree-row:hover {
 /* Developer management */
 .developer-page {
   padding-bottom: 42px;
+  padding-right: 8px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.developer-page::-webkit-scrollbar {
+  width: 8px;
+}
+
+.developer-page::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.developer-page::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 99px;
+  background: rgba(119, 128, 151, 0.42);
+  background-clip: padding-box;
+}
+
+.developer-page::-webkit-scrollbar-thumb:hover {
+  background: rgba(92, 104, 136, 0.58);
+  background-clip: padding-box;
 }
 
 .developer-launch-card {
