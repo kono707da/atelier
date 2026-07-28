@@ -297,12 +297,101 @@ class DatabaseManager:
 
                 CREATE INDEX IF NOT EXISTS idx_material_tag_links_tag
                     ON material_tag_links(tag_id, material_id);
+
+                CREATE TABLE IF NOT EXISTS small_scenes (
+                    id TEXT PRIMARY KEY,
+                    large_scene_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    scene_type TEXT NOT NULL DEFAULT 'content',
+                    description TEXT NOT NULL DEFAULT '',
+                    sort_order INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (large_scene_id)
+                        REFERENCES large_scenes(id) ON DELETE CASCADE,
+                    UNIQUE (large_scene_id, name)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_small_scenes_large_scene_sort
+                    ON small_scenes(large_scene_id, sort_order);
+
+                CREATE TABLE IF NOT EXISTS branches (
+                    id TEXT PRIMARY KEY,
+                    parent_type TEXT NOT NULL,
+                    parent_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    is_enabled INTEGER NOT NULL DEFAULT 1,
+                    sort_order INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    CHECK (
+                        parent_type IN ('large_scene', 'small_scene')
+                    )
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_branches_parent
+                    ON branches(parent_type, parent_id, sort_order);
+
+                CREATE TABLE IF NOT EXISTS shot_pages (
+                    id TEXT PRIMARY KEY,
+                    small_scene_id TEXT NOT NULL,
+                    branch_id TEXT,
+                    title TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    prompt_text TEXT NOT NULL DEFAULT '',
+                    negative_prompt TEXT NOT NULL DEFAULT '',
+                    sort_order INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (small_scene_id)
+                        REFERENCES small_scenes(id) ON DELETE CASCADE,
+                    FOREIGN KEY (branch_id)
+                        REFERENCES branches(id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_shot_pages_small_scene_sort
+                    ON shot_pages(small_scene_id, sort_order);
+
+                CREATE INDEX IF NOT EXISTS idx_shot_pages_branch_sort
+                    ON shot_pages(branch_id, sort_order);
+
+                CREATE TABLE IF NOT EXISTS small_scene_materials (
+                    small_scene_id TEXT NOT NULL,
+                    material_id TEXT NOT NULL,
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (small_scene_id, material_id),
+                    FOREIGN KEY (small_scene_id)
+                        REFERENCES small_scenes(id) ON DELETE CASCADE,
+                    FOREIGN KEY (material_id)
+                        REFERENCES materials(id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_small_scene_materials_material
+                    ON small_scene_materials(material_id, small_scene_id);
+
+                CREATE TABLE IF NOT EXISTS shot_page_materials (
+                    shot_page_id TEXT NOT NULL,
+                    material_id TEXT NOT NULL,
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (shot_page_id, material_id),
+                    FOREIGN KEY (shot_page_id)
+                        REFERENCES shot_pages(id) ON DELETE CASCADE,
+                    FOREIGN KEY (material_id)
+                        REFERENCES materials(id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_shot_page_materials_material
+                    ON shot_page_materials(material_id, shot_page_id);
                 """
             )
             # Migrate legacy tables if they exist (pre-v0.1.7 schema)
             self._migrate_legacy_character_schema(connection)
             # Add scene_type column to large_scenes for pre-v0.2.0 databases
             self._migrate_large_scenes_scene_type(connection)
+            self._migrate_v040_tables(connection)
             marker = connection.execute(
                 "SELECT value FROM atelier_meta WHERE key = 'environment'"
             ).fetchone()
@@ -492,6 +581,126 @@ class DatabaseManager:
         connection.execute(
             "ALTER TABLE large_scenes ADD COLUMN scene_type TEXT NOT NULL DEFAULT 'content'"
         )
+
+    def _migrate_v040_tables(self, connection) -> None:
+        v040_tables = [
+            "materials", "material_tags", "small_scenes", "branches",
+            "shot_pages", "small_scene_materials", "shot_page_materials",
+        ]
+        for table_name in v040_tables:
+            exists = connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (table_name,),
+            ).fetchone()
+            if exists:
+                continue
+            if table_name == "materials":
+                connection.execute("""
+                    CREATE TABLE IF NOT EXISTS materials (
+                        id TEXT PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        material_type TEXT NOT NULL DEFAULT 'composition',
+                        description TEXT NOT NULL DEFAULT '',
+                        validation_status TEXT NOT NULL DEFAULT 'unverified',
+                        preview_path TEXT NOT NULL DEFAULT '',
+                        sort_order INTEGER NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        CHECK (material_type IN ('composition','expression','scene','lighting','prompt','composite_template')),
+                        CHECK (validation_status IN ('verified','unverified'))
+                    )
+                """)
+                connection.execute("CREATE INDEX IF NOT EXISTS idx_materials_sort ON materials(sort_order)")
+                connection.execute("CREATE INDEX IF NOT EXISTS idx_materials_type ON materials(material_type)")
+            elif table_name == "material_tags":
+                connection.execute("""
+                    CREATE TABLE IF NOT EXISTS material_tags (
+                        id TEXT PRIMARY KEY,
+                        material_id TEXT NOT NULL,
+                        tag TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        FOREIGN KEY (material_id) REFERENCES materials(id) ON DELETE CASCADE
+                    )
+                """)
+                connection.execute("CREATE INDEX IF NOT EXISTS idx_material_tags_material ON material_tags(material_id)")
+                connection.execute("CREATE INDEX IF NOT EXISTS idx_material_tags_tag ON material_tags(tag)")
+            elif table_name == "small_scenes":
+                connection.execute("""
+                    CREATE TABLE IF NOT EXISTS small_scenes (
+                        id TEXT PRIMARY KEY,
+                        large_scene_id TEXT NOT NULL,
+                        name TEXT NOT NULL,
+                        scene_type TEXT NOT NULL DEFAULT 'content',
+                        description TEXT NOT NULL DEFAULT '',
+                        sort_order INTEGER NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        FOREIGN KEY (large_scene_id) REFERENCES large_scenes(id) ON DELETE CASCADE,
+                        UNIQUE (large_scene_id, name)
+                    )
+                """)
+                connection.execute("CREATE INDEX IF NOT EXISTS idx_small_scenes_large_scene_sort ON small_scenes(large_scene_id, sort_order)")
+            elif table_name == "branches":
+                connection.execute("""
+                    CREATE TABLE IF NOT EXISTS branches (
+                        id TEXT PRIMARY KEY,
+                        parent_type TEXT NOT NULL,
+                        parent_id TEXT NOT NULL,
+                        name TEXT NOT NULL,
+                        description TEXT NOT NULL DEFAULT '',
+                        is_enabled INTEGER NOT NULL DEFAULT 1,
+                        sort_order INTEGER NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        CHECK (parent_type IN ('large_scene','small_scene'))
+                    )
+                """)
+                connection.execute("CREATE INDEX IF NOT EXISTS idx_branches_parent ON branches(parent_type, parent_id, sort_order)")
+            elif table_name == "shot_pages":
+                connection.execute("""
+                    CREATE TABLE IF NOT EXISTS shot_pages (
+                        id TEXT PRIMARY KEY,
+                        small_scene_id TEXT NOT NULL,
+                        branch_id TEXT,
+                        title TEXT NOT NULL,
+                        description TEXT NOT NULL DEFAULT '',
+                        prompt_text TEXT NOT NULL DEFAULT '',
+                        negative_prompt TEXT NOT NULL DEFAULT '',
+                        sort_order INTEGER NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        FOREIGN KEY (small_scene_id) REFERENCES small_scenes(id) ON DELETE CASCADE,
+                        FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE CASCADE
+                    )
+                """)
+                connection.execute("CREATE INDEX IF NOT EXISTS idx_shot_pages_small_scene_sort ON shot_pages(small_scene_id, sort_order)")
+                connection.execute("CREATE INDEX IF NOT EXISTS idx_shot_pages_branch_sort ON shot_pages(branch_id, sort_order)")
+            elif table_name == "small_scene_materials":
+                connection.execute("""
+                    CREATE TABLE IF NOT EXISTS small_scene_materials (
+                        small_scene_id TEXT NOT NULL,
+                        material_id TEXT NOT NULL,
+                        sort_order INTEGER NOT NULL DEFAULT 0,
+                        created_at TEXT NOT NULL,
+                        PRIMARY KEY (small_scene_id, material_id),
+                        FOREIGN KEY (small_scene_id) REFERENCES small_scenes(id) ON DELETE CASCADE,
+                        FOREIGN KEY (material_id) REFERENCES materials(id) ON DELETE CASCADE
+                    )
+                """)
+                connection.execute("CREATE INDEX IF NOT EXISTS idx_small_scene_materials_material ON small_scene_materials(material_id, small_scene_id)")
+            elif table_name == "shot_page_materials":
+                connection.execute("""
+                    CREATE TABLE IF NOT EXISTS shot_page_materials (
+                        shot_page_id TEXT NOT NULL,
+                        material_id TEXT NOT NULL,
+                        sort_order INTEGER NOT NULL DEFAULT 0,
+                        created_at TEXT NOT NULL,
+                        PRIMARY KEY (shot_page_id, material_id),
+                        FOREIGN KEY (shot_page_id) REFERENCES shot_pages(id) ON DELETE CASCADE,
+                        FOREIGN KEY (material_id) REFERENCES materials(id) ON DELETE CASCADE
+                    )
+                """)
+                connection.execute("CREATE INDEX IF NOT EXISTS idx_shot_page_materials_material ON shot_page_materials(material_id, shot_page_id)")
 
     def activate(self, environment: DatabaseEnvironment) -> None:
         target_environment = self._validate_environment(environment)
@@ -2212,6 +2421,878 @@ class DatabaseManager:
                 (original_path, thumbnail_path, now, material_id),
             )
         return self.get_material(material_id, target_environment)
+
+    # ── Small Scenes ───────────────────────────────────────────────────
+
+    def list_small_scenes(
+        self,
+        large_scene_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> list[dict[str, object]]:
+        target_environment = environment or self._active_environment
+        with self.connection(target_environment) as connection:
+            rows = connection.execute(
+                """
+                SELECT ss.id, ss.large_scene_id, ss.name, ss.scene_type,
+                       ss.description, ss.sort_order,
+                       ss.created_at, ss.updated_at,
+                       (SELECT COUNT(*) FROM shot_pages sp
+                        WHERE sp.small_scene_id = ss.id AND sp.branch_id IS NULL) AS shot_page_count,
+                       (SELECT COUNT(*) FROM branches b
+                        WHERE b.parent_type = 'small_scene' AND b.parent_id = ss.id) AS branch_count
+                FROM small_scenes ss
+                WHERE ss.large_scene_id = ?
+                ORDER BY ss.sort_order ASC
+                """,
+                (large_scene_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_small_scene(
+        self,
+        small_scene_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        target_environment = environment or self._active_environment
+        with self.connection(target_environment) as connection:
+            row = connection.execute(
+                """
+                SELECT ss.id, ss.large_scene_id, ss.name, ss.scene_type,
+                       ss.description, ss.sort_order,
+                       ss.created_at, ss.updated_at
+                FROM small_scenes ss
+                WHERE ss.id = ?
+                """,
+                (small_scene_id,),
+            ).fetchone()
+            if not row:
+                return None
+            result = dict(row)
+            mat_rows = connection.execute(
+                """
+                SELECT m.id AS material_id, m.name, m.material_type, ssm.sort_order
+                FROM small_scene_materials ssm
+                JOIN materials m ON m.id = ssm.material_id
+                WHERE ssm.small_scene_id = ?
+                ORDER BY ssm.sort_order ASC
+                """,
+                (small_scene_id,),
+            ).fetchall()
+            result["materials"] = [dict(r) for r in mat_rows]
+        return result
+
+    def create_small_scene(
+        self,
+        large_scene_id: str,
+        name: str,
+        scene_type: str = "content",
+        description: str = "",
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        if not name or not name.strip():
+            raise ValueError("小场景名称不能为空")
+        name = name.strip()
+        if len(name) > 80:
+            raise ValueError("小场景名称不能超过80字")
+        if scene_type not in ("content", "transition"):
+            raise ValueError("小场景类型无效，允许值: content, transition")
+        target_environment = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        small_scene_id = str(uuid4())
+        with self._lock, self.connection(target_environment) as connection:
+            parent = connection.execute(
+                "SELECT id FROM large_scenes WHERE id = ?", (large_scene_id,)
+            ).fetchone()
+            if not parent:
+                raise ValueError("大场景不存在")
+            duplicate = connection.execute(
+                "SELECT id FROM small_scenes WHERE large_scene_id = ? AND name = ? COLLATE NOCASE",
+                (large_scene_id, name),
+            ).fetchone()
+            if duplicate:
+                raise ValueError("同一大场景下已存在同名小场景")
+            max_order = connection.execute(
+                "SELECT COALESCE(MAX(sort_order), 0) FROM small_scenes WHERE large_scene_id = ?",
+                (large_scene_id,),
+            ).fetchone()[0]
+            connection.execute(
+                """
+                INSERT INTO small_scenes (id, large_scene_id, name, scene_type,
+                    description, sort_order, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (small_scene_id, large_scene_id, name, scene_type,
+                 description, max_order + 1, now, now),
+            )
+        return self.get_small_scene(small_scene_id, environment=target_environment)  # type: ignore[return-value]
+
+    def update_small_scene(
+        self,
+        small_scene_id: str,
+        *,
+        name: str | None = None,
+        scene_type: str | None = None,
+        description: str | None = None,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        if all(v is None for v in (name, scene_type, description)):
+            raise ValueError("至少提供一个更新字段")
+        target_environment = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self.connection(target_environment) as connection:
+            existing = connection.execute(
+                "SELECT id, large_scene_id FROM small_scenes WHERE id = ?",
+                (small_scene_id,),
+            ).fetchone()
+            if not existing:
+                return None
+            sets: list[str] = []
+            params: list[object] = []
+            if name is not None:
+                if not name.strip():
+                    raise ValueError("小场景名称不能为空")
+                name = name.strip()
+                if len(name) > 80:
+                    raise ValueError("小场景名称不能超过80字")
+                duplicate = connection.execute(
+                    "SELECT id FROM small_scenes WHERE large_scene_id = ? AND name = ? COLLATE NOCASE AND id != ?",
+                    (existing["large_scene_id"], name, small_scene_id),
+                ).fetchone()
+                if duplicate:
+                    raise ValueError("同一大场景下已存在同名小场景")
+                sets.append("name = ?")
+                params.append(name)
+            if scene_type is not None:
+                if scene_type not in ("content", "transition"):
+                    raise ValueError("小场景类型无效，允许值: content, transition")
+                sets.append("scene_type = ?")
+                params.append(scene_type)
+            if description is not None:
+                sets.append("description = ?")
+                params.append(description)
+            sets.append("updated_at = ?")
+            params.append(now)
+            params.append(small_scene_id)
+            connection.execute(
+                f"UPDATE small_scenes SET {', '.join(sets)} WHERE id = ?", params
+            )
+        return self.get_small_scene(small_scene_id, environment=target_environment)
+
+    def move_small_scene(
+        self,
+        small_scene_id: str,
+        target_sort_order: int,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        target_environment = environment or self._active_environment
+        with self._lock, self.connection(target_environment) as connection:
+            row = connection.execute(
+                "SELECT id, large_scene_id, sort_order FROM small_scenes WHERE id = ?",
+                (small_scene_id,),
+            ).fetchone()
+            if not row:
+                raise ValueError("小场景不存在")
+            large_scene_id = row["large_scene_id"]
+            current_order = row["sort_order"]
+            siblings = connection.execute(
+                "SELECT id FROM small_scenes WHERE large_scene_id = ? ORDER BY sort_order ASC",
+                (large_scene_id,),
+            ).fetchall()
+            total = len(siblings)
+            target = max(1, min(target_sort_order, total))
+            if current_order == target:
+                pass
+            else:
+                connection.execute(
+                    "UPDATE small_scenes SET sort_order = -1 WHERE id = ?",
+                    (small_scene_id,),
+                )
+                if target < current_order:
+                    connection.execute(
+                        "UPDATE small_scenes SET sort_order = sort_order + 1 WHERE large_scene_id = ? AND sort_order >= ? AND sort_order < ? AND id != ?",
+                        (large_scene_id, target, current_order, small_scene_id),
+                    )
+                else:
+                    connection.execute(
+                        "UPDATE small_scenes SET sort_order = sort_order - 1 WHERE large_scene_id = ? AND sort_order > ? AND sort_order <= ? AND id != ?",
+                        (large_scene_id, current_order, target, small_scene_id),
+                    )
+                connection.execute(
+                    "UPDATE small_scenes SET sort_order = ? WHERE id = ?",
+                    (target, small_scene_id),
+                )
+        return self.get_small_scene(small_scene_id, environment=target_environment)  # type: ignore[return-value]
+
+    def delete_small_scene(
+        self,
+        small_scene_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        target_environment = environment or self._active_environment
+        with self._lock, self.connection(target_environment) as connection:
+            row = connection.execute(
+                "SELECT id FROM materials WHERE id = ?",
+                (material_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            now = datetime.now(timezone.utc).isoformat()
+            connection.execute(
+                """
+                UPDATE materials
+                SET preview_original_path = ?, preview_thumbnail_path = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (original_path, thumbnail_path, now, material_id),
+            )
+        return self.get_material(material_id, target_environment)
+
+    # ── Small Scenes ───────────────────────────────────────────────────
+
+    def delete_small_scene(
+        self,
+        small_scene_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        target_environment = environment or self._active_environment
+        with self._lock, self.connection(target_environment) as connection:
+            existing = connection.execute(
+                "SELECT id, large_scene_id, name FROM small_scenes WHERE id = ?",
+                (small_scene_id,),
+            ).fetchone()
+            if not existing:
+                return None
+            large_scene_id = existing["large_scene_id"]
+            branch_ids = [r["id"] for r in connection.execute(
+                "SELECT id FROM branches WHERE parent_type = 'small_scene' AND parent_id = ?",
+                (small_scene_id,),
+            ).fetchall()]
+            for bid in branch_ids:
+                connection.execute("DELETE FROM shot_page_materials WHERE shot_page_id IN (SELECT id FROM shot_pages WHERE branch_id = ?)", (bid,))
+                connection.execute("DELETE FROM shot_pages WHERE branch_id = ?", (bid,))
+            connection.execute("DELETE FROM branches WHERE parent_type = 'small_scene' AND parent_id = ?", (small_scene_id,))
+            connection.execute("DELETE FROM small_scenes WHERE id = ?", (small_scene_id,))
+            remaining = connection.execute(
+                "SELECT id FROM small_scenes WHERE large_scene_id = ? ORDER BY sort_order ASC",
+                (large_scene_id,),
+            ).fetchall()
+            for idx, r in enumerate(remaining, start=1):
+                connection.execute(
+                    "UPDATE small_scenes SET sort_order = ? WHERE id = ?",
+                    (idx, r["id"]),
+                )
+        return {"id": small_scene_id, "name": existing["name"]}
+
+    # ── Shot Pages ─────────────────────────────────────────────────────
+
+    def list_shot_pages(
+        self,
+        small_scene_id: str,
+        branch_id: str | None = None,
+        environment: DatabaseEnvironment | None = None,
+    ) -> list[dict[str, object]]:
+        target_environment = environment or self._active_environment
+        with self.connection(target_environment) as connection:
+            if branch_id is None:
+                rows = connection.execute(
+                    """
+                    SELECT sp.id, sp.small_scene_id, sp.branch_id, sp.title,
+                           sp.description, sp.prompt_text, sp.negative_prompt,
+                           sp.sort_order, sp.created_at, sp.updated_at
+                    FROM shot_pages sp
+                    WHERE sp.small_scene_id = ? AND sp.branch_id IS NULL
+                    ORDER BY sp.sort_order ASC
+                    """,
+                    (small_scene_id,),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT sp.id, sp.small_scene_id, sp.branch_id, sp.title,
+                           sp.description, sp.prompt_text, sp.negative_prompt,
+                           sp.sort_order, sp.created_at, sp.updated_at
+                    FROM shot_pages sp
+                    WHERE sp.small_scene_id = ? AND sp.branch_id = ?
+                    ORDER BY sp.sort_order ASC
+                    """,
+                    (small_scene_id, branch_id),
+                ).fetchall()
+            result = []
+            for row in rows:
+                page = dict(row)
+                mat_rows = connection.execute(
+                    """
+                    SELECT spm.material_id
+                    FROM shot_page_materials spm
+                    WHERE spm.shot_page_id = ?
+                    ORDER BY spm.sort_order ASC
+                    """,
+                    (row["id"],),
+                ).fetchall()
+                page["material_ids"] = [r["material_id"] for r in mat_rows]
+                result.append(page)
+        return result
+
+    def get_shot_page(
+        self,
+        shot_page_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        target_environment = environment or self._active_environment
+        with self.connection(target_environment) as connection:
+            row = connection.execute(
+                """
+                SELECT id, small_scene_id, branch_id, title,
+                       description, prompt_text, negative_prompt,
+                       sort_order, created_at, updated_at
+                FROM shot_pages WHERE id = ?
+                """,
+                (shot_page_id,),
+            ).fetchone()
+            if not row:
+                return None
+            result = dict(row)
+            mat_rows = connection.execute(
+                """
+                SELECT m.id AS material_id, m.name, m.material_type, spm.sort_order
+                FROM shot_page_materials spm
+                JOIN materials m ON m.id = spm.material_id
+                WHERE spm.shot_page_id = ?
+                ORDER BY spm.sort_order ASC
+                """,
+                (shot_page_id,),
+            ).fetchall()
+            result["materials"] = [dict(r) for r in mat_rows]
+        return result
+
+    def create_shot_page(
+        self,
+        small_scene_id: str,
+        title: str,
+        *,
+        branch_id: str | None = None,
+        description: str = "",
+        prompt_text: str = "",
+        negative_prompt: str = "",
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        if not title or not title.strip():
+            raise ValueError("分镜页标题不能为空")
+        title = title.strip()
+        if len(title) > 120:
+            raise ValueError("分镜页标题不能超过120字")
+        if len(description) > 500:
+            raise ValueError("分镜页描述不能超过500字")
+        if len(prompt_text) > 50000:
+            raise ValueError("正向提示词不能超过50000字")
+        if len(negative_prompt) > 20000:
+            raise ValueError("负向提示词不能超过20000字")
+        target_environment = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        shot_page_id = str(uuid4())
+        with self._lock, self.connection(target_environment) as connection:
+            scene = connection.execute(
+                "SELECT id FROM small_scenes WHERE id = ?", (small_scene_id,)
+            ).fetchone()
+            if not scene:
+                raise ValueError("小场景不存在")
+            if branch_id is not None:
+                branch = connection.execute(
+                    "SELECT id, parent_id FROM branches WHERE id = ?",
+                    (branch_id,),
+                ).fetchone()
+                if not branch:
+                    raise ValueError("分支不存在")
+            if branch_id is None:
+                duplicate = connection.execute(
+                    "SELECT id FROM shot_pages WHERE small_scene_id = ? AND branch_id IS NULL AND title = ? COLLATE NOCASE",
+                    (small_scene_id, title),
+                ).fetchone()
+            else:
+                duplicate = connection.execute(
+                    "SELECT id FROM shot_pages WHERE branch_id = ? AND title = ? COLLATE NOCASE",
+                    (branch_id, title),
+                ).fetchone()
+            if duplicate:
+                raise ValueError("同范围内已存在同名分镜页")
+            if branch_id is None:
+                max_order = connection.execute(
+                    "SELECT COALESCE(MAX(sort_order), 0) FROM shot_pages WHERE small_scene_id = ? AND branch_id IS NULL",
+                    (small_scene_id,),
+                ).fetchone()[0]
+            else:
+                max_order = connection.execute(
+                    "SELECT COALESCE(MAX(sort_order), 0) FROM shot_pages WHERE branch_id = ?",
+                    (branch_id,),
+                ).fetchone()[0]
+            connection.execute(
+                """
+                INSERT INTO shot_pages (id, small_scene_id, branch_id, title,
+                    description, prompt_text, negative_prompt,
+                    sort_order, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (shot_page_id, small_scene_id, branch_id, title,
+                 description, prompt_text, negative_prompt,
+                 max_order + 1, now, now),
+            )
+        return self.get_shot_page(shot_page_id, environment=target_environment)  # type: ignore[return-value]
+
+    def update_shot_page(
+        self,
+        shot_page_id: str,
+        *,
+        title: str | None = None,
+        description: str | None = None,
+        prompt_text: str | None = None,
+        negative_prompt: str | None = None,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        if all(v is None for v in (title, description, prompt_text, negative_prompt)):
+            raise ValueError("至少提供一个更新字段")
+        target_environment = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self.connection(target_environment) as connection:
+            existing = connection.execute(
+                "SELECT id, small_scene_id, branch_id FROM shot_pages WHERE id = ?",
+                (shot_page_id,),
+            ).fetchone()
+            if not existing:
+                return None
+            sets: list[str] = []
+            params: list[object] = []
+            if title is not None:
+                if not title.strip():
+                    raise ValueError("分镜页标题不能为空")
+                title = title.strip()
+                if len(title) > 120:
+                    raise ValueError("分镜页标题不能超过120字")
+                if existing["branch_id"] is None:
+                    duplicate = connection.execute(
+                        "SELECT id FROM shot_pages WHERE small_scene_id = ? AND branch_id IS NULL AND title = ? COLLATE NOCASE AND id != ?",
+                        (existing["small_scene_id"], title, shot_page_id),
+                    ).fetchone()
+                else:
+                    duplicate = connection.execute(
+                        "SELECT id FROM shot_pages WHERE branch_id = ? AND title = ? COLLATE NOCASE AND id != ?",
+                        (existing["branch_id"], title, shot_page_id),
+                    ).fetchone()
+                if duplicate:
+                    raise ValueError("同范围内已存在同名分镜页")
+                sets.append("title = ?")
+                params.append(title)
+            if description is not None:
+                if len(description) > 500:
+                    raise ValueError("分镜页描述不能超过500字")
+                sets.append("description = ?")
+                params.append(description)
+            if prompt_text is not None:
+                if len(prompt_text) > 50000:
+                    raise ValueError("正向提示词不能超过50000字")
+                sets.append("prompt_text = ?")
+                params.append(prompt_text)
+            if negative_prompt is not None:
+                if len(negative_prompt) > 20000:
+                    raise ValueError("负向提示词不能超过20000字")
+                sets.append("negative_prompt = ?")
+                params.append(negative_prompt)
+            sets.append("updated_at = ?")
+            params.append(now)
+            params.append(shot_page_id)
+            connection.execute(
+                f"UPDATE shot_pages SET {', '.join(sets)} WHERE id = ?", params
+            )
+        return self.get_shot_page(shot_page_id, environment=target_environment)
+
+    def move_shot_page(
+        self,
+        shot_page_id: str,
+        target_sort_order: int,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        target_environment = environment or self._active_environment
+        with self._lock, self.connection(target_environment) as connection:
+            row = connection.execute(
+                "SELECT id, small_scene_id, branch_id, sort_order FROM shot_pages WHERE id = ?",
+                (shot_page_id,),
+            ).fetchone()
+            if not row:
+                raise ValueError("分镜页不存在")
+            current_order = row["sort_order"]
+            if row["branch_id"] is None:
+                scope_filter = "small_scene_id = ? AND branch_id IS NULL"
+                scope_params: list[object] = [row["small_scene_id"]]
+            else:
+                scope_filter = "branch_id = ?"
+                scope_params = [row["branch_id"]]
+            siblings = connection.execute(
+                f"SELECT id FROM shot_pages WHERE {scope_filter} ORDER BY sort_order ASC",
+                scope_params,
+            ).fetchall()
+            total = len(siblings)
+            target = max(1, min(target_sort_order, total))
+            if current_order != target:
+                connection.execute(
+                    "UPDATE shot_pages SET sort_order = -1 WHERE id = ?",
+                    (shot_page_id,),
+                )
+                if target < current_order:
+                    connection.execute(
+                        f"UPDATE shot_pages SET sort_order = sort_order + 1 WHERE {scope_filter} AND sort_order >= ? AND sort_order < ? AND id != ?",
+                        scope_params + [target, current_order, shot_page_id],
+                    )
+                else:
+                    connection.execute(
+                        f"UPDATE shot_pages SET sort_order = sort_order - 1 WHERE {scope_filter} AND sort_order > ? AND sort_order <= ? AND id != ?",
+                        scope_params + [current_order, target, shot_page_id],
+                    )
+                connection.execute(
+                    "UPDATE shot_pages SET sort_order = ? WHERE id = ?",
+                    (target, shot_page_id),
+                )
+        return self.get_shot_page(shot_page_id, environment=target_environment)  # type: ignore[return-value]
+
+    def delete_shot_page(
+        self,
+        shot_page_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        target_environment = environment or self._active_environment
+        with self._lock, self.connection(target_environment) as connection:
+            existing = connection.execute(
+                "SELECT id, small_scene_id, branch_id, title FROM shot_pages WHERE id = ?",
+                (shot_page_id,),
+            ).fetchone()
+            if not existing:
+                return None
+            if existing["branch_id"] is None:
+                scope_filter = "small_scene_id = ? AND branch_id IS NULL"
+                scope_params: list[object] = [existing["small_scene_id"]]
+            else:
+                scope_filter = "branch_id = ?"
+                scope_params = [existing["branch_id"]]
+            connection.execute("DELETE FROM shot_pages WHERE id = ?", (shot_page_id,))
+            remaining = connection.execute(
+                f"SELECT id FROM shot_pages WHERE {scope_filter} ORDER BY sort_order ASC",
+                scope_params,
+            ).fetchall()
+            for idx, r in enumerate(remaining, start=1):
+                connection.execute(
+                    "UPDATE shot_pages SET sort_order = ? WHERE id = ?",
+                    (idx, r["id"]),
+                )
+        return {"id": shot_page_id, "title": existing["title"]}
+
+    # ── Branches ───────────────────────────────────────────────────────
+
+    def list_branches(
+        self,
+        parent_type: str,
+        parent_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> list[dict[str, object]]:
+        if parent_type not in ("large_scene", "small_scene"):
+            raise ValueError("分支父级类型无效，允许值: large_scene, small_scene")
+        target_environment = environment or self._active_environment
+        with self.connection(target_environment) as connection:
+            rows = connection.execute(
+                """
+                SELECT b.id, b.parent_type, b.parent_id, b.name,
+                       b.description, b.is_enabled, b.sort_order,
+                       b.created_at, b.updated_at,
+                       (SELECT COUNT(*) FROM shot_pages sp
+                        WHERE sp.branch_id = b.id) AS shot_page_count
+                FROM branches b
+                WHERE b.parent_type = ? AND b.parent_id = ?
+                ORDER BY b.sort_order ASC
+                """,
+                (parent_type, parent_id),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_branch(
+        self,
+        branch_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        target_environment = environment or self._active_environment
+        with self.connection(target_environment) as connection:
+            row = connection.execute(
+                """
+                SELECT id, parent_type, parent_id, name,
+                       description, is_enabled, sort_order,
+                       created_at, updated_at
+                FROM branches WHERE id = ?
+                """,
+                (branch_id,),
+            ).fetchone()
+            if not row:
+                return None
+            result = dict(row)
+            count = connection.execute(
+                "SELECT COUNT(*) AS cnt FROM shot_pages WHERE branch_id = ?",
+                (branch_id,),
+            ).fetchone()
+            result["shot_page_count"] = count["cnt"] if count else 0
+        return result
+
+    def create_branch(
+        self,
+        parent_type: str,
+        parent_id: str,
+        name: str,
+        *,
+        description: str = "",
+        is_enabled: bool = True,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        if parent_type not in ("large_scene", "small_scene"):
+            raise ValueError("分支父级类型无效，允许值: large_scene, small_scene")
+        clean_name = " ".join(name.split())
+        if not clean_name:
+            raise ValueError("分支名称不能为空")
+        name = clean_name
+        if len(name) > 80:
+            raise ValueError("分支名称不能超过80字")
+        target_environment = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        branch_id = str(uuid4())
+        with self._lock, self.connection(target_environment) as connection:
+            if parent_type == "large_scene":
+                parent = connection.execute(
+                    "SELECT id FROM large_scenes WHERE id = ?", (parent_id,)
+                ).fetchone()
+            else:
+                parent = connection.execute(
+                    "SELECT id FROM small_scenes WHERE id = ?", (parent_id,)
+                ).fetchone()
+            if not parent:
+                raise ValueError("父级不存在")
+            duplicate = connection.execute(
+                "SELECT id FROM branches WHERE parent_type = ? AND parent_id = ? AND name = ? COLLATE NOCASE",
+                (parent_type, parent_id, name),
+            ).fetchone()
+            if duplicate:
+                raise ValueError("同一父级下已存在同名分支")
+            max_order = connection.execute(
+                "SELECT COALESCE(MAX(sort_order), 0) FROM branches WHERE parent_type = ? AND parent_id = ?",
+                (parent_type, parent_id),
+            ).fetchone()[0]
+            connection.execute(
+                """
+                INSERT INTO branches (id, parent_type, parent_id, name,
+                    description, is_enabled, sort_order, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (branch_id, parent_type, parent_id, name,
+                 description, 1 if is_enabled else 0,
+                 max_order + 1, now, now),
+            )
+        return self.get_branch(branch_id, environment=target_environment)  # type: ignore[return-value]
+
+    def update_branch(
+        self,
+        branch_id: str,
+        *,
+        name: str | None = None,
+        description: str | None = None,
+        is_enabled: bool | None = None,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        if all(v is None for v in (name, description, is_enabled)):
+            raise ValueError("至少提供一个更新字段")
+        target_environment = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self.connection(target_environment) as connection:
+            existing = connection.execute(
+                "SELECT id, parent_type, parent_id FROM branches WHERE id = ?",
+                (branch_id,),
+            ).fetchone()
+            if not existing:
+                return None
+            sets: list[str] = []
+            params: list[object] = []
+            if name is not None:
+                clean_name = " ".join(name.split())
+                if not clean_name:
+                    raise ValueError("分支名称不能为空")
+                name = clean_name
+                if len(name) > 80:
+                    raise ValueError("分支名称不能超过80字")
+                duplicate = connection.execute(
+                    "SELECT id FROM branches WHERE parent_type = ? AND parent_id = ? AND name = ? COLLATE NOCASE AND id != ?",
+                    (existing["parent_type"], existing["parent_id"], name, branch_id),
+                ).fetchone()
+                if duplicate:
+                    raise ValueError("同一父级下已存在同名分支")
+                sets.append("name = ?")
+                params.append(name)
+            if description is not None:
+                sets.append("description = ?")
+                params.append(description)
+            if is_enabled is not None:
+                sets.append("is_enabled = ?")
+                params.append(1 if is_enabled else 0)
+            sets.append("updated_at = ?")
+            params.append(now)
+            params.append(branch_id)
+            connection.execute(
+                f"UPDATE branches SET {', '.join(sets)} WHERE id = ?", params
+            )
+        return self.get_branch(branch_id, environment=target_environment)
+
+    def delete_branch(
+        self,
+        branch_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        target_environment = environment or self._active_environment
+        with self._lock, self.connection(target_environment) as connection:
+            existing = connection.execute(
+                "SELECT id, parent_type, parent_id, name FROM branches WHERE id = ?",
+                (branch_id,),
+            ).fetchone()
+            if not existing:
+                return None
+            parent_type = existing["parent_type"]
+            parent_id = existing["parent_id"]
+            connection.execute("DELETE FROM shot_page_materials WHERE shot_page_id IN (SELECT id FROM shot_pages WHERE branch_id = ?)", (branch_id,))
+            connection.execute("DELETE FROM shot_pages WHERE branch_id = ?", (branch_id,))
+            connection.execute("DELETE FROM branches WHERE id = ?", (branch_id,))
+            remaining = connection.execute(
+                "SELECT id FROM branches WHERE parent_type = ? AND parent_id = ? ORDER BY sort_order ASC",
+                (parent_type, parent_id),
+            ).fetchall()
+            for idx, r in enumerate(remaining, start=1):
+                connection.execute(
+                    "UPDATE branches SET sort_order = ? WHERE id = ?",
+                    (idx, r["id"]),
+                )
+        return {"id": branch_id, "name": existing["name"]}
+
+    # ── Small Scene Materials ──────────────────────────────────────────
+
+    def list_small_scene_materials(
+        self,
+        small_scene_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> list[dict[str, object]]:
+        target_environment = environment or self._active_environment
+        with self.connection(target_environment) as connection:
+            rows = connection.execute(
+                """
+                SELECT m.id AS material_id, m.name, m.material_type, ssm.sort_order
+                FROM small_scene_materials ssm
+                JOIN materials m ON m.id = ssm.material_id
+                WHERE ssm.small_scene_id = ?
+                ORDER BY ssm.sort_order ASC
+                """,
+                (small_scene_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def set_small_scene_materials(
+        self,
+        small_scene_id: str,
+        material_ids: list[str],
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        target_environment = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        seen: set[str] = set()
+        unique_ids: list[str] = []
+        for mid in material_ids:
+            if mid not in seen:
+                seen.add(mid)
+                unique_ids.append(mid)
+        with self._lock, self.connection(target_environment) as connection:
+            scene = connection.execute(
+                "SELECT id FROM small_scenes WHERE id = ?", (small_scene_id,)
+            ).fetchone()
+            if not scene:
+                raise ValueError("小场景不存在")
+            for mid in unique_ids:
+                mat = connection.execute(
+                    "SELECT id FROM materials WHERE id = ?", (mid,)
+                ).fetchone()
+                if not mat:
+                    raise ValueError(f"素材不存在: {mid}")
+            connection.execute(
+                "DELETE FROM small_scene_materials WHERE small_scene_id = ?",
+                (small_scene_id,),
+            )
+            for idx, mid in enumerate(unique_ids, start=1):
+                connection.execute(
+                    """
+                    INSERT INTO small_scene_materials (small_scene_id, material_id, sort_order, created_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (small_scene_id, mid, idx, now),
+                )
+        materials = self.list_small_scene_materials(small_scene_id, environment=target_environment)
+        return {"small_scene_id": small_scene_id, "materials": materials}
+
+    # ── Shot Page Materials ────────────────────────────────────────────
+
+    def list_shot_page_materials(
+        self,
+        shot_page_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> list[dict[str, object]]:
+        target_environment = environment or self._active_environment
+        with self.connection(target_environment) as connection:
+            rows = connection.execute(
+                """
+                SELECT m.id AS material_id, m.name, m.material_type, spm.sort_order
+                FROM shot_page_materials spm
+                JOIN materials m ON m.id = spm.material_id
+                WHERE spm.shot_page_id = ?
+                ORDER BY spm.sort_order ASC
+                """,
+                (shot_page_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def set_shot_page_materials(
+        self,
+        shot_page_id: str,
+        material_ids: list[str],
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        target_environment = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        seen: set[str] = set()
+        unique_ids: list[str] = []
+        for mid in material_ids:
+            if mid not in seen:
+                seen.add(mid)
+                unique_ids.append(mid)
+        with self._lock, self.connection(target_environment) as connection:
+            page = connection.execute(
+                "SELECT id FROM shot_pages WHERE id = ?", (shot_page_id,)
+            ).fetchone()
+            if not page:
+                raise ValueError("分镜页不存在")
+            for mid in unique_ids:
+                mat = connection.execute(
+                    "SELECT id FROM materials WHERE id = ?", (mid,)
+                ).fetchone()
+                if not mat:
+                    raise ValueError(f"素材不存在: {mid}")
+            connection.execute(
+                "DELETE FROM shot_page_materials WHERE shot_page_id = ?",
+                (shot_page_id,),
+            )
+            for idx, mid in enumerate(unique_ids, start=1):
+                connection.execute(
+                    """
+                    INSERT INTO shot_page_materials (shot_page_id, material_id, sort_order, created_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (shot_page_id, mid, idx, now),
+                )
+        materials = self.list_shot_page_materials(shot_page_id, environment=target_environment)
+        return {"shot_page_id": shot_page_id, "materials": materials}
 
     def database_info(self, environment: DatabaseEnvironment) -> dict[str, object]:
         descriptor = self.descriptor(environment)
