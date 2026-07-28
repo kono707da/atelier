@@ -39,19 +39,22 @@ class ScenePagesApiTests(unittest.TestCase):
         response = self.client.post(
             self.pages_endpoint(), json={"name": "场景页1", "description": "说明"}
         )
-        self.assertEqual(response.status_code, 200)
+        # Per second-round contract 8.1: 201 Created
+        self.assertEqual(response.status_code, 201)
         body = response.json()
-        self.assertEqual(body["name"], "场景页1")
-        self.assertEqual(body["description"], "说明")
-        self.assertEqual(body["small_scene_id"], self.small_scene["id"])
-        self.assertEqual(body["sort_order"], 1)
-        self.assertIn("id", body)
+        page = body["page"]
+        self.assertEqual(page["name"], "场景页1")
+        self.assertEqual(page["description"], "说明")
+        self.assertEqual(page["small_scene_id"], self.small_scene["id"])
+        self.assertEqual(page["sort_order"], 1)
+        self.assertIn("id", page)
 
     def test_create_uses_name_not_title(self) -> None:
         response = self.client.post(self.pages_endpoint(), json={"name": "命名页"})
         body = response.json()
-        self.assertIn("name", body)
-        self.assertNotIn("title", body)
+        page = body["page"]
+        self.assertIn("name", page)
+        self.assertNotIn("title", page)
 
     def test_create_blank_name_returns_422(self) -> None:
         response = self.client.post(self.pages_endpoint(), json={"name": ""})
@@ -73,24 +76,24 @@ class ScenePagesApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 404)
 
     def test_update_scene_page_name(self) -> None:
-        created = self.client.post(self.pages_endpoint(), json={"name": "旧名"}).json()
+        created = self.client.post(self.pages_endpoint(), json={"name": "旧名"}).json()["page"]
         response = self.client.patch(
             f"/api/small-scene-pages/{created['id']}", json={"name": "新名"}
         )
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["name"], "新名")
+        self.assertEqual(response.json()["page"]["name"], "新名")
 
     def test_delete_scene_page(self) -> None:
-        created = self.client.post(self.pages_endpoint(), json={"name": "待删页"}).json()
+        created = self.client.post(self.pages_endpoint(), json={"name": "待删页"}).json()["page"]
         response = self.client.delete(f"/api/small-scene-pages/{created['id']}")
         self.assertEqual(response.status_code, 200)
         again = self.client.delete(f"/api/small-scene-pages/{created['id']}")
         self.assertEqual(again.status_code, 404)
 
     def test_reorder_scene_pages(self) -> None:
-        a = self.client.post(self.pages_endpoint(), json={"name": "A"}).json()
-        b = self.client.post(self.pages_endpoint(), json={"name": "B"}).json()
-        c = self.client.post(self.pages_endpoint(), json={"name": "C"}).json()
+        a = self.client.post(self.pages_endpoint(), json={"name": "A"}).json()["page"]
+        b = self.client.post(self.pages_endpoint(), json={"name": "B"}).json()["page"]
+        c = self.client.post(self.pages_endpoint(), json={"name": "C"}).json()["page"]
         response = self.client.put(
             self.pages_endpoint() + "/order",
             json={"page_ids": [c["id"], a["id"], b["id"]]},
@@ -102,7 +105,7 @@ class ScenePagesApiTests(unittest.TestCase):
 
     def test_delete_renumbers_remaining(self) -> None:
         self.client.post(self.pages_endpoint(), json={"name": "A"})
-        b = self.client.post(self.pages_endpoint(), json={"name": "B"}).json()
+        b = self.client.post(self.pages_endpoint(), json={"name": "B"}).json()["page"]
         self.client.post(self.pages_endpoint(), json={"name": "C"})
         self.client.delete(f"/api/small-scene-pages/{b['id']}")
         ws = self.client.get(

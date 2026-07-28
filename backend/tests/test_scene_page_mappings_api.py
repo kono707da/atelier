@@ -60,9 +60,11 @@ class ScenePageMappingsApiTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200)
         body = response.json()
-        self.assertEqual(body["scene_page_id"], self.scene_page["id"])
-        self.assertEqual(body["material_page_id"], self.default_page["id"])
-        self.assertEqual(body["material_type"], "composition")
+        # Per second-round contract 8.4: mapping wrapped in `mapping` key
+        mapping = body["mapping"]
+        self.assertEqual(mapping["scene_page_id"], self.scene_page["id"])
+        self.assertEqual(mapping["material_page_id"], self.default_page["id"])
+        self.assertEqual(mapping["material_type"], "composition")
 
     def test_unset_mapping(self) -> None:
         self.client.put(
