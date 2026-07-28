@@ -291,41 +291,65 @@ function shotInspectorPage() {
 }
 
 function materialsPage() {
-  const names = [
-    ["胸腰景正面", "构图", "适合人物主体与轻量互动", "blue"],
-    ["侧面双人构图", "构图", "明确前后关系与朝向", "blue"],
-    ["放松微笑", "表情", "柔和视线与轻松表情", "green"],
-    ["紧张回避", "表情", "垂落视线与轻微回避", "green"],
-    ["浅水环境包", "场景包", "包含 12 张有序镜头", "purple"],
-    ["室内夜间光线", "光线", "暖色侧光与低对比背景", "orange"],
-    ["进入场景转场", "转场包", "4 张连续空间转换镜头", "cyan"],
-    ["角色近景提示词", "提示词", "可绑定人物规格插槽", "purple"],
-    ["竖向高图参数", "生成参数", "832 × 1216 · 默认采样", "orange"],
-    ["水面互动镜头", "单页模板", "人物、环境、构图复合模板", "cyan"],
-    ["远景环境镜头", "单页模板", "大留白与环境建立", "blue"],
-    ["最终收束场景", "场景包", "8 张有序镜头", "purple"],
-  ];
-  const cards = names.map((n, i) => `<div class="material-card">${thumb(n[1], i)}<div class="material-card-body"><div style="display:flex;justify-content:space-between;gap:6px"><span class="material-name">${n[0]}</span>${chip(n[1], n[3])}</div><div class="material-desc">${n[2]}</div><div class="material-footer">${status(i % 4 === 0 ? "项目素材" : "已验证", i % 4 === 0 ? "orange" : "green")}<span style="margin-left:auto;color:#a2a9b7;font-size:8px">引用 ${i * 7 + 12}</span></div></div></div>`).join("");
   return `<div class="page-scroll">
-    ${pageHeader("素材库", "管理可复用的分镜素材、单页模板、场景包和转场包。", button("导入素材") + button("新建素材", "primary"))}
-    <div class="library-toolbar"><div class="search wide">⌕&nbsp;&nbsp;搜索名称、标签或描述</div><div class="tabs"><span class="tab active">全部</span><span class="tab">构图</span><span class="tab">表情</span><span class="tab">场景</span><span class="tab">光线</span><span class="tab">提示词</span><span class="tab">复合模板</span></div><div style="margin-left:auto">${button("筛选", "small")}</div></div>
-    <div class="material-grid">${cards}</div>
+    ${pageHeader(
+      "素材库",
+      "管理可复用的构图、表情、场景、光线、提示词和复合模板。",
+      '<button class="btn primary" type="button" data-api-action="open-material-modal">新建素材</button>'
+    )}
+    <section class="material-library-runtime" aria-label="素材库">
+      <div class="material-library-controls">
+        <div class="material-search-wrap">
+          <span class="material-search-icon">⌕</span>
+          <input id="material-search-input" class="material-control-input" type="search" maxlength="100" placeholder="搜索名称、说明、正文或标签" autocomplete="off" />
+        </div>
+        <select id="material-status-filter" class="material-control-select" aria-label="验证状态">
+          <option value="">全部状态</option>
+          <option value="verified">已验证</option>
+          <option value="unverified">未验证</option>
+        </select>
+        <div class="material-tag-filter-wrap">
+          <input id="material-tag-filter" class="material-control-input" type="text" list="material-tag-filter-options" maxlength="40" placeholder="标签筛选" autocomplete="off" />
+          <datalist id="material-tag-filter-options"></datalist>
+        </div>
+        <select id="material-sort-filter" class="material-control-select" aria-label="排序">
+          <option value="updated_desc">最近修改</option>
+          <option value="created_desc">最近创建</option>
+          <option value="name_asc">名称 A→Z</option>
+          <option value="name_desc">名称 Z→A</option>
+        </select>
+      </div>
+      <div class="material-type-filters" id="material-type-filters" role="group" aria-label="素材类型">
+        <button class="material-filter-chip active" type="button" data-material-type="">全部</button>
+        <button class="material-filter-chip" type="button" data-material-type="composition">构图</button>
+        <button class="material-filter-chip" type="button" data-material-type="expression">表情</button>
+        <button class="material-filter-chip" type="button" data-material-type="scene">场景</button>
+        <button class="material-filter-chip" type="button" data-material-type="lighting">光线</button>
+        <button class="material-filter-chip" type="button" data-material-type="prompt">提示词</button>
+        <button class="material-filter-chip" type="button" data-material-type="composite_template">复合模板</button>
+      </div>
+      <div class="material-library-summary" id="material-library-summary" aria-live="polite"></div>
+      <div class="material-grid" id="material-grid">
+        <div class="material-list-loading">正在读取素材库…</div>
+      </div>
+      <div class="material-load-more-wrap" id="material-load-more-wrap" hidden>
+        <button class="btn soft" type="button" data-api-action="load-more-materials">加载更多</button>
+      </div>
+    </section>
   </div>`;
 }
 
 function materialDetailPage() {
   return `<div class="page-scroll">
-    ${pageHeader("素材详情 · 浅水环境包", "复合模板 / 场景包 · 版本 6", button("复制为新素材") + button("保存修改", "primary"))}
-    <div class="split-2" style="height:calc(100% - 79px)">
-      <div class="split-left grid" style="grid-template-rows:220px minmax(0,1fr)">
-        <section class="panel"><div class="panel-body" style="display:grid;grid-template-columns:250px minmax(0,1fr);gap:16px;height:100%">${thumb("SCENE PACK · 12 SHOTS", 5)}<div><div style="display:flex;gap:6px">${chip("场景包", "purple")}${status("已验证", "green")}${chip("12 页")}</div><h2 style="font-size:18px;margin:12px 0 7px">浅水环境包</h2><p style="margin:0;color:var(--muted);font-size:10px;line-height:1.65">包含从进入浅水区到场景收束的 12 张有序镜头。拖入剧本画布后自动展开，可逐页覆盖人物和构图。</p><div style="margin-top:15px">${button("在画布中预览", "soft")}</div></div></div></section>
-        ${panel("模板页面", "拖动调整模板内部页序", `<div class="shot-list" style="padding:0">
-          ${[1,2,3,4,5].map((i) => `<div class="shot-row"><span class="shot-no">${i}</span><span class="mini-thumb"></span><div><div class="shot-title">镜头 ${String(i).padStart(2,"0")} · ${["建立环境","进入水面","人物靠近","水面互动","场景收束"][i-1]}</div><div class="shot-desc">${["远景","全身","中景","胸腰景","半身"][i-1]} · 默认继承浅水环境与日间光线</div></div>${status("已验证","green")}<span style="color:#a4aab7;font-size:9px">⋮⋮</span></div>`).join("")}
-        </div>`, button("展开全部 12 页", "small"))}
-      </div>
-      <div class="split-right">
-        ${panel("素材属性", "修改后创建新版本", `<div class="form-group"><label class="label">名称</label><div class="field">浅水环境包</div></div><div class="form-group"><label class="label">说明</label><div class="field textarea">适合浅水区域的场景建立、人物互动与收束镜头。</div></div><div class="form-group"><label class="label">默认环境素材</label><div style="display:flex;flex-wrap:wrap;gap:5px">${chip("浅水区","cyan")}${chip("水面反光")}${chip("水波")}${chip("日间自然光","orange")}</div></div><div class="form-row"><div><label class="label">页面数</label><div class="field">12</div></div><div><label class="label">引用方式</label><div class="field">复制后独立</div></div></div><div class="empty-note">当前被 6 个项目、14 个场景引用。修改会创建版本 7，不影响已存在的画布页面。</div>`)}
-      </div>
+    ${pageHeader(
+      "素材详情",
+      "编辑素材内容、标签、验证状态和预览图。",
+      '<button class="btn" type="button" data-api-action="back-to-materials">返回素材库</button>' +
+      '<button class="btn danger-soft" type="button" data-api-action="delete-current-material" disabled>删除素材</button>' +
+      '<button class="btn primary" type="submit" form="material-detail-form" id="material-detail-save" disabled>保存修改</button>'
+    )}
+    <div class="material-detail-runtime" id="material-detail-runtime">
+      <div class="material-detail-loading">正在读取素材详情…</div>
     </div>
   </div>`;
 }

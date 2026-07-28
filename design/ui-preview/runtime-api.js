@@ -971,6 +971,1046 @@
     </tr>`;
   }
 
+  const materialTypes = {
+    composition: { label: "构图", code: "CO" },
+    expression: { label: "表情", code: "EX" },
+    scene: { label: "场景", code: "SC" },
+    lighting: { label: "光线", code: "LI" },
+    prompt: { label: "提示词", code: "PR" },
+    composite_template: { label: "复合模板", code: "TM" },
+  };
+
+  const materialListState = {
+    q: "",
+    materialType: "",
+    validationStatus: "",
+    tag: "",
+    sort: "updated_desc",
+    limit: 60,
+    offset: 0,
+    total: 0,
+    items: [],
+    loading: false,
+    requestId: 0,
+    searchTimer: null,
+    tagTimer: null,
+    tagRequestIds: {},
+  };
+
+  const materialDetailState = {
+    material: null,
+    snapshot: "",
+    previewFile: null,
+    removePreview: false,
+    objectUrl: null,
+    dirty: false,
+  };
+
+  let materialCreateObjectUrl = null;
+
+  function materialTypeInfo(type) {
+    return materialTypes[type] || { label: type || "素材", code: "MT" };
+  }
+
+  function materialDate(value, includeTime = false) {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "刚刚";
+    return date.toLocaleString("zh-CN", {
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      ...(includeTime ? { hour: "2-digit", minute: "2-digit" } : {}),
+    });
+  }
+
+  function materialCard(item) {
+    const type = materialTypeInfo(item.material_type);
+    const tags = Array.isArray(item.tags) ? item.tags : [];
+    const visibleTags = tags.slice(0, 3);
+    const extraTags = Math.max(0, tags.length - visibleTags.length);
+    const image = item.thumbnail_url
+      ? `<img src="${escapeHtml(item.thumbnail_url)}" alt="" loading="lazy" decoding="async" />`
+      : "";
+    return `
+      <article
+        class="material-card real-material-card"
+        data-material-id="${escapeHtml(item.id)}"
+        tabindex="0"
+        role="button"
+        aria-label="打开素材 ${escapeHtml(item.name)}"
+      >
+        <div class="material-card-preview type-${escapeHtml(item.material_type)}">
+          ${image}
+          ${image ? "" : `<span class="material-card-preview-code">${escapeHtml(type.code)}</span>`}
+          <button
+            class="material-card-menu"
+            type="button"
+            data-api-action="delete-material"
+            data-material-id="${escapeHtml(item.id)}"
+            data-material-name="${escapeHtml(item.name)}"
+            aria-label="删除素材 ${escapeHtml(item.name)}"
+            title="删除素材"
+          >•••</button>
+        </div>
+        <div class="material-card-body">
+          <div class="material-card-head">
+            <span class="material-name">${escapeHtml(item.name)}</span>
+            <span class="material-type-badge">${escapeHtml(type.label)}</span>
+          </div>
+          <div class="material-desc">${escapeHtml(item.description || "暂无简介")}</div>
+          <div class="material-card-tags">
+            ${visibleTags.map((tag) => `<span class="material-mini-tag">${escapeHtml(tag)}</span>`).join("")}
+            ${extraTags ? `<span class="material-mini-tag">+${extraTags}</span>` : ""}
+          </div>
+          <div class="material-footer">
+            <span class="material-validation-badge ${item.validation_status === "verified" ? "verified" : "unverified"}">
+              ${item.validation_status === "verified" ? "已验证" : "未验证"}
+            </span>
+            <span class="material-card-time">${escapeHtml(materialDate(item.updated_at))}</span>
+          </div>
+        </div>
+      </article>
+    `;
+  }
+
+  function materialBackendMissingState() {
+    return `
+      <section class="material-list-state backend-missing">
+        <span class="material-state-icon">API</span>
+        <h2>素材库后端尚未完成</h2>
+        <p>前端页面已经准备好。编程 AI 完成素材接口后，这里会自动显示真实素材，不需要重新制作页面。</p>
+        <button class="btn soft" type="button" data-api-action="retry-materials">重新连接</button>
+      </section>
+    `;
+  }
+
+  function materialEmptyState(filtered) {
+    return `
+      <section class="material-list-state">
+        <span class="material-state-icon">MT</span>
+        <h2>${filtered ? "没有匹配的素材" : "还没有素材"}</h2>
+        <p>${
+          filtered
+            ? "尝试清除搜索词或筛选条件。"
+            : "创建第一个可复用素材，保存构图、表情、场景、光线或提示词内容。"
+        }</p>
+        <button class="btn ${filtered ? "soft" : "primary"}" type="button" data-api-action="${
+          filtered ? "clear-material-filters" : "open-material-modal"
+        }">${filtered ? "清除筛选" : "新建素材"}</button>
+      </section>
+    `;
+  }
+
+  function materialRequestIsMissing(error) {
+    if (!error) return false;
+    if (Number(error.status) === 405) return true;
+    if (Number(error.status) !== 404) return false;
+    const detail = String(error.payload?.detail || error.message || "").trim().toLowerCase();
+    return !detail || detail === "not found" || detail === "请求失败（404）";
+  }
+
+  function bindMaterialLibraryControls() {
+    const runtime = document.querySelector(".material-library-runtime");
+    if (!runtime || runtime.dataset.bound) return;
+    runtime.dataset.bound = "1";
+
+    const search = document.getElementById("material-search-input");
+    const status = document.getElementById("material-status-filter");
+    const tag = document.getElementById("material-tag-filter");
+    const sort = document.getElementById("material-sort-filter");
+
+    search?.addEventListener("input", () => {
+      clearTimeout(materialListState.searchTimer);
+      materialListState.searchTimer = setTimeout(() => {
+        materialListState.q = search.value.trim();
+        loadMaterials(false);
+      }, 300);
+    });
+
+    status?.addEventListener("change", () => {
+      materialListState.validationStatus = status.value;
+      loadMaterials(false);
+    });
+
+    sort?.addEventListener("change", () => {
+      materialListState.sort = sort.value;
+      loadMaterials(false);
+    });
+
+    const scheduleTagWork = () => {
+      clearTimeout(materialListState.tagTimer);
+      materialListState.tagTimer = setTimeout(() => {
+        materialListState.tag = tag.value.trim();
+        loadMaterialTagSuggestions(tag.value, "material-tag-filter-options");
+        loadMaterials(false);
+      }, 300);
+    };
+    tag?.addEventListener("input", scheduleTagWork);
+    tag?.addEventListener("change", scheduleTagWork);
+    tag?.addEventListener("focus", () => {
+      loadMaterialTagSuggestions(tag.value, "material-tag-filter-options");
+    });
+
+    document.getElementById("material-type-filters")?.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-material-type]");
+      if (!button) return;
+      runtime.querySelectorAll("[data-material-type]").forEach((item) => {
+        item.classList.toggle("active", item === button);
+      });
+      materialListState.materialType = button.dataset.materialType || "";
+      loadMaterials(false);
+    });
+  }
+
+  async function renderMaterialsPage() {
+    bindMaterialLibraryControls();
+    await loadMaterials(false);
+  }
+
+  async function loadMaterials(append) {
+    const grid = document.getElementById("material-grid");
+    const summary = document.getElementById("material-library-summary");
+    const loadMoreWrap = document.getElementById("material-load-more-wrap");
+    if (!grid || (append && materialListState.loading)) return;
+
+    materialListState.loading = true;
+    const requestId = materialListState.requestId + 1;
+    materialListState.requestId = requestId;
+    if (!append) {
+      materialListState.offset = 0;
+      materialListState.items = [];
+      grid.innerHTML = '<div class="material-list-loading">正在读取素材库…</div>';
+      if (summary) summary.textContent = "";
+      if (loadMoreWrap) loadMoreWrap.hidden = true;
+    } else {
+      const button = loadMoreWrap?.querySelector("button");
+      if (button) {
+        button.disabled = true;
+        button.textContent = "正在加载…";
+      }
+    }
+
+    const params = new URLSearchParams();
+    if (materialListState.q) params.set("q", materialListState.q);
+    if (materialListState.materialType) {
+      params.set("material_type", materialListState.materialType);
+    }
+    if (materialListState.validationStatus) {
+      params.set("validation_status", materialListState.validationStatus);
+    }
+    if (materialListState.tag) params.set("tag", materialListState.tag);
+    params.set("sort", materialListState.sort);
+    params.set("limit", String(materialListState.limit));
+    params.set("offset", String(append ? materialListState.items.length : 0));
+
+    try {
+      const payload = await request(`/api/materials?${params.toString()}`);
+      if (requestId !== materialListState.requestId) return;
+      const incoming = Array.isArray(payload.items) ? payload.items : [];
+      materialListState.items = append
+        ? materialListState.items.concat(incoming)
+        : incoming;
+      materialListState.total = Number(payload.total || 0);
+      materialListState.offset = materialListState.items.length;
+
+      const filtered = Boolean(
+        materialListState.q ||
+        materialListState.materialType ||
+        materialListState.validationStatus ||
+        materialListState.tag
+      );
+      grid.innerHTML = materialListState.items.length
+        ? materialListState.items.map(materialCard).join("")
+        : materialEmptyState(filtered);
+      if (summary) {
+        summary.textContent = materialListState.total
+          ? `共 ${materialListState.total} 个素材 · 已加载 ${materialListState.items.length} 个`
+          : "";
+      }
+      const hasMore =
+        Boolean(payload.has_more) ||
+        materialListState.items.length < materialListState.total;
+      if (loadMoreWrap) {
+        loadMoreWrap.hidden = !hasMore;
+        const button = loadMoreWrap.querySelector("button");
+        if (button) {
+          button.disabled = false;
+          button.textContent = "加载更多";
+        }
+      }
+    } catch (error) {
+      if (requestId !== materialListState.requestId) return;
+      grid.innerHTML = materialRequestIsMissing(error)
+        ? materialBackendMissingState()
+        : `
+          <section class="material-list-state">
+            <span class="material-state-icon">!</span>
+            <h2>素材库加载失败</h2>
+            <p>${escapeHtml(error.message)}</p>
+            <button class="btn soft" type="button" data-api-action="retry-materials">重试</button>
+          </section>
+        `;
+      if (summary) summary.textContent = "";
+      if (loadMoreWrap) loadMoreWrap.hidden = true;
+    } finally {
+      if (requestId === materialListState.requestId) {
+        materialListState.loading = false;
+      }
+    }
+  }
+
+  async function loadMaterialTagSuggestions(query, datalistId) {
+    const list = document.getElementById(datalistId);
+    if (!list) return;
+    const requestId = (materialListState.tagRequestIds[datalistId] || 0) + 1;
+    materialListState.tagRequestIds[datalistId] = requestId;
+    const params = new URLSearchParams({
+      q: String(query || "").trim(),
+      limit: "30",
+    });
+    try {
+      const payload = await request(`/api/material-tags?${params.toString()}`);
+      if (requestId !== materialListState.tagRequestIds[datalistId]) return;
+      const items = Array.isArray(payload.items) ? payload.items : [];
+      list.innerHTML = items.map((item) => {
+        const name = typeof item === "string" ? item : item.name || "";
+        return `<option value="${escapeHtml(name)}"></option>`;
+      }).join("");
+    } catch (error) {
+      if (requestId === materialListState.tagRequestIds[datalistId]) {
+        list.innerHTML = "";
+      }
+    }
+  }
+
+  function resetMaterialFilters() {
+    materialListState.q = "";
+    materialListState.materialType = "";
+    materialListState.validationStatus = "";
+    materialListState.tag = "";
+    materialListState.sort = "updated_desc";
+    const search = document.getElementById("material-search-input");
+    const status = document.getElementById("material-status-filter");
+    const tag = document.getElementById("material-tag-filter");
+    const sort = document.getElementById("material-sort-filter");
+    if (search) search.value = "";
+    if (status) status.value = "";
+    if (tag) tag.value = "";
+    if (sort) sort.value = "updated_desc";
+    document.querySelectorAll("[data-material-type]").forEach((button) => {
+      button.classList.toggle("active", !button.dataset.materialType);
+    });
+    loadMaterials(false);
+  }
+
+  function materialTypeOptions(selected) {
+    return Object.entries(materialTypes).map(([value, meta]) => (
+      `<option value="${value}" ${value === selected ? "selected" : ""}>${escapeHtml(meta.label)}</option>`
+    )).join("");
+  }
+
+  function materialTagsEditor(id, tags = []) {
+    return `
+      <div class="material-tags-editor" id="${escapeHtml(id)}" data-tags="${escapeHtml(JSON.stringify(tags))}">
+        <div class="material-tags-list"></div>
+        <input
+          class="material-tag-editor-input"
+          type="text"
+          maxlength="40"
+          list="${escapeHtml(id)}-options"
+          placeholder="输入标签后按回车"
+          autocomplete="off"
+        />
+        <datalist id="${escapeHtml(id)}-options"></datalist>
+      </div>
+    `;
+  }
+
+  function getMaterialEditorTags(editor) {
+    if (!editor) return [];
+    try {
+      const tags = JSON.parse(editor.dataset.tags || "[]");
+      return Array.isArray(tags) ? tags : [];
+    } catch (error) {
+      return [];
+    }
+  }
+
+  function renderMaterialEditorTags(editor) {
+    const list = editor?.querySelector(".material-tags-list");
+    if (!list) return;
+    list.innerHTML = getMaterialEditorTags(editor).map((tag) => `
+      <span class="material-tag-chip">
+        <span>${escapeHtml(tag)}</span>
+        <button class="material-tag-remove" type="button" data-remove-material-tag="${escapeHtml(tag)}" aria-label="删除标签 ${escapeHtml(tag)}">×</button>
+      </span>
+    `).join("");
+  }
+
+  function addMaterialEditorTag(editor, rawTag) {
+    if (!editor) return;
+    const tag = String(rawTag || "").trim().replace(/\s+/g, " ");
+    if (!tag) return;
+    const tags = getMaterialEditorTags(editor);
+    if (tags.length >= 30) {
+      if (typeof showToast === "function") showToast("每个素材最多 30 个标签");
+      return;
+    }
+    if (tags.some((item) => item.toLocaleLowerCase() === tag.toLocaleLowerCase())) {
+      return;
+    }
+    tags.push(tag);
+    editor.dataset.tags = JSON.stringify(tags);
+    renderMaterialEditorTags(editor);
+    editor.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  function removeMaterialEditorTag(editor, tag) {
+    const tags = getMaterialEditorTags(editor).filter((item) => item !== tag);
+    editor.dataset.tags = JSON.stringify(tags);
+    renderMaterialEditorTags(editor);
+    editor.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  function bindMaterialTagsEditor(editor) {
+    if (!editor || editor.dataset.bound) return;
+    editor.dataset.bound = "1";
+    renderMaterialEditorTags(editor);
+    const input = editor.querySelector(".material-tag-editor-input");
+    const datalistId = input?.getAttribute("list");
+    let suggestionTimer = null;
+    input?.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === ",") {
+        event.preventDefault();
+        addMaterialEditorTag(editor, input.value.replace(/,$/, ""));
+        input.value = "";
+      } else if (event.key === "Backspace" && !input.value) {
+        const tags = getMaterialEditorTags(editor);
+        if (tags.length) removeMaterialEditorTag(editor, tags[tags.length - 1]);
+      }
+    });
+    input?.addEventListener("change", () => {
+      addMaterialEditorTag(editor, input.value);
+      input.value = "";
+    });
+    input?.addEventListener("input", () => {
+      clearTimeout(suggestionTimer);
+      suggestionTimer = setTimeout(() => {
+        loadMaterialTagSuggestions(input.value, datalistId);
+      }, 220);
+    });
+    editor.addEventListener("click", (event) => {
+      const remove = event.target.closest("[data-remove-material-tag]");
+      if (remove) {
+        removeMaterialEditorTag(editor, remove.dataset.removeMaterialTag);
+      } else {
+        input?.focus();
+      }
+    });
+  }
+
+  function materialPreviewPicker({ idPrefix, previewUrl = "", hasPreview = false }) {
+    return `
+      <div class="material-preview-picker">
+        <div class="material-preview-box" id="${escapeHtml(idPrefix)}-preview-box">
+          ${previewUrl ? `<img src="${escapeHtml(previewUrl)}" alt="素材预览" />` : ""}
+          <span>${previewUrl ? "" : "可选预览图"}</span>
+        </div>
+        <div class="material-preview-actions">
+          <input id="${escapeHtml(idPrefix)}-preview-file" name="preview_file" type="file" accept="image/jpeg,image/png,image/webp" />
+          <span class="material-field-help">JPG、PNG 或 WebP，最大 20 MB。列表只加载缩略图。</span>
+          <button
+            class="btn small soft"
+            type="button"
+            data-api-action="remove-material-preview"
+            data-preview-target="${escapeHtml(idPrefix)}"
+            ${hasPreview ? "" : "hidden"}
+          >移除预览图</button>
+        </div>
+      </div>
+    `;
+  }
+
+  function ensureMaterialCreateModal() {
+    let modal = document.getElementById("material-create-modal");
+    if (modal) return modal;
+    modal = document.createElement("div");
+    modal.id = "material-create-modal";
+    modal.className = "atelier-modal-backdrop";
+    modal.hidden = true;
+    modal.innerHTML = `
+      <section class="atelier-modal material-editor-modal" role="dialog" aria-modal="true" aria-labelledby="material-create-title">
+        <div class="material-modal-header">
+          <div class="atelier-modal-icon">MT</div>
+          <div class="material-modal-heading">
+            <h2 id="material-create-title">新建素材</h2>
+            <p>保存一个可以反复使用的内容积木。</p>
+          </div>
+          <button class="material-modal-close" type="button" data-api-action="close-material-modal" aria-label="关闭">×</button>
+        </div>
+        <div class="material-editor-scroll">
+          <form id="material-create-form" class="material-editor-grid">
+            <label class="material-field">
+              名称
+              <input class="modal-input" name="name" maxlength="80" autocomplete="off" placeholder="输入素材名称" required />
+            </label>
+            <label class="material-field">
+              类型
+              <select class="modal-input" name="material_type">${materialTypeOptions("composition")}</select>
+            </label>
+            <label class="material-field wide">
+              简介
+              <textarea class="modal-input material-textarea" name="description" maxlength="300" placeholder="一句话说明这个素材适合什么画面"></textarea>
+            </label>
+            <label class="material-field wide">
+              素材正文
+              <textarea class="modal-input material-textarea content" name="content" maxlength="50000" placeholder="填写人工阅读和编辑的素材内容" required></textarea>
+            </label>
+            <label class="material-field wide">
+              提示词内容
+              <textarea class="modal-input material-textarea" name="prompt_text" maxlength="50000" placeholder="可选：实际用于生成的提示词或标签串"></textarea>
+            </label>
+            <label class="material-field wide">
+              负面提示词
+              <textarea class="modal-input material-textarea" name="negative_prompt" maxlength="20000" placeholder="可选：只填写与该素材直接相关的排除内容"></textarea>
+            </label>
+            <div class="material-field wide">
+              标签
+              ${materialTagsEditor("material-create-tags")}
+              <span class="material-field-help">回车添加；服装、动作、道具等可先作为标签管理。</span>
+            </div>
+            <label class="material-field">
+              验证状态
+              <select class="modal-input" name="validation_status">
+                <option value="unverified">未验证</option>
+                <option value="verified">已验证</option>
+              </select>
+            </label>
+            <label class="material-field wide">
+              备注
+              <textarea class="modal-input material-textarea" name="notes" maxlength="5000" placeholder="可选：记录适用条件或测试结论"></textarea>
+            </label>
+            <div class="material-field wide">
+              预览图
+              ${materialPreviewPicker({ idPrefix: "material-create" })}
+            </div>
+            <div class="modal-error wide" role="alert"></div>
+            <div class="material-editor-actions">
+              <button class="btn" type="button" data-api-action="close-material-modal">取消</button>
+              <button class="btn primary" type="submit">创建素材</button>
+            </div>
+          </form>
+        </div>
+      </section>
+    `;
+    document.body.appendChild(modal);
+    modal.addEventListener("click", (event) => {
+      if (event.target === modal) closeMaterialCreateModal();
+    });
+    modal.querySelector("form").addEventListener("submit", submitMaterialCreate);
+    const tagEditor = modal.querySelector("#material-create-tags");
+    bindMaterialTagsEditor(tagEditor);
+    modal.querySelector("#material-create-preview-file")?.addEventListener("change", (event) => {
+      previewMaterialFile(
+        event.target.files?.[0],
+        "material-create",
+        (url) => {
+          if (materialCreateObjectUrl) URL.revokeObjectURL(materialCreateObjectUrl);
+          materialCreateObjectUrl = url;
+        }
+      );
+    });
+    return modal;
+  }
+
+  function openMaterialCreateModal() {
+    const modal = ensureMaterialCreateModal();
+    const form = modal.querySelector("form");
+    form.reset();
+    const editor = form.querySelector("#material-create-tags");
+    editor.dataset.tags = "[]";
+    renderMaterialEditorTags(editor);
+    const box = form.querySelector("#material-create-preview-box");
+    if (box) box.innerHTML = "<span>可选预览图</span>";
+    form.querySelector('[data-api-action="remove-material-preview"]').hidden = true;
+    form.querySelector(".modal-error").textContent = "";
+    if (materialCreateObjectUrl) {
+      URL.revokeObjectURL(materialCreateObjectUrl);
+      materialCreateObjectUrl = null;
+    }
+    modal.hidden = false;
+    requestAnimationFrame(() => modal.classList.add("show"));
+    setTimeout(() => form.elements.name.focus(), 60);
+  }
+
+  function closeMaterialCreateModal() {
+    const modal = document.getElementById("material-create-modal");
+    if (!modal || modal.hidden) return;
+    modal.classList.remove("show");
+    setTimeout(() => {
+      modal.hidden = true;
+      if (materialCreateObjectUrl) {
+        URL.revokeObjectURL(materialCreateObjectUrl);
+        materialCreateObjectUrl = null;
+      }
+    }, 150);
+  }
+
+  function materialPayloadFromForm(form) {
+    const editor = form.querySelector(".material-tags-editor");
+    return {
+      name: form.elements.name.value.trim().replace(/\s+/g, " "),
+      material_type: form.elements.material_type.value,
+      description: form.elements.description.value.trim(),
+      content: form.elements.content.value,
+      prompt_text: form.elements.prompt_text.value,
+      negative_prompt: form.elements.negative_prompt.value,
+      validation_status: form.elements.validation_status.value,
+      notes: form.elements.notes.value,
+      tags: getMaterialEditorTags(editor),
+    };
+  }
+
+  function validateMaterialPreviewFile(file) {
+    if (!file) return "";
+    if (!["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
+      return "预览图只支持 JPG、PNG 或 WebP。";
+    }
+    if (file.size > 20 * 1024 * 1024) {
+      return "预览图不能超过 20 MB。";
+    }
+    return "";
+  }
+
+  function previewMaterialFile(file, targetPrefix, rememberUrl) {
+    const error = validateMaterialPreviewFile(file);
+    const modalError = document.querySelector(
+      targetPrefix === "material-create"
+        ? "#material-create-form .modal-error"
+        : "#material-detail-form .material-detail-save-status"
+    );
+    if (error) {
+      if (modalError) {
+        modalError.textContent = error;
+        modalError.classList.add("error");
+      }
+      return false;
+    }
+    if (!file) return true;
+    const url = URL.createObjectURL(file);
+    rememberUrl(url);
+    const box = document.getElementById(`${targetPrefix}-preview-box`);
+    if (box) box.innerHTML = `<img src="${escapeHtml(url)}" alt="待上传的素材预览" />`;
+    const remove = document.querySelector(
+      `[data-api-action="remove-material-preview"][data-preview-target="${targetPrefix}"]`
+    );
+    if (remove) remove.hidden = false;
+    return true;
+  }
+
+  async function uploadMaterialPreview(materialId, file) {
+    const formData = new FormData();
+    formData.append("file", file);
+    return request(`/api/materials/${materialId}/preview`, {
+      method: "POST",
+      body: formData,
+    });
+  }
+
+  async function submitMaterialCreate(event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const submit = form.querySelector('button[type="submit"]');
+    const error = form.querySelector(".modal-error");
+    const payload = materialPayloadFromForm(form);
+    const file = form.elements.preview_file.files?.[0] || null;
+    if (!payload.name) {
+      error.textContent = "请输入素材名称。";
+      form.elements.name.focus();
+      return;
+    }
+    if (!payload.content.trim()) {
+      error.textContent = "请填写素材正文。";
+      form.elements.content.focus();
+      return;
+    }
+    const fileError = validateMaterialPreviewFile(file);
+    if (fileError) {
+      error.textContent = fileError;
+      return;
+    }
+
+    submit.disabled = true;
+    submit.textContent = "正在创建…";
+    error.textContent = "";
+    try {
+      const result = await request("/api/materials", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      const material = result.material || result;
+      if (file) {
+        try {
+          await uploadMaterialPreview(material.id, file);
+        } catch (uploadError) {
+          if (typeof showToast === "function") {
+            showToast(`素材已创建，但预览图上传失败：${uploadError.message}`);
+          }
+        }
+      }
+      closeMaterialCreateModal();
+      if (typeof showToast === "function") showToast(`素材「${payload.name}」已创建`);
+      navigateToMaterialDetail(material.id);
+    } catch (requestError) {
+      error.textContent = materialRequestIsMissing(requestError)
+        ? "素材库后端尚未完成，暂时无法创建。"
+        : requestError.message;
+      form.elements.name.focus();
+    } finally {
+      submit.disabled = false;
+      submit.textContent = "创建素材";
+    }
+  }
+
+  function navigateToMaterialDetail(materialId) {
+    const params = new URLSearchParams();
+    params.set("page", "material-detail");
+    params.set("material", materialId);
+    window.location.search = `?${params.toString()}`;
+  }
+
+  function navigateToMaterials() {
+    window.location.search = "?page=materials";
+  }
+
+  function resetMaterialDetailState() {
+    if (materialDetailState.objectUrl) {
+      URL.revokeObjectURL(materialDetailState.objectUrl);
+    }
+    materialDetailState.material = null;
+    materialDetailState.snapshot = "";
+    materialDetailState.previewFile = null;
+    materialDetailState.removePreview = false;
+    materialDetailState.objectUrl = null;
+    materialDetailState.dirty = false;
+  }
+
+  function materialDetailForm(material) {
+    const type = materialTypeInfo(material.material_type);
+    const previewUrl = material.preview_url || material.thumbnail_url || "";
+    return `
+      <div class="material-detail-layout">
+        <aside class="material-detail-preview-panel">
+          <div class="material-detail-preview-large type-${escapeHtml(material.material_type)}" id="material-detail-preview-box">
+            ${previewUrl ? `<img src="${escapeHtml(previewUrl)}" alt="${escapeHtml(material.name)}" />` : ""}
+            ${previewUrl ? "" : `<span class="material-card-preview-code">${escapeHtml(type.code)}</span>`}
+          </div>
+          <div class="material-detail-preview-meta">
+            <span class="material-type-badge">${escapeHtml(type.label)}</span>
+            <span class="material-validation-badge ${material.validation_status === "verified" ? "verified" : "unverified"}">
+              ${material.validation_status === "verified" ? "已验证" : "未验证"}
+            </span>
+          </div>
+          <div class="material-detail-timestamps">
+            创建：${escapeHtml(materialDate(material.created_at, true))}<br />
+            修改：${escapeHtml(materialDate(material.updated_at, true))}
+          </div>
+        </aside>
+        <section class="material-detail-form-panel">
+          <form id="material-detail-form" class="material-editor-grid">
+            <label class="material-field">
+              名称
+              <input class="modal-input" name="name" maxlength="80" value="${escapeHtml(material.name)}" required />
+            </label>
+            <label class="material-field">
+              类型
+              <select class="modal-input" name="material_type">${materialTypeOptions(material.material_type)}</select>
+            </label>
+            <label class="material-field wide">
+              简介
+              <textarea class="modal-input material-textarea" name="description" maxlength="300">${escapeHtml(material.description || "")}</textarea>
+            </label>
+            <label class="material-field wide">
+              素材正文
+              <textarea class="modal-input material-textarea content" name="content" maxlength="50000" required>${escapeHtml(material.content || "")}</textarea>
+            </label>
+            <label class="material-field wide">
+              提示词内容
+              <textarea class="modal-input material-textarea" name="prompt_text" maxlength="50000">${escapeHtml(material.prompt_text || "")}</textarea>
+            </label>
+            <label class="material-field wide">
+              负面提示词
+              <textarea class="modal-input material-textarea" name="negative_prompt" maxlength="20000">${escapeHtml(material.negative_prompt || "")}</textarea>
+            </label>
+            <div class="material-field wide">
+              标签
+              ${materialTagsEditor("material-detail-tags", Array.isArray(material.tags) ? material.tags : [])}
+            </div>
+            <label class="material-field">
+              验证状态
+              <select class="modal-input" name="validation_status">
+                <option value="unverified" ${material.validation_status !== "verified" ? "selected" : ""}>未验证</option>
+                <option value="verified" ${material.validation_status === "verified" ? "selected" : ""}>已验证</option>
+              </select>
+            </label>
+            <label class="material-field wide">
+              备注
+              <textarea class="modal-input material-textarea" name="notes" maxlength="5000">${escapeHtml(material.notes || "")}</textarea>
+            </label>
+            <div class="material-field wide">
+              预览图
+              ${materialPreviewPicker({
+                idPrefix: "material-detail",
+                previewUrl,
+                hasPreview: Boolean(previewUrl),
+              })}
+            </div>
+            <div class="material-editor-actions">
+              <span class="material-detail-save-status" role="status"></span>
+            </div>
+          </form>
+        </section>
+      </div>
+    `;
+  }
+
+  function materialComparablePayload(payload) {
+    return {
+      ...payload,
+      tags: [...(payload.tags || [])].map((tag) => tag.trim()).sort((a, b) => a.localeCompare(b)),
+    };
+  }
+
+  function updateMaterialDetailDirty() {
+    const form = document.getElementById("material-detail-form");
+    const save = document.getElementById("material-detail-save");
+    if (!form || !materialDetailState.material) return;
+    const current = JSON.stringify(materialComparablePayload(materialPayloadFromForm(form)));
+    materialDetailState.dirty = Boolean(
+      current !== materialDetailState.snapshot ||
+      materialDetailState.previewFile ||
+      materialDetailState.removePreview
+    );
+    if (save) save.disabled = !materialDetailState.dirty;
+    const status = form.querySelector(".material-detail-save-status");
+    if (status && materialDetailState.dirty && !status.classList.contains("error")) {
+      status.textContent = "有未保存修改";
+      status.className = "material-detail-save-status";
+    }
+  }
+
+  async function renderMaterialDetailPage() {
+    resetMaterialDetailState();
+    const runtime = document.getElementById("material-detail-runtime");
+    const save = document.getElementById("material-detail-save");
+    const remove = document.querySelector('[data-api-action="delete-current-material"]');
+    if (!runtime) return;
+    if (save) save.disabled = true;
+    if (remove) remove.disabled = true;
+    const materialId = new URLSearchParams(window.location.search).get("material");
+    if (!materialId) {
+      runtime.innerHTML = `
+        <section class="material-detail-state">
+          <span class="material-state-icon">?</span>
+          <h2>没有指定素材</h2>
+          <p>请从素材库打开一张素材卡片。</p>
+          <button class="btn soft" type="button" data-api-action="back-to-materials">返回素材库</button>
+        </section>
+      `;
+      return;
+    }
+    runtime.innerHTML = '<div class="material-detail-loading">正在读取素材详情…</div>';
+    try {
+      const payload = await request(`/api/materials/${materialId}`);
+      const material = payload.material || payload;
+      materialDetailState.material = material;
+      runtime.innerHTML = materialDetailForm(material);
+      const form = document.getElementById("material-detail-form");
+      bindMaterialTagsEditor(form.querySelector("#material-detail-tags"));
+      materialDetailState.snapshot = JSON.stringify(
+        materialComparablePayload(materialPayloadFromForm(form))
+      );
+      form.addEventListener("input", updateMaterialDetailDirty);
+      form.addEventListener("change", updateMaterialDetailDirty);
+      form.addEventListener("submit", submitMaterialDetail);
+      form.querySelector("#material-detail-preview-file")?.addEventListener("change", (event) => {
+        const file = event.target.files?.[0] || null;
+        if (!file) return;
+        const valid = previewMaterialFile(file, "material-detail", (url) => {
+          if (materialDetailState.objectUrl) URL.revokeObjectURL(materialDetailState.objectUrl);
+          materialDetailState.objectUrl = url;
+        });
+        if (valid) {
+          materialDetailState.previewFile = file;
+          materialDetailState.removePreview = false;
+          updateMaterialDetailDirty();
+        }
+      });
+      if (remove) {
+        remove.disabled = false;
+        remove.dataset.materialId = material.id;
+        remove.dataset.materialName = material.name;
+      }
+      const heading = document.querySelector(".page-header h1");
+      if (heading) heading.textContent = `素材详情 · ${material.name}`;
+    } catch (error) {
+      if (materialRequestIsMissing(error)) {
+        runtime.innerHTML = `
+          <section class="material-detail-state backend-missing">
+            <span class="material-state-icon">API</span>
+            <h2>素材库后端尚未完成</h2>
+            <p>前端详情页已经准备好，等待编程 AI 完成素材详情接口。</p>
+            <button class="btn soft" type="button" data-api-action="back-to-materials">返回素材库</button>
+          </section>
+        `;
+      } else if (Number(error.status) === 404) {
+        runtime.innerHTML = `
+          <section class="material-detail-state">
+            <span class="material-state-icon">?</span>
+            <h2>素材不存在</h2>
+            <p>该素材可能已经被删除，请返回素材库重新选择。</p>
+            <button class="btn soft" type="button" data-api-action="back-to-materials">返回素材库</button>
+          </section>
+        `;
+      } else {
+        runtime.innerHTML = `
+          <section class="material-detail-state">
+            <span class="material-state-icon">!</span>
+            <h2>素材详情加载失败</h2>
+            <p>${escapeHtml(error.message)}</p>
+            <button class="btn soft" type="button" data-api-action="back-to-materials">返回素材库</button>
+          </section>
+        `;
+      }
+    }
+  }
+
+  function materialChangedFields(current, original) {
+    const updates = {};
+    Object.keys(current).forEach((key) => {
+      if (JSON.stringify(current[key]) !== JSON.stringify(original[key])) {
+        updates[key] = current[key];
+      }
+    });
+    return updates;
+  }
+
+  async function submitMaterialDetail(event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const save = document.getElementById("material-detail-save");
+    const status = form.querySelector(".material-detail-save-status");
+    const current = materialPayloadFromForm(form);
+    const original = {
+      name: materialDetailState.material.name,
+      material_type: materialDetailState.material.material_type,
+      description: materialDetailState.material.description || "",
+      content: materialDetailState.material.content || "",
+      prompt_text: materialDetailState.material.prompt_text || "",
+      negative_prompt: materialDetailState.material.negative_prompt || "",
+      validation_status: materialDetailState.material.validation_status || "unverified",
+      notes: materialDetailState.material.notes || "",
+      tags: Array.isArray(materialDetailState.material.tags) ? materialDetailState.material.tags : [],
+    };
+    if (!current.name || !current.content.trim()) {
+      status.textContent = !current.name ? "名称不能为空" : "素材正文不能为空";
+      status.className = "material-detail-save-status error";
+      return;
+    }
+    save.disabled = true;
+    save.textContent = "保存中…";
+    status.textContent = "";
+    status.className = "material-detail-save-status";
+    try {
+      const updates = materialChangedFields(current, original);
+      if (Object.keys(updates).length) {
+        await request(`/api/materials/${materialDetailState.material.id}`, {
+          method: "PATCH",
+          body: JSON.stringify(updates),
+        });
+      }
+      if (materialDetailState.removePreview) {
+        await request(`/api/materials/${materialDetailState.material.id}/preview`, {
+          method: "DELETE",
+        });
+      } else if (materialDetailState.previewFile) {
+        await uploadMaterialPreview(
+          materialDetailState.material.id,
+          materialDetailState.previewFile
+        );
+      }
+      materialDetailState.dirty = false;
+      if (typeof showToast === "function") showToast("素材已保存");
+      await renderMaterialDetailPage();
+    } catch (error) {
+      status.textContent = error.message;
+      status.className = "material-detail-save-status error";
+      save.disabled = false;
+    } finally {
+      save.textContent = "保存修改";
+    }
+  }
+
+  function removePendingMaterialPreview(targetPrefix) {
+    const box = document.getElementById(`${targetPrefix}-preview-box`);
+    const file = document.getElementById(`${targetPrefix}-preview-file`);
+    const button = document.querySelector(
+      `[data-api-action="remove-material-preview"][data-preview-target="${targetPrefix}"]`
+    );
+    if (file) file.value = "";
+    if (box) box.innerHTML = "<span>无预览图</span>";
+    if (button) button.hidden = true;
+    if (targetPrefix === "material-create") {
+      if (materialCreateObjectUrl) URL.revokeObjectURL(materialCreateObjectUrl);
+      materialCreateObjectUrl = null;
+    } else {
+      if (materialDetailState.objectUrl) URL.revokeObjectURL(materialDetailState.objectUrl);
+      materialDetailState.objectUrl = null;
+      materialDetailState.previewFile = null;
+      materialDetailState.removePreview = Boolean(
+        materialDetailState.material?.preview_url ||
+        materialDetailState.material?.thumbnail_url
+      );
+      updateMaterialDetailDirty();
+    }
+  }
+
+  async function deleteMaterial(materialId, materialName, fromDetail = false) {
+    const confirmed = await confirmDialog({
+      title: "删除素材",
+      message: `确定删除素材「${materialName}」吗？素材正文、标签关联和预览图都会被删除。`,
+      confirmText: "删除",
+      danger: true,
+    });
+    if (!confirmed) return;
+    try {
+      await request(`/api/materials/${materialId}`, { method: "DELETE" });
+      if (typeof showToast === "function") showToast(`素材「${materialName}」已删除`);
+      if (fromDetail) {
+        materialDetailState.dirty = false;
+        navigateToMaterials();
+      } else {
+        await loadMaterials(false);
+      }
+    } catch (error) {
+      if (typeof showToast === "function") showToast(error.message);
+    }
+  }
+
+  async function leaveMaterialDetail() {
+    if (materialDetailState.dirty) {
+      const confirmed = await confirmDialog({
+        title: "放弃未保存修改",
+        message: "当前素材还有未保存的修改，确定返回素材库吗？",
+        confirmText: "放弃修改",
+        danger: true,
+      });
+      if (!confirmed) return;
+      materialDetailState.dirty = false;
+    }
+    navigateToMaterials();
+  }
+
   function ensureCharacterDetailModal() {
     let modal = document.getElementById("character-detail-modal");
     if (modal) return modal;
@@ -2202,12 +3242,23 @@
   }
 
   async function request(path, options) {
+    const isFormData = options?.body instanceof FormData;
     const response = await fetch(path, {
-      headers: { "Content-Type": "application/json" },
+      headers: isFormData ? {} : { "Content-Type": "application/json" },
       ...options,
     });
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.detail || "请求失败");
+    let payload = {};
+    try {
+      payload = await response.json();
+    } catch (error) {
+      payload = {};
+    }
+    if (!response.ok) {
+      const requestError = new Error(payload.detail || `请求失败（${response.status}）`);
+      requestError.status = response.status;
+      requestError.payload = payload;
+      throw requestError;
+    }
     return payload;
   }
 
@@ -2224,6 +3275,10 @@
         await renderProductionCharacters();
       } else if (pageKey === "character-database") {
         await renderCharacterDatabasePage();
+      } else if (pageKey === "materials") {
+        await renderMaterialsPage();
+      } else if (pageKey === "material-detail") {
+        await renderMaterialDetailPage();
       } else if (pageKey !== "settings") {
         const project = await resolveCurrentProject();
         applyProjectHeader(project, pageKey);
@@ -2300,6 +3355,58 @@
 
     const button = event.target.closest("[data-api-action]");
     if (!button || button.disabled) return;
+
+    if (button.dataset.apiAction === "open-material-modal") {
+      openMaterialCreateModal();
+      return;
+    }
+
+    if (button.dataset.apiAction === "close-material-modal") {
+      closeMaterialCreateModal();
+      return;
+    }
+
+    if (button.dataset.apiAction === "retry-materials") {
+      await loadMaterials(false);
+      return;
+    }
+
+    if (button.dataset.apiAction === "clear-material-filters") {
+      resetMaterialFilters();
+      return;
+    }
+
+    if (button.dataset.apiAction === "load-more-materials") {
+      await loadMaterials(true);
+      return;
+    }
+
+    if (button.dataset.apiAction === "delete-material") {
+      await deleteMaterial(
+        button.dataset.materialId,
+        button.dataset.materialName || "未命名素材"
+      );
+      return;
+    }
+
+    if (button.dataset.apiAction === "back-to-materials") {
+      await leaveMaterialDetail();
+      return;
+    }
+
+    if (button.dataset.apiAction === "delete-current-material") {
+      await deleteMaterial(
+        button.dataset.materialId,
+        button.dataset.materialName || "未命名素材",
+        true
+      );
+      return;
+    }
+
+    if (button.dataset.apiAction === "remove-material-preview") {
+      removePendingMaterialPreview(button.dataset.previewTarget);
+      return;
+    }
 
     if (button.dataset.apiAction === "open-project-modal") {
       openProjectModal();
@@ -2486,12 +3593,31 @@
     window.location.search = `?${params.toString()}`;
   });
 
+  document.addEventListener("click", (event) => {
+    const card = event.target.closest(".real-material-card");
+    if (!card || event.target.closest("button, a, input, select, textarea")) return;
+    navigateToMaterialDetail(card.dataset.materialId);
+  });
+
   document.addEventListener("keydown", (event) => {
     const card = event.target.closest(".real-project-card");
     if (!card || !["Enter", " "].includes(event.key)) return;
     event.preventDefault();
     card.click();
   });
+
+  document.addEventListener("keydown", (event) => {
+    const card = event.target.closest(".real-material-card");
+    if (!card || !["Enter", " "].includes(event.key)) return;
+    event.preventDefault();
+    navigateToMaterialDetail(card.dataset.materialId);
+  });
+
+  document.addEventListener("error", (event) => {
+    const image = event.target.closest?.(".material-card-preview img, .material-detail-preview-large img");
+    if (!image) return;
+    image.remove();
+  }, true);
 
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
@@ -2502,7 +3628,14 @@
       closeCharacterModal();
       closeRenameModal();
       closeConfirmDialog();
+      closeMaterialCreateModal();
     }
+  });
+
+  window.addEventListener("beforeunload", (event) => {
+    if (!materialDetailState.dirty) return;
+    event.preventDefault();
+    event.returnValue = "";
   });
 
   document.addEventListener("submit", async (event) => {
