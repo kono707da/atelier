@@ -739,6 +739,72 @@ button {
   font-size: 8px;
 }
 
+/* 大场景类型徽标 — 内容段突出（蓝），过渡段低调（灰） */
+.large-scene-type-badge {
+  display: inline-block;
+  margin-top: 6px;
+  padding: 2px 8px;
+  border-radius: 99px;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+}
+
+.large-scene-type-badge[data-scene-type="content"] {
+  background: rgba(111, 126, 213, 0.18);
+  color: #5463c4;
+}
+
+.large-scene-type-badge[data-scene-type="transition"] {
+  background: rgba(144, 152, 168, 0.18);
+  color: #6b7280;
+}
+
+/* 拖动把手 — 顶部横纹 */
+.large-scene-drag-handle {
+  position: absolute;
+  top: 0;
+  left: 12px;
+  right: 12px;
+  height: 6px;
+  border-radius: 99px 99px 0 0;
+  background: linear-gradient(90deg, #c4cbea 0%, #c4cbea 30%, transparent 30%, transparent 70%, #c4cbea 70%, #c4cbea 100%);
+  background-size: 12px 6px;
+  cursor: grab;
+  z-index: 2;
+}
+
+.large-scene-drag-handle:hover {
+  background: linear-gradient(90deg, #8a9bed 0%, #8a9bed 30%, transparent 30%, transparent 70%, #8a9bed 70%, #8a9bed 100%);
+  background-size: 12px 6px;
+}
+
+.large-scene-drag-handle:active {
+  cursor: grabbing;
+}
+
+/* 拖动中状态 */
+.large-scene-block.dragging {
+  opacity: 0.4;
+  cursor: grabbing;
+}
+
+/* 拖放区域高亮 */
+.large-scene-lane[data-drop-zone] {
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+/* 虚线占位指示器 */
+.large-scene-drop-indicator {
+  width: 168px;
+  min-height: 126px;
+  margin-right: 32px;
+  border: 2px dashed #6f7ed5;
+  border-radius: 17px;
+  background: rgba(111, 126, 213, 0.08);
+  flex-shrink: 0;
+}
+
 .structure-context-menu {
   position: fixed;
   z-index: 1500;
