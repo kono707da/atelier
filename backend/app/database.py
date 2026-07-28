@@ -12,6 +12,7 @@ from uuid import uuid4
 
 DatabaseEnvironment = Literal["production", "test"]
 VALID_ENVIRONMENTS: tuple[DatabaseEnvironment, ...] = ("production", "test")
+_UNSET = object()
 
 
 class DatabaseSafetyError(RuntimeError):
@@ -1568,7 +1569,7 @@ class DatabaseManager:
         *,
         prompt: str | None = None,
         lora_name: str | None = None,
-        lora_weight: float | None = None,
+        lora_weight: float | None | object = _UNSET,
         model_override: str | None = None,
         notes: str | None = None,
         environment: DatabaseEnvironment | None = None,
@@ -1590,8 +1591,8 @@ class DatabaseManager:
             if lora_name is not None:
                 sets.append("lora_name = ?")
                 params.append(lora_name)
-            if lora_weight is not None:
-                if lora_weight < 0 or lora_weight > 2:
+            if lora_weight is not _UNSET:
+                if lora_weight is not None and (lora_weight < 0 or lora_weight > 2):
                     raise ValueError("LoRA 权重必须在 0 到 2 之间。")
                 sets.append("lora_weight = ?")
                 params.append(lora_weight)

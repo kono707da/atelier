@@ -414,6 +414,24 @@ class ProjectSpecApiTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 422)
 
+    def test_lora_weight_can_be_cleared(self) -> None:
+        self.manager.create_spec("full_body")
+        char = self.manager.create_character("角色A", str(self.project["id"]))
+        variants = self.manager.list_character_variants(str(char["id"]))
+        values = self.manager.list_spec_values_for_variant(str(variants[0]["id"]))
+        spec_value_id = values[0]["id"]
+        first = self.client.patch(
+            f"/api/character-spec-values/{spec_value_id}",
+            json={"lora_weight": 0.82},
+        )
+        self.assertEqual(first.status_code, 200)
+        cleared = self.client.patch(
+            f"/api/character-spec-values/{spec_value_id}",
+            json={"lora_weight": None},
+        )
+        self.assertEqual(cleared.status_code, 200)
+        self.assertIsNone(cleared.json()["spec_value"]["lora_weight"])
+
 
 class CharacterSpecValueIsolationTests(unittest.TestCase):
     def setUp(self) -> None:

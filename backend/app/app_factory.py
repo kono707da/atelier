@@ -683,13 +683,10 @@ def create_app(
         if manager.get_character_spec_value(spec_value_id) is None:
             raise HTTPException(status_code=404, detail="规格值不存在。")
         try:
+            updates = request.model_dump(exclude_unset=True)
             value = manager.update_character_spec_value(
                 spec_value_id,
-                prompt=request.prompt,
-                lora_name=request.lora_name,
-                lora_weight=request.lora_weight,
-                model_override=request.model_override,
-                notes=request.notes,
+                **updates,
             )
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error

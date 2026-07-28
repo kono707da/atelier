@@ -486,6 +486,67 @@
     `;
   }
 
+  function specValueEditor(value) {
+    const label = specLabel(value);
+    const weight = value.lora_weight === null || value.lora_weight === undefined
+      ? ""
+      : String(value.lora_weight);
+    const filled = Boolean(
+      value.prompt ||
+      value.lora_name ||
+      value.model_override ||
+      value.notes ||
+      weight
+    );
+    return `
+      <form
+        class="character-spec-editor"
+        data-inline-action="save-spec-value"
+        data-spec-value-id="${escapeHtml(value.id)}"
+      >
+        <div class="character-spec-editor-head">
+          <div
+            class="character-spec-editor-title"
+            data-context-menu="project-spec"
+            data-spec-id="${escapeHtml(value.spec_id)}"
+            data-name="${escapeHtml(label)}"
+            data-spec-type="${escapeHtml(value.spec_type)}"
+          >
+            <strong>${escapeHtml(label)}</strong>
+            <span>${escapeHtml(specTypeLabels[value.spec_type] || value.spec_type)}</span>
+          </div>
+          <span class="spec-fill-state ${filled ? "filled" : ""}">${filled ? "已填写" : "未填写"}</span>
+        </div>
+        <label class="character-spec-field character-spec-field-wide">
+          <span>提示词</span>
+          <textarea name="prompt" rows="3" placeholder="输入当前人物、当前变体在这个景别下使用的提示词">${escapeHtml(value.prompt || "")}</textarea>
+        </label>
+        <div class="character-spec-field-grid">
+          <label class="character-spec-field">
+            <span>LoRA 文件</span>
+            <input name="lora_name" type="text" value="${escapeHtml(value.lora_name || "")}" placeholder="例如：character.safetensors" />
+          </label>
+          <label class="character-spec-field">
+            <span>LoRA 权重</span>
+            <input name="lora_weight" type="number" min="0" max="2" step="0.01" value="${escapeHtml(weight)}" placeholder="例如：0.8" />
+          </label>
+          <label class="character-spec-field character-spec-field-wide">
+            <span>模型覆盖</span>
+            <input name="model_override" type="text" value="${escapeHtml(value.model_override || "")}" placeholder="留空则使用工作流默认模型" />
+          </label>
+        </div>
+        <label class="character-spec-field character-spec-field-wide">
+          <span>备注</span>
+          <textarea name="notes" rows="2" placeholder="只供自己查看的使用说明">${escapeHtml(value.notes || "")}</textarea>
+        </label>
+        <div class="character-spec-editor-actions">
+          <span class="spec-save-status" role="status"></span>
+          <button class="btn small primary" type="submit">保存此规格</button>
+        </div>
+      </form>
+    `;
+  }
+
   function characterExpandedPanel(character, variants, specs) {
     const defaultVariant = variants.find((v) => Number(v.is_default) === 1) || variants[0];
     const activeVariantId = defaultVariant ? defaultVariant.id : "";
@@ -510,9 +571,15 @@
             </div>
             <button class="btn small soft" type="button" data-api-action="add-spec" data-project-id="${escapeHtml(character.project_id)}">添加规格</button>
           </div>
-          <ul class="character-spec-list">
-            ${specs.map(specRow).join("")}
-          </ul>
+          <div
+            class="character-spec-editor-list"
+            data-variant-spec-values
+            data-active-variant-id="${escapeHtml(activeVariantId)}"
+          >
+            ${activeVariantId
+              ? '<div class="character-spec-editor-loading">正在读取规格内容…</div>'
+              : '<div class="character-spec-editor-empty">请先创建一个形象变体。</div>'}
+          </div>
           <form class="character-inline-form" data-inline-action="create-spec" data-project-id="${escapeHtml(character.project_id)}" hidden>
             <label class="label">类型</label>
             <select class="modal-input" name="spec_type">
@@ -529,6 +596,34 @@
         </div>
       </section>
     `;
+  }
+
+  async function renderVariantSpecValues(variantId, variantName) {
+    const modal = document.getElementById("character-detail-modal");
+    if (!modal || modal.hidden) return;
+    const list = modal.querySelector("[data-variant-spec-values]");
+    if (!list) return;
+    list.dataset.activeVariantId = variantId;
+    list.innerHTML = '<div class="character-spec-editor-loading">正在读取规格内容…</div>';
+    try {
+      const payload = await request(`/api/character-variants/${variantId}/spec-values`);
+      if (list.dataset.activeVariantId !== variantId) return;
+      list.innerHTML = payload.total
+        ? payload.items.map(specValueEditor).join("")
+        : '<div class="character-spec-editor-empty">还没有规格。请先点击右上角“添加规格”。</div>';
+      const sub = modal.querySelector(".character-expanded-sub");
+      if (sub) {
+        sub.textContent = `${payload.total} 个规格 · 全局共享 · 当前变体：${variantName || ""}`;
+      }
+    } catch (error) {
+      if (list.dataset.activeVariantId !== variantId) return;
+      list.innerHTML = `
+        <div class="character-spec-editor-error">
+          <span>规格内容加载失败：${escapeHtml(error.message)}</span>
+          <button class="btn small" type="button" data-api-action="retry-spec-values" data-variant-id="${escapeHtml(variantId)}" data-variant-name="${escapeHtml(variantName || "")}">重新加载</button>
+        </div>
+      `;
+    }
   }
 
   function variantTab(variant, isActive) {
@@ -965,7 +1060,13 @@
         request(`/api/specs`),
       ]);
       const character = characterPayload.character;
-      const stats = characterPayload.stats || { variant_count: variantsPayload.items.length, spec_total: 0, spec_filled: 0 };
+      const stats =
+        character.stats ||
+        characterPayload.stats ||
+        { variant_count: variantsPayload.items.length, spec_total: 0, spec_filled: 0 };
+      const defaultVariant =
+        variantsPayload.items.find((variant) => Number(variant.is_default) === 1) ||
+        variantsPayload.items[0];
       body.innerHTML = `
         <div class="character-detail-modal-header">
           <div class="header-thumb"></div>
@@ -979,6 +1080,9 @@
           ${characterExpandedPanel(character, variantsPayload.items, specsPayload.items)}
         </div>
       `;
+      if (defaultVariant) {
+        await renderVariantSpecValues(defaultVariant.id, defaultVariant.name);
+      }
     } catch (error) {
       body.innerHTML = `<div style="padding:24px;color:#c33;">加载失败：${escapeHtml(error.message)}</div>`;
     }
@@ -2235,13 +2339,21 @@
     }
 
     if (button.dataset.apiAction === "select-variant") {
-      document.querySelectorAll(".variant-tab.active").forEach((tab) => tab.classList.remove("active"));
+      const modal = document.getElementById("character-detail-modal");
+      modal?.querySelectorAll(".variant-tab.active").forEach((tab) => tab.classList.remove("active"));
       button.classList.add("active");
-      const sub = document.querySelector(".character-expanded-sub");
-      if (sub) {
-        const specsCount = document.querySelectorAll(".character-spec-list .character-spec-row").length;
-        sub.textContent = `${specsCount} 个规格 · 全项目共享 · 当前变体：${button.dataset.variantName || ""}`;
-      }
+      await renderVariantSpecValues(
+        button.dataset.variantId,
+        button.dataset.variantName || ""
+      );
+      return;
+    }
+
+    if (button.dataset.apiAction === "retry-spec-values") {
+      await renderVariantSpecValues(
+        button.dataset.variantId,
+        button.dataset.variantName || ""
+      );
       return;
     }
 
@@ -2382,6 +2494,9 @@
     } else if (action === "create-spec") {
       event.preventDefault();
       await submitInlineSpec(form);
+    } else if (action === "save-spec-value") {
+      event.preventDefault();
+      await submitCharacterSpecValue(form);
     }
   });
 
@@ -2447,6 +2562,63 @@
     } finally {
       submit.disabled = false;
       submit.textContent = "创建";
+    }
+  }
+
+  async function submitCharacterSpecValue(form) {
+    const submit = form.querySelector('button[type="submit"]');
+    const status = form.querySelector(".spec-save-status");
+    const weightInput = form.elements.lora_weight;
+    const weightText = weightInput.value.trim();
+    const loraWeight = weightText === "" ? null : Number(weightText);
+    if (
+      loraWeight !== null &&
+      (!Number.isFinite(loraWeight) || loraWeight < 0 || loraWeight > 2)
+    ) {
+      status.textContent = "权重必须在 0 到 2 之间";
+      status.className = "spec-save-status error";
+      weightInput.focus();
+      return;
+    }
+
+    const payload = {
+      prompt: form.elements.prompt.value,
+      lora_name: form.elements.lora_name.value.trim(),
+      lora_weight: loraWeight,
+      model_override: form.elements.model_override.value.trim(),
+      notes: form.elements.notes.value,
+    };
+
+    submit.disabled = true;
+    submit.textContent = "保存中…";
+    status.textContent = "";
+    status.className = "spec-save-status";
+    try {
+      await request(`/api/character-spec-values/${form.dataset.specValueId}`, {
+        method: "PATCH",
+        body: JSON.stringify(payload),
+      });
+      const filled = Boolean(
+        payload.prompt ||
+        payload.lora_name ||
+        payload.lora_weight !== null ||
+        payload.model_override ||
+        payload.notes
+      );
+      const fillState = form.querySelector(".spec-fill-state");
+      if (fillState) {
+        fillState.textContent = filled ? "已填写" : "未填写";
+        fillState.classList.toggle("filled", filled);
+      }
+      status.textContent = "已保存";
+      status.className = "spec-save-status success";
+      if (typeof showToast === "function") showToast("人物规格已保存");
+    } catch (requestError) {
+      status.textContent = requestError.message;
+      status.className = "spec-save-status error";
+    } finally {
+      submit.disabled = false;
+      submit.textContent = "保存此规格";
     }
   }
 
