@@ -2417,3 +2417,92 @@ Atelier 的正式开发被划分为 **7 个阶段**。阶段编号从 1 到 7，
 后续开发以“当前代码能够运行”为起点，以本文档描述的完整 Atelier 为终点。小场景画布第三轮整改按用户要求视为已经通过，但其他模块仍必须逐项实现、测试和验收。
 
 功能全部完成后，先做一次覆盖前端、后端、数据库、ComfyUI、任务恢复、图片规模和导出的总验收；再由用户决定是否重写前端视觉样式。任何视觉重写都不能替代功能验收，也不能破坏已经建立的数据和业务契约。
+
+---
+
+## 26. 阶段交付报告
+
+### 26.1 阶段 1.1 基础约束和迁移能力
+
+- **阶段编号和名称**：阶段 1.1 基础约束和迁移能力
+- **分支**：`dev-260729-GLM5.2-全功能开发`（从 `GLM-MAIN` 拉取新建，不合并到 main 和 GLM-MAIN）
+- **版本**：v0.4.3 → v0.5.0
+- **提交**：`e246c3b`
+
+#### 实际完成模块
+
+1. **版本化数据库迁移框架**：新增 `schema_migrations` 表和 `_run_migration` 方法，整合 6 个历史迁移到版本化框架（v0.1.7/v0.2.0/v0.4.0/v0.4.1/v0.4.1.1/v0.4.1.2），新增 v0.5.0 迁移。迁移函数每次 initialize 都执行（必须幂等），版本记录只插入一次，支持手动破坏后的数据修复。
+2. **9 张核心编辑表 revision 字段**：为 projects/chapters/large_scenes/small_scenes/shot_pages/materials/material_pages/characters/character_variants 添加 `revision INTEGER NOT NULL DEFAULT 1` 字段，为后续乐观并发控制做准备。
+3. **统一 API 错误响应 + request ID 中间件**：新增 4 个全局异常处理器（StarletteHTTPException/RequestValidationError/DatabaseSafetyError/Exception），统一错误格式 `{detail, error:{code,message,details,request_id}}`，每个请求注入 X-Request-ID 响应头。
+4. **移除前端环境切换 UI**：移除顶部 environment-pill、设置页数据库切换面板、activate-database 事件处理器，界面只连接生产数据库。
+5. **前端集中 API 客户端**：新增 API 路径常量对象（40+ 路由），增强 request 函数支持新错误格式和 request_id。
+6. **固化测试隔离保护**：新增 `IsolatedTestCase` 基类自动创建临时目录并锁定 test 环境，文档化测试隔离约定。
+
+#### 未完成或延期模块
+
+无。阶段 1.1 的 7 项任务（对应需求 21.5.1.1 的 1/3/4/5/6/7 项，第 2 项"清除展示数据回退"经盘点确认现有代码不存在自动回退行为，无需修改）全部完成。
+
+#### 数据库迁移版本
+
+- 新增 `schema_migrations` 表
+- v0.5.0：为 9 张核心编辑表添加 revision 字段（幂等迁移）
+- 历史迁移整合到版本化框架：v0.1.7、v0.2.0、v0.4.0、v0.4.1、v0.4.1.1、v0.4.1.2
+
+#### 新增和变更 API
+
+- 无新增业务 API 路由
+- 所有 API 响应头新增 `X-Request-ID`
+- 所有错误响应新增 `error` 结构（保留 `detail` 字段兼容旧客户端）
+
+#### 前端页面和操作路径
+
+- 设置页（`?page=settings`）：数据库环境面板重写，移除双数据库切换卡片，改为说明「界面只连接生产数据库」
+- 顶部栏：移除 environment-pill 环境标识
+- 前端代码：新增 API 路径常量对象，增强 request 函数错误处理
+
+#### 自动化测试命令与结果
+
+```bash
+# 后端全量测试
+$env:PYTHONPATH = "c:\Users\kono707da\Documents\AICode\atelier"
+python -m unittest discover -s backend\tests -p "test_*.py" -t c:\Users\kono707da\Documents\AICode\atelier
+```
+
+结果：**410 passed**（原 392 + 新增 18，无回归）
+
+新增测试文件 `backend/tests/test_foundation_constraints.py`（18 个用例）：
+- `SchemaMigrationsTests`（4 用例）：表存在、版本记录、不重复插入、幂等迁移
+- `RevisionColumnTests`（3 用例）：9 张表有 revision 列、默认值 1、旧数据库迁移
+- `RequestIdMiddlewareTests`（3 用例）：响应头存在、客户端 ID 保留、生成 UUID hex
+- `UnifiedErrorResponseTests`（6 用例）：error 结构、404/409/422 错误码、request_id 一致性、数据库安全错误
+- `IsolatedTestCaseTests`（2 用例）：基类提供 app/client/manager、使用临时目录
+
+前端语法校验：
+```bash
+node --check design\ui-preview\app.js
+node --check design\ui-preview\runtime-api.js
+```
+结果：通过
+
+#### 真实浏览器验收结果
+
+未执行。阶段 1.1 为基础设施改造，无新业务页面，建议在阶段 1.2 项目管理闭环完成后统一进行浏览器验收。
+
+#### 已知问题和风险
+
+1. **Git 推送失败**：提交 `e246c3b` 已创建到本地，但推送到远程失败（GitHub 网络不可达，直连和 7890/7897 代理均失败）。网络恢复后需执行 `git push -u origin dev-260729-GLM5.2-全功能开发`。
+2. **revision 字段未启用校验**：本次只添加字段和迁移，未在更新逻辑中加入版本校验。将在后续阶段的编辑接口中逐步启用 `expected_revision` 校验。
+3. **API 常量未强制替换**：现有前端代码仍使用硬编码字符串，API 常量对象供新代码使用，现有调用逐步迁移。
+
+#### Git 分支和提交状态
+
+- 分支：`dev-260729-GLM5.2-全功能开发`
+- 提交：`e246c3b`（本地，未推送）
+- 是否合并到 main：否
+- 是否合并到 GLM-MAIN：否
+
+#### 是否满足进入下一阶段的门槛
+
+满足。阶段 1.1 的 7 项任务全部完成，410 项测试全部通过，无回归。已建立版本化迁移框架、revision 字段、统一错误响应和测试隔离基类，为阶段 1.2 项目管理闭环提供了基础设施保障。
+
+**是否确认进入下一阶段？**
