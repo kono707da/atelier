@@ -1915,13 +1915,54 @@ button {
 }
 
 .character-database-results {
-  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+  overflow: hidden;
+}
+
+.character-database-scroll {
+  max-height: 70vh;
+  overflow: auto;
+  /* clip-path 强制把滚动条也裁剪成圆角，避免遮挡外层圆角 */
+  clip-path: inset(0 round 10px);
+}
+
+/* WebKit 滚动条样式 */
+.character-database-scroll::-webkit-scrollbar {
+  width: 8px;
+}
+.character-database-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.character-database-scroll::-webkit-scrollbar-thumb {
+  background: #c1c7d4;
+  border-radius: 4px;
+}
+.character-database-scroll::-webkit-scrollbar-thumb:hover {
+  background: #a8b0c0;
 }
 
 .character-database-table {
   width: 100%;
-  border-collapse: collapse;
+  border-collapse: separate;
+  border-spacing: 0;
   font-size: 11px;
+}
+
+.character-database-table thead {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #f4f6fa;
+}
+
+.character-database-table thead th:first-child {
+  border-top-left-radius: 10px;
+}
+
+.character-database-table thead th:last-child {
+  border-top-right-radius: 10px;
 }
 
 .character-database-table th {
@@ -1942,6 +1983,10 @@ button {
   vertical-align: top;
   word-break: break-word;
   line-height: 1.5;
+}
+
+.character-database-table tbody tr:last-child td {
+  border-bottom: none;
 }
 
 .character-database-table tbody tr:hover {
@@ -1971,17 +2016,24 @@ button {
   font-size: 12px;
 }
 
-.character-database-pagination {
+.character-database-sentinel {
+  min-height: 32px;
   display: flex;
   align-items: center;
-  gap: 10px;
   justify-content: center;
-  margin-top: 14px;
 }
 
-.character-database-page-info {
-  color: #687186;
+.character-database-loading-more,
+.character-database-end,
+.character-database-loading-error {
+  padding: 12px;
+  text-align: center;
+  color: #8c94a5;
   font-size: 11px;
+}
+
+.character-database-loading-error {
+  color: #c33;
 }
 
 .atelier-modal.character-detail-modal {

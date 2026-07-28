@@ -366,7 +366,6 @@ function characterDatabasePage() {
         </form>
         <div class="character-database-meta" id="character-database-meta"></div>
         <div class="character-database-results" id="character-database-results"></div>
-        <div class="character-database-pagination" id="character-database-pagination"></div>
       </div>
     </section>
   </div>`;
@@ -860,6 +859,7 @@ document.addEventListener("click", (event) => {
   const button = event.target.closest("button");
   if (
     !button ||
+    button.type === "submit" ||
     button.closest("[data-page]") ||
     button.closest(".atelier-modal-backdrop") ||
     button.dataset.apiAction
