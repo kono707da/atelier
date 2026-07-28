@@ -1970,15 +1970,95 @@ button {
   gap: 14px;
 }
 
-@media (min-width: 900px) {
-  .character-expanded {
-    flex-direction: row;
-    align-items: stretch;
-  }
-  .character-expanded-column {
-    flex: 1 1 0;
-    min-width: 0;
-  }
+.variant-tabs-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 12px;
+}
+
+.variant-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.variant-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  color: #6b7488;
+  font-size: 11px;
+  font-weight: 600;
+  background: #fff;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.variant-tab:hover {
+  border-color: var(--line-strong);
+  color: #4d576b;
+}
+
+.variant-tab.active {
+  border-color: transparent;
+  color: #fff;
+  background: linear-gradient(135deg, #5574f5, #745ef0);
+  box-shadow: 0 4px 12px rgba(86, 102, 234, 0.22);
+}
+
+.variant-tab-name {
+  white-space: nowrap;
+}
+
+.variant-tab-default {
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 9px;
+  font-weight: 700;
+  background: rgba(255, 255, 255, 0.25);
+}
+
+.variant-tab:not(.active) .variant-tab-default {
+  background: var(--blue-soft);
+  color: var(--blue);
+}
+
+.variant-tab-add {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 9px;
+  color: #8c94a5;
+  font-size: 16px;
+  font-weight: 600;
+  background: transparent;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.variant-tab-add:hover {
+  border-color: var(--blue);
+  color: var(--blue);
+  border-style: solid;
+}
+
+.variant-tab-form {
+  margin-left: 0;
+}
+
+.character-expanded-main {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 .atelier-modal.confirm-dialog .confirm-icon {

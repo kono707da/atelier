@@ -480,30 +480,26 @@
   }
 
   function characterExpandedPanel(character, variants, specs) {
+    const defaultVariant = variants.find((v) => Number(v.is_default) === 1) || variants[0];
+    const activeVariantId = defaultVariant ? defaultVariant.id : "";
     return `
       <section class="character-expanded" data-character-id="${escapeHtml(character.id)}">
-        <div class="character-expanded-column">
-          <div class="character-expanded-head">
-            <div>
-              <div class="character-expanded-title">形象变体</div>
-              <div class="character-expanded-sub">${variants.length} 个变体 · 第一个为默认</div>
-            </div>
-            <button class="btn small soft" type="button" data-api-action="add-variant" data-character-id="${escapeHtml(character.id)}">添加变体</button>
+        <div class="variant-tabs-bar">
+          <div class="variant-tabs" role="tablist">
+            ${variants.map((v) => variantTab(v, v.id === activeVariantId)).join("")}
+            <button class="variant-tab-add" type="button" data-api-action="add-variant" data-character-id="${escapeHtml(character.id)}" aria-label="添加变体">+</button>
           </div>
-          <ul class="character-variant-list">
-            ${variants.map(variantRow).join("")}
-          </ul>
-          <form class="character-inline-form" data-inline-action="create-variant" data-character-id="${escapeHtml(character.id)}" hidden>
+          <form class="character-inline-form variant-tab-form" data-inline-action="create-variant" data-character-id="${escapeHtml(character.id)}" hidden>
             <input class="modal-input" name="name" maxlength="80" autocomplete="off" placeholder="例如：裙装" required />
             <button class="btn small primary" type="submit">创建</button>
             <button class="btn small" type="button" data-api-action="cancel-add-variant">取消</button>
           </form>
         </div>
-        <div class="character-expanded-column">
+        <div class="character-expanded-main">
           <div class="character-expanded-head">
             <div>
               <div class="character-expanded-title">项目规格</div>
-              <div class="character-expanded-sub">${specs.length} 个规格 · 全项目共享</div>
+              <div class="character-expanded-sub">${specs.length} 个规格 · 全项目共享 · 当前变体：${escapeHtml(defaultVariant ? defaultVariant.name : "无")}</div>
             </div>
             <button class="btn small soft" type="button" data-api-action="add-spec" data-project-id="${escapeHtml(character.project_id)}">添加规格</button>
           </div>
@@ -525,6 +521,26 @@
           </form>
         </div>
       </section>
+    `;
+  }
+
+  function variantTab(variant, isActive) {
+    const isDefault = Number(variant.is_default) === 1;
+    return `
+      <button
+        class="variant-tab${isActive ? " active" : ""}"
+        type="button"
+        role="tab"
+        data-api-action="select-variant"
+        data-variant-id="${escapeHtml(variant.id)}"
+        data-variant-name="${escapeHtml(variant.name)}"
+        data-context-menu="character-variant"
+        data-name="${escapeHtml(variant.name)}"
+        data-is-default="${isDefault ? "1" : "0"}"
+      >
+        <span class="variant-tab-name">${escapeHtml(variant.name)}</span>
+        ${isDefault ? '<span class="variant-tab-default">默认</span>' : ""}
+      </button>
     `;
   }
 
@@ -1679,6 +1695,17 @@
       const card = button.closest(".character-block");
       if (card && card.dataset.characterId) {
         renderCharacterDetail(card.dataset.characterId);
+      }
+      return;
+    }
+
+    if (button.dataset.apiAction === "select-variant") {
+      document.querySelectorAll(".variant-tab.active").forEach((tab) => tab.classList.remove("active"));
+      button.classList.add("active");
+      const sub = document.querySelector(".character-expanded-sub");
+      if (sub) {
+        const specsCount = document.querySelectorAll(".character-spec-list .character-spec-row").length;
+        sub.textContent = `${specsCount} 个规格 · 全项目共享 · 当前变体：${button.dataset.variantName || ""}`;
       }
       return;
     }
