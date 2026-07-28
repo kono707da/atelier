@@ -305,70 +305,258 @@
     const typeLabel = sceneType === "transition" ? "过渡段" : "内容段";
     return `
       <article
-        class="large-scene-block scene-type-${sceneType}"
+        class="story-block large-scene-block scene-type-${sceneType}"
         data-large-scene-id="${escapeHtml(largeScene.id)}"
         data-chapter-id="${escapeHtml(largeScene.chapter_id)}"
+        data-chapter-name="${escapeHtml(largeScene.chapter_name || "")}"
         data-scene-type="${escapeHtml(sceneType)}"
+        data-sort-order="${escapeHtml(largeScene.sort_order)}"
+        data-inspector-kind="large-scene"
         data-context-menu="large-scene"
         data-name="${escapeHtml(largeScene.name)}"
         draggable="true"
       >
         <div class="large-scene-drag-handle" aria-label="拖动大场景调整顺序或跨章节移动" title="拖动以调整顺序"></div>
-        <div class="large-scene-kicker">大场景 ${String(largeScene.sort_order).padStart(2, "0")}</div>
-        <div class="large-scene-type-badge" data-scene-type="${escapeHtml(sceneType)}">${typeLabel}</div>
-        <div class="large-scene-name">${escapeHtml(largeScene.name)}</div>
-        <div class="large-scene-meta">尚未添加小场景</div>
+        <div class="block-kicker">大场景 ${String(largeScene.sort_order).padStart(2, "0")}</div>
+        <div class="block-title">${escapeHtml(largeScene.name)}</div>
+        <div class="block-meta">尚未添加小场景</div>
+        <div class="block-footer">
+          <span class="large-scene-type-badge" data-scene-type="${escapeHtml(sceneType)}">${typeLabel}</span>
+        </div>
       </article>
     `;
   }
 
   function chapterBlock(chapter) {
     const largeScenes = chapter.large_scenes || [];
-    const addLargeSceneButton = `
-      <button
-        class="btn compact"
-        data-api-action="open-large-scene-modal"
-        data-chapter-id="${escapeHtml(chapter.id)}"
-        data-chapter-name="${escapeHtml(chapter.name)}"
-      >添加大场景</button>
+    const addLargeSceneNode = `
+      <div class="large-scene-add-card story-add-node">
+        <button
+          class="btn compact"
+          data-api-action="open-large-scene-modal"
+          data-chapter-id="${escapeHtml(chapter.id)}"
+          data-chapter-name="${escapeHtml(chapter.name)}"
+        >＋ 大场景</button>
+      </div>
     `;
     return `
-      <section class="real-chapter-section" data-chapter-id="${escapeHtml(chapter.id)}">
+      <section class="story-chapter-group" data-chapter-id="${escapeHtml(chapter.id)}">
         <article
-          class="real-chapter-block"
+          class="story-block chapter real-chapter-block"
           data-context-menu="chapter"
+          data-inspector-kind="chapter"
           data-chapter-id="${escapeHtml(chapter.id)}"
           data-name="${escapeHtml(chapter.name)}"
+          data-sort-order="${escapeHtml(chapter.sort_order)}"
           data-large-scene-count="${largeScenes.length}"
         >
-          <div class="real-chapter-kicker">章节 ${String(chapter.sort_order).padStart(2, "0")}</div>
-          <div class="real-chapter-name">${escapeHtml(chapter.name)}</div>
-          <div class="real-chapter-meta">${largeScenes.length} 个大场景</div>
+          <div class="block-kicker">章节 ${String(chapter.sort_order).padStart(2, "0")}</div>
+          <div class="block-title">${escapeHtml(chapter.name)}</div>
+          <div class="block-meta">${largeScenes.length} 个大场景</div>
         </article>
         <div class="chapter-scene-connector" aria-hidden="true"></div>
-        <div class="large-scene-lane" data-drop-zone data-chapter-id="${escapeHtml(chapter.id)}">
-          ${
-            largeScenes.length
-              ? `
-                <div class="large-scene-track" data-drop-zone data-chapter-id="${escapeHtml(chapter.id)}">
-                  ${largeScenes.map(largeSceneBlock).join("")}
-                  <div class="large-scene-add-card">${addLargeSceneButton}</div>
-                </div>
-              `
-              : `
-                <div class="large-scene-empty" data-drop-zone data-chapter-id="${escapeHtml(chapter.id)}">
-                  <span>这个章节还没有大场景</span>
-                  ${addLargeSceneButton}
-                </div>
-              `
-          }
+        <div
+          class="large-scene-track story-scene-track"
+          data-drop-zone
+          data-chapter-id="${escapeHtml(chapter.id)}"
+        >
+          ${largeScenes.map((largeScene) => largeSceneBlock({
+            ...largeScene,
+            chapter_name: chapter.name,
+          })).join("")}
+          ${addLargeSceneNode}
         </div>
       </section>
     `;
   }
 
+  function storyCanvasPalette(chapterItems) {
+    const firstChapter = chapterItems[0] || null;
+    return `
+      <section class="panel story-palette-panel">
+        <div class="panel-header">
+          <div>
+            <div class="panel-title">积木与场景包</div>
+            <div class="panel-sub">点击添加到主线</div>
+          </div>
+        </div>
+        <div class="palette-list">
+          <button class="palette-item" type="button" data-api-action="open-chapter-modal">
+            <span class="palette-swatch"></span>
+            <span>章节</span>
+            <span class="palette-item-mark">＋</span>
+          </button>
+          <button
+            class="palette-item"
+            id="story-palette-large-scene"
+            type="button"
+            data-api-action="open-large-scene-modal"
+            data-chapter-id="${firstChapter ? escapeHtml(firstChapter.id) : ""}"
+            data-chapter-name="${firstChapter ? escapeHtml(firstChapter.name) : ""}"
+            ${firstChapter ? "" : "disabled"}
+          >
+            <span class="palette-swatch green"></span>
+            <span>大场景</span>
+            <span class="palette-item-mark">＋</span>
+          </button>
+        </div>
+        <div class="story-palette-note">
+          节点只沿主线排序，拖动大场景可调整顺序或移动到其他章节。
+        </div>
+      </section>
+    `;
+  }
+
+  function storyCanvasInspectorPlaceholder() {
+    return `
+      <section class="panel inspector story-runtime-inspector" id="story-runtime-inspector">
+        <div class="panel-header">
+          <div>
+            <div class="panel-title">未选择节点</div>
+            <div class="panel-sub">在画布中选择章节或大场景</div>
+          </div>
+        </div>
+        <div class="story-inspector-placeholder">
+          <span class="story-inspector-placeholder-icon">⌁</span>
+          <p>选择一个结构节点后，这里会显示真实信息和可用操作。</p>
+        </div>
+      </section>
+    `;
+  }
+
+  function storyCanvasEmptyStage() {
+    return `
+      <div class="story-canvas-empty-node">
+        <span class="story-canvas-empty-icon">CH</span>
+        <strong>主线还是空的</strong>
+        <p>从左侧添加第一个章节。</p>
+        <button class="btn primary" type="button" data-api-action="open-chapter-modal">新建章节</button>
+      </div>
+    `;
+  }
+
+  function storyCanvasWorkspace(chapterItems, chapterTotal, largeSceneTotal) {
+    return `
+      <div class="three-pane story-canvas-three-pane">
+        ${storyCanvasPalette(chapterItems)}
+        <section class="panel story-canvas-center-panel">
+          <div class="toolbar story-canvas-toolbar">
+            <span class="tool active">主线</span>
+            <span class="story-toolbar-count">${chapterTotal} 个章节 · ${largeSceneTotal} 个大场景</span>
+            <span class="spacer"></span>
+            <button class="tool" type="button" data-story-canvas-action="zoom-out" title="缩小画布" aria-label="缩小画布">−</button>
+            <button class="tool story-zoom-label" type="button" data-story-canvas-action="zoom-reset" id="story-canvas-zoom-label" title="恢复 100%">100%</button>
+            <button class="tool" type="button" data-story-canvas-action="zoom-in" title="放大画布" aria-label="放大画布">＋</button>
+            <button class="tool" type="button" data-story-canvas-action="fit">自动整理</button>
+          </div>
+          <div class="canvas real-story-viewport" id="story-canvas-viewport" aria-label="剧本结构画布">
+            <div class="story-canvas-surface" id="story-canvas-surface">
+              <div class="real-story-stack story-runtime-stage">
+                ${
+                  chapterItems.length
+                    ? `<div class="story-runtime-spine" aria-hidden="true"></div>${chapterItems.map(chapterBlock).join("")}`
+                    : storyCanvasEmptyStage()
+                }
+              </div>
+            </div>
+            <div class="story-canvas-hint">拖动空白处移动 · Ctrl/⌘ + 滚轮缩放</div>
+          </div>
+        </section>
+        ${storyCanvasInspectorPlaceholder()}
+      </div>
+    `;
+  }
+
+  function updateStoryCanvasInspector(node) {
+    const inspector = document.getElementById("story-runtime-inspector");
+    if (!inspector || !node) return;
+    const kind = node.dataset.inspectorKind;
+    const name = node.dataset.name || "未命名";
+    const id = kind === "chapter"
+      ? node.dataset.chapterId
+      : node.dataset.largeSceneId;
+    const order = Number(node.dataset.sortOrder || 0);
+    const isChapter = kind === "chapter";
+    const chapterId = isChapter ? id : node.dataset.chapterId;
+    const chapterName = isChapter ? name : node.dataset.chapterName || "";
+    const typeLabel = node.dataset.sceneType === "transition" ? "过渡段" : "内容段";
+    inspector.innerHTML = `
+      <div class="panel-header">
+        <div>
+          <div class="panel-title">${escapeHtml(name)}</div>
+          <div class="panel-sub">${isChapter ? "章节" : "大场景"} ${String(order).padStart(2, "0")} · 当前选中</div>
+        </div>
+        <span class="status blue">${isChapter ? "章节" : escapeHtml(typeLabel)}</span>
+      </div>
+      <div class="inspector-section">
+        <div class="form-group">
+          <label class="label">名称</label>
+          <div class="field">${escapeHtml(name)}</div>
+        </div>
+        ${
+          isChapter
+            ? `
+              <div class="form-group">
+                <label class="label">包含内容</label>
+                <div class="field">${Number(node.dataset.largeSceneCount || 0)} 个大场景</div>
+              </div>
+            `
+            : `
+              <div class="form-group">
+                <label class="label">所属章节</label>
+                <div class="field">${escapeHtml(chapterName)}</div>
+              </div>
+              <div class="form-group">
+                <label class="label">场景类型</label>
+                <div class="field">${escapeHtml(typeLabel)}</div>
+              </div>
+            `
+        }
+      </div>
+      <div class="inspector-section story-inspector-actions">
+        ${
+          isChapter
+            ? `
+              <button
+                class="btn soft"
+                type="button"
+                data-api-action="open-large-scene-modal"
+                data-chapter-id="${escapeHtml(chapterId)}"
+                data-chapter-name="${escapeHtml(chapterName)}"
+              >添加大场景</button>
+            `
+            : ""
+        }
+        <button
+          class="btn"
+          type="button"
+          data-story-inspector-action="rename"
+          data-kind="${escapeHtml(kind)}"
+          data-id="${escapeHtml(id)}"
+          data-name="${escapeHtml(name)}"
+        >改名</button>
+        <button
+          class="btn danger-soft"
+          type="button"
+          data-story-inspector-action="delete"
+          data-kind="${escapeHtml(kind)}"
+          data-id="${escapeHtml(id)}"
+          data-name="${escapeHtml(name)}"
+          data-large-scene-count="${escapeHtml(node.dataset.largeSceneCount || "0")}"
+        >删除</button>
+      </div>
+      <div class="inspector-section story-inspector-tip">也可以右键节点打开快捷菜单。</div>
+    `;
+    const paletteLargeScene = document.getElementById("story-palette-large-scene");
+    if (paletteLargeScene && chapterId) {
+      paletteLargeScene.disabled = false;
+      paletteLargeScene.dataset.chapterId = chapterId;
+      paletteLargeScene.dataset.chapterName = chapterName;
+    }
+  }
+
   function storyCanvasStorageKey(projectId) {
-    return `atelier:story-canvas-view:${projectId}`;
+    return `atelier:story-canvas-view:v2:${projectId}`;
   }
 
   function clampStoryCanvasScale(scale) {
@@ -550,7 +738,10 @@
       viewport
         .querySelectorAll(".canvas-node-selected")
         .forEach((node) => node.classList.remove("canvas-node-selected"));
-      if (selected) selected.classList.add("canvas-node-selected");
+      if (selected) {
+        selected.classList.add("canvas-node-selected");
+        updateStoryCanvasInspector(selected);
+      }
     });
 
     toolbar.addEventListener("click", (event) => {
@@ -568,10 +759,51 @@
       }
     });
 
+    document
+      .getElementById("story-runtime-inspector")
+      ?.addEventListener("click", async (event) => {
+        const button = event.target.closest("[data-story-inspector-action]");
+        if (!button) return;
+        const kind = button.dataset.kind;
+        const id = button.dataset.id;
+        const name = button.dataset.name;
+        if (button.dataset.storyInspectorAction === "rename") {
+          if (kind === "chapter") openRenameModal("chapter", id, name);
+          else openLargeSceneEditModal(id, name);
+          return;
+        }
+        if (button.dataset.storyInspectorAction === "delete") {
+          if (kind === "chapter") {
+            await deleteChapter(
+              id,
+              name,
+              Number(button.dataset.largeSceneCount || 0)
+            );
+          } else {
+            await deleteLargeScene(id, name);
+          }
+        }
+      });
+
     const restored = restoreStoryCanvasView(projectId);
     window.requestAnimationFrame(() => {
       if (restored) applyStoryCanvasView({ persist: false });
-      else fitStoryCanvas({ persist: false });
+      else {
+        const stack = document.querySelector("#story-canvas-surface .real-story-stack");
+        const hasChapters = Boolean(stack?.querySelector(".story-chapter-group"));
+        if (hasChapters) {
+          const viewportHeight = viewport.clientHeight;
+          storyCanvasView.scale = 0.82;
+          storyCanvasView.x = 32;
+          storyCanvasView.y = Math.max(
+            24,
+            (viewportHeight - stack.offsetHeight * storyCanvasView.scale) / 2
+          );
+          applyStoryCanvasView({ persist: false });
+        } else {
+          fitStoryCanvas({ persist: false });
+        }
+      }
     });
   }
 
@@ -591,10 +823,6 @@
       actions.innerHTML = '<button class="btn primary" data-api-action="open-chapter-modal">新建章节</button>';
     }
     const chapters = await request(`/api/projects/${project.id}/chapters`);
-    if (!chapters.total) {
-      page.insertAdjacentHTML("beforeend", chapterEmptyState());
-      return;
-    }
     const chapterItems = await Promise.all(
       chapters.items.map(async (chapter) => {
         const largeScenes = await request(`/api/chapters/${chapter.id}/large-scenes`);
@@ -607,32 +835,7 @@
     );
     page.insertAdjacentHTML(
       "beforeend",
-      `
-        <section class="real-story-canvas-shell">
-          <div class="story-canvas-toolbar">
-            <div class="story-canvas-summary">
-              <span class="story-canvas-summary-dot"></span>
-              <span>${chapters.total} 个章节 · ${largeSceneTotal} 个大场景</span>
-              <small>自动对齐画布</small>
-            </div>
-            <div class="story-canvas-tools" role="toolbar" aria-label="画布视图">
-              <button type="button" data-story-canvas-action="zoom-out" title="缩小画布" aria-label="缩小画布">−</button>
-              <button type="button" data-story-canvas-action="zoom-reset" id="story-canvas-zoom-label" title="恢复 100%">100%</button>
-              <button type="button" data-story-canvas-action="zoom-in" title="放大画布" aria-label="放大画布">＋</button>
-              <span class="story-canvas-tool-divider"></span>
-              <button class="story-canvas-fit-button" type="button" data-story-canvas-action="fit">适应全部</button>
-            </div>
-          </div>
-          <div class="real-story-viewport" id="story-canvas-viewport" aria-label="剧本结构画布">
-            <div class="story-canvas-surface" id="story-canvas-surface">
-              <div class="real-story-stack">
-                ${chapterItems.map(chapterBlock).join("")}
-              </div>
-            </div>
-            <div class="story-canvas-hint">拖动空白处移动画布 · 滚轮移动 · Ctrl/⌘ + 滚轮缩放</div>
-          </div>
-        </section>
-      `
+      storyCanvasWorkspace(chapterItems, chapters.total, largeSceneTotal)
     );
     bindStoryCanvas(project.id);
   }
