@@ -635,11 +635,15 @@ def create_app(
 
     # ── Character Database (Danbooru CSV lookup) ───────────────
 
+    @app.get("/api/character-database/status")
+    def character_database_status() -> dict[str, object]:
+        return character_database.status()
+
     @app.get("/api/character-database/search")
     def search_character_database(
         q: str = "",
         copyright: str = "",
-        sort: str = "count",
+        sort: str = "count_desc",
         page: int = 1,
         page_size: int = 50,
     ) -> dict[str, object]:
@@ -647,25 +651,36 @@ def create_app(
             page = 1
         if page_size < 1 or page_size > 200:
             page_size = 50
-        result = character_database.search(
-            q=q,
-            copyright_filter=copyright,
-            sort=sort,
-            page=page,
-            page_size=page_size,
-        )
+        try:
+            result = character_database.search(
+                q=q,
+                copyright_filter=copyright,
+                sort=sort,
+                page=page,
+                page_size=page_size,
+            )
+        except character_database.CharacterDatabaseNotReadyError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
         return result
 
     @app.get("/api/character-database/copyrights")
     def list_character_database_copyrights() -> dict[str, object]:
+        try:
+            items = character_database.list_copyrights()
+        except character_database.CharacterDatabaseNotReadyError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
         return {
-            "items": character_database.list_copyrights(),
-            "total": len(character_database.list_copyrights()),
+            "items": items,
+            "total": len(items),
         }
 
     @app.get("/api/character-database/stats")
     def character_database_stats() -> dict[str, object]:
         return character_database.stats()
+
+    # Kick off background CSV→SQLite import at app creation so the index is
+    # already warming up before the first request hits the page.
+    character_database.status()
 
     if not FRONTEND_ROOT.exists():
         raise RuntimeError(f"Frontend directory does not exist: {FRONTEND_ROOT}")

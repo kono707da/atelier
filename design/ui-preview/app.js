@@ -366,7 +366,6 @@ function characterDatabasePage() {
         </form>
         <div class="character-database-meta" id="character-database-meta"></div>
         <div class="character-database-results" id="character-database-results"></div>
-        <div class="character-database-pagination" id="character-database-pagination"></div>
       </div>
     </section>
   </div>`;

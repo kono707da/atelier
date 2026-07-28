@@ -595,8 +595,11 @@
     sort: "count_desc",
     page: 1,
     pageSize: 50,
-    totalPages: 1,
     total: 0,
+    isLoading: false,
+    hasMore: true,
+    observer: null,
+    statusTimer: null,
   };
 
   async function renderCharacterDatabasePage() {
@@ -614,11 +617,113 @@
         characterDatabaseState.copyright = (copyrightSelect && copyrightSelect.value || "").trim();
         characterDatabaseState.sort = (sortSelect && sortSelect.value || "count_desc");
         characterDatabaseState.page = 1;
-        loadCharacterDatabaseResults();
+        characterDatabaseState.hasMore = true;
+        loadCharacterDatabaseResults(false);
       });
     }
-    await loadCharacterDatabaseCopyrights();
-    await loadCharacterDatabaseResults();
+    // Reset results container with table shell + scroll sentinel.
+    const resultsEl = document.getElementById("character-database-results");
+    if (resultsEl) {
+      resultsEl.innerHTML =
+        '<table class="character-database-table"><thead><tr>'
+        + '<th>角色名</th><th>作品系列</th><th>触发词</th><th>核心标签</th><th>标签数</th><th>Danbooru</th>'
+        + '</tr></thead><tbody></tbody></table>'
+        + '<div class="character-database-sentinel" id="character-database-sentinel"></div>';
+      setupCharacterDatabaseScrollObserver();
+    }
+    // Check backend status first; poll if still loading the CSV index.
+    try {
+      const statusPayload = await request("/api/character-database/status");
+      if (statusPayload.state === "ready") {
+        await loadCharacterDatabaseCopyrights();
+        await loadCharacterDatabaseResults(false);
+      } else if (statusPayload.state === "loading") {
+        showCharacterDatabaseLoading(statusPayload.progress || 0);
+        pollCharacterDatabaseStatus();
+      } else if (statusPayload.state === "error") {
+        const resultsEl2 = document.getElementById("character-database-results");
+        if (resultsEl2)
+          resultsEl2.innerHTML = `<div class="character-database-empty">角色库加载失败：${escapeHtml(statusPayload.error || "未知错误")}</div>`;
+      }
+    } catch (error) {
+      const resultsEl3 = document.getElementById("character-database-results");
+      if (resultsEl3)
+        resultsEl3.innerHTML = `<div class="character-database-empty">无法连接角色库服务：${escapeHtml(error.message)}</div>`;
+    }
+  }
+
+  function showCharacterDatabaseLoading(progress) {
+    const metaEl = document.getElementById("character-database-meta");
+    const resultsEl = document.getElementById("character-database-results");
+    if (metaEl) {
+      const pct = Math.round((progress || 0) * 100);
+      metaEl.textContent = `角色库正在建立索引 ${pct}%，请稍候…`;
+    }
+    if (resultsEl) {
+      resultsEl.innerHTML =
+        '<div class="character-database-empty">角色库正在建立索引，完成后将自动加载…</div>';
+    }
+  }
+
+  function pollCharacterDatabaseStatus() {
+    if (characterDatabaseState.statusTimer) return;
+    characterDatabaseState.statusTimer = setInterval(async () => {
+      try {
+        const statusPayload = await request("/api/character-database/status");
+        if (statusPayload.state === "ready") {
+          clearInterval(characterDatabaseState.statusTimer);
+          characterDatabaseState.statusTimer = null;
+          const resultsEl = document.getElementById("character-database-results");
+          if (resultsEl) {
+            resultsEl.innerHTML =
+              '<table class="character-database-table"><thead><tr>'
+              + '<th>角色名</th><th>作品系列</th><th>触发词</th><th>核心标签</th><th>标签数</th><th>Danbooru</th>'
+              + '</tr></thead><tbody></tbody></table>'
+              + '<div class="character-database-sentinel" id="character-database-sentinel"></div>';
+            setupCharacterDatabaseScrollObserver();
+          }
+          await loadCharacterDatabaseCopyrights();
+          await loadCharacterDatabaseResults(false);
+        } else if (statusPayload.state === "loading") {
+          showCharacterDatabaseLoading(statusPayload.progress || 0);
+        } else if (statusPayload.state === "error") {
+          clearInterval(characterDatabaseState.statusTimer);
+          characterDatabaseState.statusTimer = null;
+          const resultsEl = document.getElementById("character-database-results");
+          if (resultsEl)
+            resultsEl.innerHTML = `<div class="character-database-empty">角色库加载失败：${escapeHtml(statusPayload.error || "未知错误")}</div>`;
+        }
+      } catch (error) {
+        // keep polling on transient network errors
+      }
+    }, 2000);
+  }
+
+  function setupCharacterDatabaseScrollObserver() {
+    if (characterDatabaseState.observer) {
+      characterDatabaseState.observer.disconnect();
+      characterDatabaseState.observer = null;
+    }
+    const sentinel = document.getElementById("character-database-sentinel");
+    if (!sentinel) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            if (
+              !characterDatabaseState.isLoading &&
+              characterDatabaseState.hasMore
+            ) {
+              characterDatabaseState.page += 1;
+              loadCharacterDatabaseResults(true);
+            }
+          }
+        }
+      },
+      { root: document.getElementById("character-database-results"), rootMargin: "64px" }
+    );
+    observer.observe(sentinel);
+    characterDatabaseState.observer = observer;
   }
 
   async function loadCharacterDatabaseCopyrights() {
@@ -653,15 +758,23 @@
     }
   }
 
-  async function loadCharacterDatabaseResults() {
+  async function loadCharacterDatabaseResults(append) {
     const resultsEl = document.getElementById("character-database-results");
     const metaEl = document.getElementById("character-database-meta");
-    const paginationEl = document.getElementById("character-database-pagination");
-    if (resultsEl)
-      resultsEl.innerHTML =
-        '<div style="padding:18px;text-align:center;color:#8c94a5;">加载中…</div>';
-    if (metaEl) metaEl.textContent = "";
-    if (paginationEl) paginationEl.innerHTML = "";
+    if (!resultsEl) return;
+    const tbody = resultsEl.querySelector("tbody");
+    if (!append) {
+      if (tbody) tbody.innerHTML = "";
+      characterDatabaseState.page = 1;
+      characterDatabaseState.hasMore = true;
+    }
+    if (characterDatabaseState.isLoading) return;
+    characterDatabaseState.isLoading = true;
+
+    // Show inline loading indicator at the sentinel while fetching.
+    const sentinel = document.getElementById("character-database-sentinel");
+    if (sentinel) sentinel.innerHTML = '<div class="character-database-loading-more">加载中…</div>';
+
     const params = new URLSearchParams();
     params.set("q", characterDatabaseState.q);
     if (characterDatabaseState.copyright)
@@ -674,93 +787,61 @@
         `/api/character-database/search?${params.toString()}`
       );
       const items = Array.isArray(payload.items) ? payload.items : [];
-      characterDatabaseState.total = payload.total || items.length;
-      characterDatabaseState.totalPages =
-        payload.total_pages ||
-        Math.max(1, Math.ceil(characterDatabaseState.total / characterDatabaseState.pageSize));
+      characterDatabaseState.total = payload.total || 0;
+      const loadedCount = (append && tbody ? tbody.children.length : 0) + items.length;
+      characterDatabaseState.hasMore = loadedCount < characterDatabaseState.total && items.length > 0;
       if (metaEl) {
-        metaEl.textContent = `共 ${characterDatabaseState.total} 个角色 · 第 ${characterDatabaseState.page} / ${characterDatabaseState.totalPages} 页`;
+        metaEl.textContent = `共 ${characterDatabaseState.total} 个角色 · 已加载 ${loadedCount} 条`;
       }
-      if (!items.length) {
-        if (resultsEl)
-          resultsEl.innerHTML =
-            '<div class="character-database-empty">未找到匹配的角色</div>';
+      if (!append && !items.length) {
+        resultsEl.innerHTML = '<div class="character-database-empty">未找到匹配的角色</div>';
         return;
       }
-      if (resultsEl) resultsEl.innerHTML = renderCharacterDatabaseTable(items);
-      if (paginationEl)
-        paginationEl.innerHTML = renderCharacterDatabasePagination();
-      bindCharacterDatabasePagination();
+      if (tbody) {
+        const rowsHtml = items.map(renderCharacterDatabaseRow).join("");
+        tbody.insertAdjacentHTML("beforeend", rowsHtml);
+      }
+      if (sentinel) {
+        sentinel.innerHTML = characterDatabaseState.hasMore
+          ? ""
+          : (characterDatabaseState.total > 0 ? '<div class="character-database-end">已全部加载</div>' : "");
+      }
     } catch (error) {
-      if (resultsEl)
-        resultsEl.innerHTML = `<div style="padding:18px;color:#c33;">加载失败：${escapeHtml(error.message)}</div>`;
+      if (sentinel) {
+        sentinel.innerHTML = `<div class="character-database-loading-error">加载失败：${escapeHtml(error.message)}</div>`;
+      } else if (!append) {
+        resultsEl.innerHTML = `<div class="character-database-empty">加载失败：${escapeHtml(error.message)}</div>`;
+      }
+    } finally {
+      characterDatabaseState.isLoading = false;
     }
   }
 
-  function renderCharacterDatabaseTable(items) {
-    const rows = items
-      .map((item) => {
-        const character = escapeHtml(item.character || item.name || "");
-        const copyright = escapeHtml(item.copyright || item.series || "");
-        const trigger = escapeHtml(item.trigger || item.trigger_words || "");
-        const coreTagsRaw = item.core_tags || item.coreTags || [];
-        const coreTags = escapeHtml(
-          Array.isArray(coreTagsRaw) ? coreTagsRaw.join(" ") : coreTagsRaw || ""
-        );
-        const count = escapeHtml(String(item.count ?? item.tag_count ?? ""));
-        const danbooruUrl =
-          item.danbooru_url ||
-          (item.character
-            ? `https://danbooru.donmai.us/posts?tags=${encodeURIComponent(item.character)}`
-            : "");
-        const danbooruLink = danbooruUrl
-          ? `<a class="character-database-link" href="${escapeHtml(danbooruUrl)}" target="_blank" rel="noopener noreferrer">查看</a>`
-          : "—";
-        return `<tr>
-          <td class="character-database-name">${character}</td>
-          <td>${copyright}</td>
-          <td>${trigger}</td>
-          <td>${coreTags}</td>
-          <td>${count}</td>
-          <td>${danbooruLink}</td>
-        </tr>`;
-      })
-      .join("");
-    return `<table class="character-database-table">
-      <thead><tr>
-        <th>角色名</th><th>作品系列</th><th>触发词</th><th>核心标签</th><th>标签数</th><th>Danbooru</th>
-      </tr></thead>
-      <tbody>${rows}</tbody>
-    </table>`;
-  }
-
-  function renderCharacterDatabasePagination() {
-    const prevDisabled = characterDatabaseState.page <= 1;
-    const nextDisabled = characterDatabaseState.page >= characterDatabaseState.totalPages;
-    return `
-      <button class="btn small" data-character-database-page="prev" ${prevDisabled ? "disabled" : ""}>上一页</button>
-      <span class="character-database-page-info">第 ${characterDatabaseState.page} 页</span>
-      <button class="btn small" data-character-database-page="next" ${nextDisabled ? "disabled" : ""}>下一页</button>
-    `;
-  }
-
-  function bindCharacterDatabasePagination() {
-    const paginationEl = document.getElementById("character-database-pagination");
-    if (!paginationEl) return;
-    paginationEl.querySelectorAll("[data-character-database-page]").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        if (btn.disabled) return;
-        const action = btn.dataset.characterDatabasePage;
-        if (action === "prev" && characterDatabaseState.page > 1)
-          characterDatabaseState.page -= 1;
-        else if (
-          action === "next" &&
-          characterDatabaseState.page < characterDatabaseState.totalPages
-        )
-          characterDatabaseState.page += 1;
-        loadCharacterDatabaseResults();
-      });
-    });
+  function renderCharacterDatabaseRow(item) {
+    const character = escapeHtml(item.character || item.name || "");
+    const copyright = escapeHtml(item.copyright || item.series || "");
+    const trigger = escapeHtml(item.trigger || item.trigger_words || "");
+    const coreTagsRaw = item.core_tags || item.coreTags || [];
+    const coreTags = escapeHtml(
+      Array.isArray(coreTagsRaw) ? coreTagsRaw.join(" ") : coreTagsRaw || ""
+    );
+    const count = escapeHtml(String(item.count ?? item.tag_count ?? ""));
+    const danbooruUrl =
+      item.danbooru_url ||
+      (item.character
+        ? `https://danbooru.donmai.us/posts?tags=${encodeURIComponent(item.character)}`
+        : "");
+    const danbooruLink = danbooruUrl
+      ? `<a class="character-database-link" href="${escapeHtml(danbooruUrl)}" target="_blank" rel="noopener noreferrer">查看</a>`
+      : "—";
+    return `<tr>
+      <td class="character-database-name">${character}</td>
+      <td>${copyright}</td>
+      <td>${trigger}</td>
+      <td>${coreTags}</td>
+      <td>${count}</td>
+      <td>${danbooruLink}</td>
+    </tr>`;
   }
 
   function ensureCharacterDetailModal() {
