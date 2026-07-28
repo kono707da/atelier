@@ -938,29 +938,6 @@ button {
   color: #6b7280;
 }
 
-/* 拖动把手 — 顶部横纹 */
-.large-scene-drag-handle {
-  position: absolute;
-  top: 0;
-  left: 12px;
-  right: 12px;
-  height: 6px;
-  border-radius: 99px 99px 0 0;
-  background: linear-gradient(90deg, #c4cbea 0%, #c4cbea 30%, transparent 30%, transparent 70%, #c4cbea 70%, #c4cbea 100%);
-  background-size: 12px 6px;
-  cursor: grab;
-  z-index: 2;
-}
-
-.large-scene-drag-handle:hover {
-  background: linear-gradient(90deg, #8a9bed 0%, #8a9bed 30%, transparent 30%, transparent 70%, #8a9bed 70%, #8a9bed 100%);
-  background-size: 12px 6px;
-}
-
-.large-scene-drag-handle:active {
-  cursor: grabbing;
-}
-
 /* 拖动中状态 */
 .large-scene-block.dragging {
   opacity: 0.4;
