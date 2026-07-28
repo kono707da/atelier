@@ -5688,7 +5688,7 @@ button.story-tree-row:hover {
 
 .development-metrics {
   display: grid;
-  grid-template-columns: repeat(3, minmax(70px, 1fr));
+  grid-template-columns: repeat(4, minmax(64px, 1fr));
   gap: 8px;
 }
 
@@ -5715,8 +5715,70 @@ button.story-tree-row:hover {
 
 .development-list {
   display: grid;
-  gap: 8px;
+  gap: 12px;
   margin-top: 12px;
+}
+
+.development-progress-rule {
+  margin-top: 12px;
+  padding: 10px 14px;
+  border: 1px solid #e2e6f2;
+  border-radius: 13px;
+  color: #77819b;
+  font-size: 8px;
+  background: #f7f8fc;
+}
+
+.development-module {
+  padding: 17px;
+  border: 1px solid #e1e4ec;
+  border-radius: 19px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 8px 22px rgba(48, 56, 82, 0.045);
+}
+
+.development-module-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.development-module-header h3 {
+  margin: 0;
+  color: #3d465c;
+  font-size: 12px;
+}
+
+.development-module-header p {
+  margin: 4px 0 0;
+  color: #969dac;
+  font-size: 8px;
+}
+
+.development-module-header > strong {
+  color: #6375d4;
+  font-size: 13px;
+}
+
+.development-module-track {
+  height: 4px;
+  overflow: hidden;
+  margin: 11px 0 10px;
+  border-radius: 99px;
+  background: #eef0f5;
+}
+
+.development-module-track i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #6a7ddd;
+}
+
+.development-module-items {
+  display: grid;
+  gap: 7px;
 }
 
 .development-item {
@@ -5748,6 +5810,11 @@ button.story-tree-row:hover {
 .development-item.pending .development-item-state {
   color: #b27a2d;
   background: #fff2dc;
+}
+
+.development-item.in_progress .development-item-state {
+  color: #6576ca;
+  background: #edf0ff;
 }
 
 .development-item-heading {

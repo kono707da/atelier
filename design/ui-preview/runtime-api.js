@@ -4590,21 +4590,49 @@
 
   function developmentProgressMarkup(payload) {
     const progressPercent = Number(payload.progress_percent) || 0;
-    const items = Array.isArray(payload.items) ? payload.items : [];
-    const itemMarkup = items.length
-      ? items.map((item) => `
-          <article class="development-item ${item.completed ? "completed" : "pending"}">
-            <span class="development-item-state" aria-hidden="true">${item.completed ? "✓" : "•"}</span>
-            <div class="development-item-copy">
-              <div class="development-item-heading">
-                <strong>${escapeHtml(item.title)}</strong>
-                <span>${item.completed ? "已完成" : "待开发"}</span>
+    const modules = Array.isArray(payload.modules) ? payload.modules : [];
+    const stateLabel = {
+      completed: "已完成",
+      in_progress: "开发中",
+      pending: "未开始",
+    };
+    const stateIcon = {
+      completed: "✓",
+      in_progress: "…",
+      pending: "•",
+    };
+    const moduleMarkup = modules.length
+      ? modules.map((module) => {
+          const modulePercent = Number(module.progress_percent) || 0;
+          const items = Array.isArray(module.items) ? module.items : [];
+          return `
+            <section class="development-module">
+              <div class="development-module-header">
+                <div>
+                  <h3>${escapeHtml(module.name)}</h3>
+                  <p>完成 ${Number(module.completed) || 0} · 开发中 ${Number(module.in_progress) || 0} · 未开始 ${Number(module.pending) || 0}</p>
+                </div>
+                <strong>${modulePercent}%</strong>
               </div>
-              ${item.description ? `<p>${escapeHtml(item.description)}</p>` : ""}
-            </div>
-          </article>
-        `).join("")
-      : '<div class="development-empty">待办文档中还没有可汇总的功能项。</div>';
+              <div class="development-module-track"><i style="width:${Math.max(0, Math.min(100, modulePercent))}%"></i></div>
+              <div class="development-module-items">
+                ${items.map((item) => `
+                  <article class="development-item ${escapeHtml(item.status)}">
+                    <span class="development-item-state" aria-hidden="true">${stateIcon[item.status] || "•"}</span>
+                    <div class="development-item-copy">
+                      <div class="development-item-heading">
+                        <strong>${escapeHtml(item.title)}</strong>
+                        <span>${stateLabel[item.status] || "未开始"}</span>
+                      </div>
+                      ${item.description ? `<p>${escapeHtml(item.description)}</p>` : ""}
+                    </div>
+                  </article>
+                `).join("")}
+              </div>
+            </section>
+          `;
+        }).join("")
+      : '<div class="development-empty">系统功能清单中还没有可汇总的功能项。</div>';
 
     return `
       <div class="development-summary">
@@ -4613,8 +4641,8 @@
         </div>
         <div class="development-summary-copy">
           <span class="developer-eyebrow">LIVE CHECKLIST</span>
-          <h2>功能完成情况</h2>
-          <p>共 ${Number(payload.total) || 0} 项功能，已完成 ${Number(payload.completed) || 0} 项。</p>
+          <h2>全系统功能完成情况</h2>
+          <p>共 ${Number(payload.total) || 0} 项，已完成 ${Number(payload.completed) || 0} 项，开发中 ${Number(payload.in_progress) || 0} 项。</p>
           <div class="development-progress-track">
             <i style="width:${Math.max(0, Math.min(100, progressPercent))}%"></i>
           </div>
@@ -4625,11 +4653,13 @@
         </div>
         <div class="development-metrics">
           <div><strong>${Number(payload.completed) || 0}</strong><span>已完成</span></div>
-          <div><strong>${Number(payload.pending) || 0}</strong><span>待开发</span></div>
+          <div><strong>${Number(payload.in_progress) || 0}</strong><span>开发中</span></div>
+          <div><strong>${Number(payload.pending) || 0}</strong><span>未开始</span></div>
           <div><strong>${Number(payload.total) || 0}</strong><span>总计</span></div>
         </div>
       </div>
-      <div class="development-list">${itemMarkup}</div>
+      <div class="development-progress-rule">${escapeHtml(payload.progress_rule || "只有完整交付的功能计入完成率。")}</div>
+      <div class="development-list">${moduleMarkup}</div>
     `;
   }
 
@@ -4641,7 +4671,7 @@
     button.disabled = true;
     button.textContent = "正在汇总…";
     output.hidden = false;
-    output.innerHTML = '<div class="development-loading"><i></i><span>正在读取功能开发待办…</span></div>';
+    output.innerHTML = '<div class="development-loading"><i></i><span>正在读取全系统功能清单…</span></div>';
     try {
       const payload = await request("/api/developer/progress");
       output.innerHTML = developmentProgressMarkup(payload);

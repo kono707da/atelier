@@ -662,13 +662,13 @@ function settingsPage() {
 
 function developerManagementPage() {
   return `<div class="page-scroll developer-page">
-    ${pageHeader("开发者管理", "集中查看 Atelier 各项功能的真实开发状态。")}
+    ${pageHeader("开发者管理", "按 Atelier 全系统范围查看真实开发状态。")}
     <section class="developer-launch-card">
       <div class="developer-launch-icon">DV</div>
       <div class="developer-launch-copy">
         <span class="developer-eyebrow">PROJECT STATUS</span>
         <h2>开发进度汇总</h2>
-        <p>完成情况直接读取项目根目录中的《功能开发待办》，不会在页面中写死。</p>
+        <p>完成情况覆盖整个系统，并直接读取《系统功能清单》；近期待办不作为总进度分母。</p>
       </div>
       <button class="btn primary developer-launch-action" data-api-action="load-development-progress">
         查看开发进度

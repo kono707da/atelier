@@ -27,17 +27,21 @@ from . import character_database
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DATA_ROOT = PROJECT_ROOT / "data"
 FRONTEND_ROOT = PROJECT_ROOT / "design" / "ui-preview"
-DEVELOPMENT_TODO_PATH = PROJECT_ROOT / "功能开发待办.md"
+SYSTEM_FEATURES_PATH = PROJECT_ROOT / "系统功能清单.md"
 DEVELOPMENT_TODO_PATTERN = re.compile(
-    r"^\s*-\s*\[(?P<state>[ xX])\]\s*(?P<body>.+?)\s*$"
+    r"^\s*-\s*\[(?P<state>[ xX~\-])\]\s*(?P<body>.+?)\s*$"
 )
 
 
 def read_development_progress(todo_path: Path) -> dict[str, object]:
-    """Read the project checklist without turning progress into hard-coded UI data."""
+    """Read the system checklist without turning progress into hard-coded UI data."""
     content = todo_path.read_text(encoding="utf-8-sig")
     items: list[dict[str, object]] = []
+    module_name = "其他"
     for line in content.splitlines():
+        if line.startswith("## "):
+            module_name = line[3:].strip()
+            continue
         match = DEVELOPMENT_TODO_PATTERN.match(line)
         if not match:
             continue
@@ -47,20 +51,57 @@ def read_development_progress(todo_path: Path) -> dict[str, object]:
             title, separator, description = body.partition(":")
         title = title.strip()
         description = description.strip() if separator else ""
-        completed = match.group("state").lower() == "x"
+        state = match.group("state").lower()
+        item_status = (
+            "completed"
+            if state == "x"
+            else "in_progress"
+            if state in {"~", "-"}
+            else "pending"
+        )
         items.append(
             {
                 "id": f"feature-{len(items) + 1}",
+                "module": module_name,
                 "title": title,
                 "description": description,
-                "status": "completed" if completed else "pending",
-                "completed": completed,
+                "status": item_status,
+                "completed": item_status == "completed",
             }
         )
 
     completed_count = sum(1 for item in items if item["completed"])
+    in_progress_count = sum(
+        1 for item in items if item["status"] == "in_progress"
+    )
     total = len(items)
     progress_percent = round((completed_count / total) * 100, 1) if total else 0.0
+    modules: list[dict[str, object]] = []
+    for item in items:
+        module = next(
+            (entry for entry in modules if entry["name"] == item["module"]),
+            None,
+        )
+        if module is None:
+            module = {
+                "name": item["module"],
+                "total": 0,
+                "completed": 0,
+                "in_progress": 0,
+                "pending": 0,
+                "items": [],
+            }
+            modules.append(module)
+        module["total"] += 1
+        module[item["status"]] += 1
+        module["items"].append(item)
+
+    for module in modules:
+        module["progress_percent"] = round(
+            (module["completed"] / module["total"]) * 100,
+            1,
+        )
+
     updated_at = datetime.fromtimestamp(
         todo_path.stat().st_mtime,
         tz=timezone.utc,
@@ -70,8 +111,11 @@ def read_development_progress(todo_path: Path) -> dict[str, object]:
         "updated_at": updated_at,
         "total": total,
         "completed": completed_count,
-        "pending": total - completed_count,
+        "in_progress": in_progress_count,
+        "pending": total - completed_count - in_progress_count,
         "progress_percent": progress_percent,
+        "progress_rule": "只有完成前后端闭环并通过验收的功能计入完成率。",
+        "modules": modules,
         "items": items,
     }
 
@@ -379,7 +423,7 @@ def create_app(
     data_root: Path | None = None,
     environment: Literal["production", "test"] = "production",
     locked_environment: Literal["production", "test"] | None = None,
-    development_todo_path: Path | None = None,
+    system_features_path: Path | None = None,
 ) -> FastAPI:
     app = FastAPI(
         title="Atelier API",
@@ -394,7 +438,7 @@ def create_app(
     )
     app.state.database_manager = manager
     resolved_development_todo_path = (
-        development_todo_path or DEVELOPMENT_TODO_PATH
+        system_features_path or SYSTEM_FEATURES_PATH
     ).resolve()
 
     app.add_middleware(
@@ -421,12 +465,12 @@ def create_app(
         except FileNotFoundError as error:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="功能开发待办文档不存在，暂时无法汇总开发进度。",
+                detail="系统功能清单不存在，暂时无法汇总开发进度。",
             ) from error
         except OSError as error:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="功能开发待办文档读取失败。",
+                detail="系统功能清单读取失败。",
             ) from error
 
     @app.get("/api/settings/databases")
