@@ -6,12 +6,16 @@ ASGI 入口 ``app`` 由 ``backend.app.main`` 单独持有。
 """
 from __future__ import annotations
 
+import io
+import shutil
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, UploadFile, File, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .database import DatabaseManager, DatabaseSafetyError
@@ -190,6 +194,137 @@ class UpdateCharacterSpecValueRequest(BaseModel):
         return value
 
 
+class CreateMaterialRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    material_type: Literal[
+        "composition",
+        "expression",
+        "scene",
+        "lighting",
+        "prompt",
+        "composite_template",
+    ]
+    description: str = Field(default="", max_length=300)
+    content: str = Field(min_length=1, max_length=50000)
+    prompt_text: str = Field(default="", max_length=50000)
+    negative_prompt: str = Field(default="", max_length=20000)
+    validation_status: Literal["unverified", "verified"] = "unverified"
+    notes: str = Field(default="", max_length=5000)
+    tags: list[str] = Field(default_factory=list, max_length=30)
+
+    @field_validator("name")
+    @classmethod
+    def name_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("素材名称不能为空。")
+        return value
+
+    @field_validator("content")
+    @classmethod
+    def content_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("素材正文不能为空。")
+        return value
+
+    @field_validator("tags")
+    @classmethod
+    def tags_clean(cls, value: list[str]) -> list[str]:
+        if len(value) > 30:
+            raise ValueError("素材标签最多 30 个。")
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for raw in value:
+            if not isinstance(raw, str):
+                continue
+            clean = " ".join(raw.split())
+            if not clean:
+                continue
+            if len(clean) > 40:
+                raise ValueError("单个素材标签不能超过 40 个字符。")
+            key = clean.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            cleaned.append(clean)
+        return cleaned
+
+
+class UpdateMaterialRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    material_type: Literal[
+        "composition",
+        "expression",
+        "scene",
+        "lighting",
+        "prompt",
+        "composite_template",
+    ] | None = None
+    description: str | None = Field(default=None, max_length=300)
+    content: str | None = Field(default=None, min_length=1, max_length=50000)
+    prompt_text: str | None = Field(default=None, max_length=50000)
+    negative_prompt: str | None = Field(default=None, max_length=20000)
+    validation_status: Literal["unverified", "verified"] | None = None
+    notes: str | None = Field(default=None, max_length=5000)
+    tags: list[str] | None = Field(default=None, max_length=30)
+
+    @field_validator("name")
+    @classmethod
+    def name_not_blank(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("素材名称不能为空。")
+        return value
+
+    @field_validator("content")
+    @classmethod
+    def content_not_blank(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("素材正文不能为空。")
+        return value
+
+    @field_validator("tags")
+    @classmethod
+    def tags_clean(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        if len(value) > 30:
+            raise ValueError("素材标签最多 30 个。")
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for raw in value:
+            if not isinstance(raw, str):
+                continue
+            clean = " ".join(raw.split())
+            if not clean:
+                continue
+            if len(clean) > 40:
+                raise ValueError("单个素材标签不能超过 40 个字符。")
+            key = clean.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            cleaned.append(clean)
+        return cleaned
+
+    @model_validator(mode="after")
+    def at_least_one_field(self) -> "UpdateMaterialRequest":
+        if all(
+            getattr(self, field) is None
+            for field in (
+                "name",
+                "material_type",
+                "description",
+                "content",
+                "prompt_text",
+                "negative_prompt",
+                "validation_status",
+                "notes",
+                "tags",
+            )
+        ):
+            raise ValueError("至少需要提供一个更新字段。")
+        return self
+
+
 def create_app(
     *,
     data_root: Path | None = None,
@@ -198,7 +333,7 @@ def create_app(
 ) -> FastAPI:
     app = FastAPI(
         title="Atelier API",
-        version="0.2.0",
+        version="0.3.0",
         docs_url="/api/docs",
         redoc_url=None,
     )
@@ -694,6 +829,302 @@ def create_app(
             "database_environment": manager.active_environment,
             "spec_value": value,
         }
+
+    # ── Materials ──────────────────────────────────────────────
+
+    @app.get("/api/materials")
+    def list_materials(
+        q: str = "",
+        material_type: str = "",
+        validation_status: str = "",
+        tag: str = "",
+        limit: int = 60,
+        offset: int = 0,
+        sort: str = "updated_desc",
+    ) -> dict[str, object]:
+        if limit < 1 or limit > 100:
+            limit = 60
+        if offset < 0:
+            offset = 0
+        if sort not in DatabaseManager.VALID_MATERIAL_SORTS:
+            sort = "updated_desc"
+        result = manager.list_materials(
+            query=q,
+            material_type=material_type,
+            validation_status=validation_status,
+            tag=tag,
+            limit=limit,
+            offset=offset,
+            sort=sort,
+        )
+        return {
+            "database_environment": manager.active_environment,
+            **result,
+        }
+
+    @app.post(
+        "/api/materials",
+        status_code=status.HTTP_201_CREATED,
+    )
+    def create_material(request: CreateMaterialRequest) -> dict[str, object]:
+        try:
+            material = manager.create_material(
+                name=request.name,
+                material_type=request.material_type,
+                description=request.description,
+                content=request.content,
+                prompt_text=request.prompt_text,
+                negative_prompt=request.negative_prompt,
+                validation_status=request.validation_status,
+                notes=request.notes,
+                tags=request.tags,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return {
+            "database_environment": manager.active_environment,
+            "material": material,
+        }
+
+    @app.get("/api/materials/{material_id}")
+    def get_material(material_id: str) -> dict[str, object]:
+        material = manager.get_material(material_id)
+        if material is None:
+            raise HTTPException(status_code=404, detail="素材不存在。")
+        return {
+            "database_environment": manager.active_environment,
+            "material": material,
+        }
+
+    @app.patch("/api/materials/{material_id}")
+    def update_material(
+        material_id: str, request: UpdateMaterialRequest
+    ) -> dict[str, object]:
+        if manager.get_material(material_id) is None:
+            raise HTTPException(status_code=404, detail="素材不存在。")
+        updates = request.model_dump(exclude_none=True)
+        try:
+            material = manager.update_material(material_id, **updates)
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        if material is None:
+            raise HTTPException(status_code=404, detail="素材不存在。")
+        return {
+            "database_environment": manager.active_environment,
+            "material": material,
+        }
+
+    @app.delete("/api/materials/{material_id}")
+    def delete_material(material_id: str) -> dict[str, object]:
+        result = manager.delete_material(material_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail="素材不存在。")
+        # Clean up material image directory
+        material_dir = manager.data_root / "materials" / material_id
+        if material_dir.exists():
+            try:
+                shutil.rmtree(material_dir)
+            except OSError:
+                pass
+        return {
+            "database_environment": manager.active_environment,
+            "deleted": True,
+            "material_id": material_id,
+        }
+
+    @app.get("/api/material-tags")
+    def list_material_tags(
+        q: str = "",
+        limit: int = 30,
+    ) -> dict[str, object]:
+        if limit < 1 or limit > 100:
+            limit = 30
+        items = manager.list_material_tags(query=q, limit=limit)
+        return {
+            "database_environment": manager.active_environment,
+            "items": items,
+            "total": len(items),
+        }
+
+    @app.post("/api/materials/{material_id}/preview")
+    async def upload_material_preview(
+        material_id: str,
+        file: UploadFile = File(...),
+    ) -> dict[str, object]:
+        if manager.get_material(material_id) is None:
+            raise HTTPException(status_code=404, detail="素材不存在。")
+
+        MAX_SIZE = 20 * 1024 * 1024  # 20 MB
+        contents = await file.read()
+        if len(contents) > MAX_SIZE:
+            raise HTTPException(status_code=413, detail="预览图文件超过 20 MB 限制。")
+        if not contents:
+            raise HTTPException(status_code=422, detail="预览图文件为空。")
+
+        try:
+            image = Image.open(io.BytesIO(contents))
+            image.load()
+        except (UnidentifiedImageError, OSError) as error:
+            raise HTTPException(
+                status_code=415,
+                detail="预览图格式不支持或文件已损坏。",
+            ) from error
+
+        if image.width > 16384 or image.height > 16384:
+            raise HTTPException(
+                status_code=422,
+                detail="预览图最长边不得超过 16,384 像素。",
+            )
+
+        ext_map = {
+            "JPEG": "jpg",
+            "PNG": "png",
+            "WEBP": "webp",
+        }
+        fmt = image.format
+        if fmt not in ext_map:
+            raise HTTPException(
+                status_code=415,
+                detail="预览图格式不支持，仅接受 JPG、PNG、WebP。",
+            )
+
+        material_dir = manager.data_root / "materials" / material_id
+        material_dir.mkdir(parents=True, exist_ok=True)
+        original_filename = f"original.{ext_map[fmt]}"
+        thumbnail_filename = "thumbnail.webp"
+        original_path = material_dir / original_filename
+        thumbnail_path = material_dir / thumbnail_filename
+        tmp_original = material_dir / f"{original_filename}.tmp"
+        tmp_thumbnail = material_dir / f"{thumbnail_filename}.tmp"
+
+        try:
+            # Save original (convert to RGB if necessary for JPEG)
+            save_image = image
+            if fmt == "JPEG" and save_image.mode not in ("RGB", "L"):
+                save_image = save_image.convert("RGB")
+            save_image.save(tmp_original, format=fmt)
+
+            # Generate thumbnail (longest edge 512, WebP quality 82)
+            thumb = image.copy()
+            thumb.thumbnail((512, 512), Image.Resampling.LANCZOS)
+            if thumb.mode not in ("RGB", "RGBA"):
+                thumb = thumb.convert("RGB")
+            thumb.save(tmp_thumbnail, format="WEBP", quality=82)
+        except OSError as error:
+            for tmp in (tmp_original, tmp_thumbnail):
+                if tmp.exists():
+                    try:
+                        tmp.unlink()
+                    except OSError:
+                        pass
+            raise HTTPException(
+                status_code=422,
+                detail="预览图处理失败，请检查图片内容。",
+            ) from error
+
+        # Atomic replacement of old files
+        if original_path.exists():
+            original_path.unlink()
+        tmp_original.replace(original_path)
+        if thumbnail_path.exists():
+            thumbnail_path.unlink()
+        tmp_thumbnail.replace(thumbnail_path)
+
+        rel_original = f"materials/{material_id}/{original_filename}"
+        rel_thumbnail = f"materials/{material_id}/{thumbnail_filename}"
+        updated = manager.set_material_preview_paths(
+            material_id,
+            original_path=rel_original,
+            thumbnail_path=rel_thumbnail,
+        )
+        if updated is None:
+            raise HTTPException(status_code=404, detail="素材不存在。")
+
+        return {
+            "database_environment": manager.active_environment,
+            "preview_url": f"/api/materials/{material_id}/preview",
+            "thumbnail_url": f"/api/materials/{material_id}/thumbnail",
+        }
+
+    @app.delete("/api/materials/{material_id}/preview")
+    def delete_material_preview(material_id: str) -> dict[str, object]:
+        material = manager.get_material(material_id)
+        if material is None:
+            raise HTTPException(status_code=404, detail="素材不存在。")
+        material_dir = manager.data_root / "materials" / material_id
+        if material_dir.exists():
+            try:
+                shutil.rmtree(material_dir)
+            except OSError:
+                pass
+        manager.set_material_preview_paths(
+            material_id,
+            original_path=None,
+            thumbnail_path=None,
+        )
+        return {
+            "database_environment": manager.active_environment,
+            "deleted": True,
+            "material_id": material_id,
+        }
+
+    @app.get("/api/materials/{material_id}/preview")
+    def get_material_preview(material_id: str):
+        material = manager.get_material(material_id)
+        if material is None:
+            raise HTTPException(status_code=404, detail="素材不存在。")
+        rel_path = material.get("preview_original_path")
+        if not rel_path:
+            raise HTTPException(status_code=404, detail="素材暂无预览图。")
+        abs_path = (manager.data_root / rel_path).resolve()
+        materials_root = (manager.data_root / "materials").resolve()
+        try:
+            abs_path.relative_to(materials_root)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail="素材暂无预览图。") from error
+        if not abs_path.exists():
+            raise HTTPException(status_code=404, detail="素材暂无预览图。")
+        ext_to_media = {
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".png": "image/png",
+            ".webp": "image/webp",
+        }
+        media_type = ext_to_media.get(abs_path.suffix.lower(), "application/octet-stream")
+        return FileResponse(
+            str(abs_path),
+            media_type=media_type,
+            headers={"Cache-Control": "private, max-age=3600"},
+        )
+
+    @app.get("/api/materials/{material_id}/thumbnail")
+    def get_material_thumbnail(material_id: str):
+        material = manager.get_material(material_id)
+        if material is None:
+            raise HTTPException(status_code=404, detail="素材不存在。")
+        rel_path = material.get("preview_thumbnail_path")
+        if not rel_path:
+            raise HTTPException(status_code=404, detail="素材暂无缩略图。")
+        abs_path = (manager.data_root / rel_path).resolve()
+        materials_root = (manager.data_root / "materials").resolve()
+        try:
+            abs_path.relative_to(materials_root)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail="素材暂无缩略图。") from error
+        if not abs_path.exists():
+            raise HTTPException(status_code=404, detail="素材暂无缩略图。")
+        ext_to_media = {
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".png": "image/png",
+            ".webp": "image/webp",
+        }
+        media_type = ext_to_media.get(abs_path.suffix.lower(), "application/octet-stream")
+        return FileResponse(
+            str(abs_path),
+            media_type=media_type,
+            headers={"Cache-Control": "private, max-age=3600"},
+        )
 
     # ── Character Database (Danbooru CSV lookup) ───────────────
 

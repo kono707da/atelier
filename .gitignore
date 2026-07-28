@@ -7,3 +7,8 @@ data/databases/*.sqlite3
 data/databases/*.sqlite3-shm
 data/databases/*.sqlite3-wal
 data/character-database/*.csv
+data/character-database/*.sqlite3
+data/character-database/*.sqlite3-shm
+data/character-database/*.sqlite3-wal
+data/character-database/*.sqlite3.tmp
+data/materials/
