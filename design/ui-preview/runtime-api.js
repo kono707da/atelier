@@ -625,10 +625,12 @@
     const resultsEl = document.getElementById("character-database-results");
     if (resultsEl) {
       resultsEl.innerHTML =
-        '<table class="character-database-table"><thead><tr>'
+        '<div class="character-database-scroll">'
+        + '<table class="character-database-table"><thead><tr>'
         + '<th>角色名</th><th>作品系列</th><th>触发词</th><th>核心标签</th><th>标签数</th><th>Danbooru</th>'
         + '</tr></thead><tbody></tbody></table>'
-        + '<div class="character-database-sentinel" id="character-database-sentinel"></div>';
+        + '<div class="character-database-sentinel" id="character-database-sentinel"></div>'
+        + '</div>';
       setupCharacterDatabaseScrollObserver();
     }
     // Check backend status first; poll if still loading the CSV index.
@@ -676,10 +678,12 @@
           const resultsEl = document.getElementById("character-database-results");
           if (resultsEl) {
             resultsEl.innerHTML =
-              '<table class="character-database-table"><thead><tr>'
+              '<div class="character-database-scroll">'
+              + '<table class="character-database-table"><thead><tr>'
               + '<th>角色名</th><th>作品系列</th><th>触发词</th><th>核心标签</th><th>标签数</th><th>Danbooru</th>'
               + '</tr></thead><tbody></tbody></table>'
-              + '<div class="character-database-sentinel" id="character-database-sentinel"></div>';
+              + '<div class="character-database-sentinel" id="character-database-sentinel"></div>'
+              + '</div>';
             setupCharacterDatabaseScrollObserver();
           }
           await loadCharacterDatabaseCopyrights();
@@ -720,7 +724,7 @@
           }
         }
       },
-      { root: document.getElementById("character-database-results"), rootMargin: "64px" }
+      { root: document.querySelector(".character-database-scroll"), rootMargin: "64px" }
     );
     observer.observe(sentinel);
     characterDatabaseState.observer = observer;
