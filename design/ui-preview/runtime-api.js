@@ -1158,13 +1158,42 @@
     requestId: 0,
   };
 
+  function comfyuiInstancesFromPayload(payload) {
+    if (Array.isArray(payload?.instances)) return payload.instances;
+    if (Array.isArray(payload?.items)) return payload.items;
+    return Array.isArray(payload) ? payload : [];
+  }
+
+  function comfyuiCandidatesFromPayload(payload) {
+    if (Array.isArray(payload?.candidates)) return payload.candidates;
+    if (Array.isArray(payload?.items)) return payload.items;
+    return Array.isArray(payload) ? payload : [];
+  }
+
+  function comfyuiConnectionStatus(instance) {
+    return String(instance?.last_connection_status || instance?.connection_status || "unknown").toLowerCase();
+  }
+
+  function comfyuiDeviceSummary(instance) {
+    if (instance?.device) return String(instance.device);
+    const devices = Array.isArray(instance?.device_summary) ? instance.device_summary : [];
+    if (!devices.length) return "";
+    return devices
+      .map((device) => device?.name || device?.device_name || device?.type || "")
+      .filter(Boolean)
+      .join(" / ");
+  }
+
   function comfyuiInstanceStatusLabel(instance) {
-    const status = instance.last_connection_status || instance.connection_status || "";
-    if (status === "ok" || status === "connected") {
+    const connectionStatus = comfyuiConnectionStatus(instance);
+    if (instance.is_active && (connectionStatus === "ok" || connectionStatus === "connected")) {
       return { text: "已连接", color: "green" };
     }
-    if (status === "failed" || status === "error" || status === "unreachable") {
+    if (connectionStatus === "unreachable" || connectionStatus === "failed" || connectionStatus === "error") {
       return { text: "连接失败", color: "red" };
+    }
+    if (connectionStatus === "ok" || connectionStatus === "connected") {
+      return { text: "已连接", color: "green" };
     }
     return { text: "未检测", color: "orange" };
   }
@@ -1175,13 +1204,7 @@
     const httpUrl = escapeHtml(instance.base_url || instance.http_url || "—");
     const wsUrl = instance.websocket_url || instance.ws_url || "";
     const version = instance.comfyui_version || instance.version || "";
-    const deviceSummary = instance.device_summary;
-    let device = "";
-    if (Array.isArray(deviceSummary) && deviceSummary.length > 0) {
-      device = deviceSummary.map((d) => d.name || "").filter(Boolean).join(", ");
-    } else if (typeof deviceSummary === "string") {
-      device = deviceSummary;
-    }
+    const device = comfyuiDeviceSummary(instance);
     const nodeSummary = instance.node_definition_summary || {};
     const nodeCount = Number(nodeSummary.node_count || instance.node_count || 0);
     const lastChecked = instance.last_checked_at || "";
@@ -1272,7 +1295,7 @@
     try {
       const payload = await request(API.comfyuiInstances);
       if (requestId !== comfyuiState.requestId) return;
-      const items = Array.isArray(payload.instances) ? payload.instances : (Array.isArray(payload.items) ? payload.items : (Array.isArray(payload) ? payload : []));
+      const items = comfyuiInstancesFromPayload(payload);
       comfyuiState.instances = items;
       renderComfyuiInstancesList();
     } catch (error) {
@@ -1399,7 +1422,7 @@
     modal.querySelector(".modal-error").textContent = "";
     modal.querySelector('input[name="name"]').value = instance?.name || name || "";
     modal.querySelector('input[name="http_url"]').value = instance?.http_url || instance?.base_url || "";
-    modal.querySelector('input[name="ws_url"]').value = instance?.ws_url || "";
+    modal.querySelector('input[name="ws_url"]').value = instance?.websocket_url || instance?.ws_url || "";
     modal.querySelector('input[name="timeout_seconds"]').value = String(instance?.timeout_seconds || 30);
     modal.hidden = false;
     requestAnimationFrame(() => {
@@ -1509,9 +1532,10 @@
     try {
       const payload = await request(API.comfyuiInstanceTest(instanceId), { method: "POST" });
       const ok = payload && (payload.status === "ok" || payload.ok || payload.success || payload.connected);
+      const latency = payload && payload.latency != null ? ` · 延迟 ${payload.latency} ms` : "";
       if (ok) {
         const version = payload.system && payload.system.comfyui_version ? ` · ${payload.system.comfyui_version}` : "";
-        if (typeof showToast === "function") showToast(`「${name}」连接成功${version}`);
+        if (typeof showToast === "function") showToast(`「${name}」连接成功${version}${latency}`);
       } else {
         const reason = (payload && (payload.message || payload.reason)) || "连接失败";
         if (typeof showToast === "function") showToast(`「${name}」${reason}`);
@@ -1539,7 +1563,7 @@
     if (typeof showToast === "function") showToast("正在搜索局域网 ComfyUI 实例…");
     try {
       const payload = await request(API.comfyuiDiscover, { method: "POST" });
-      const candidates = Array.isArray(payload.candidates) ? payload.candidates : (Array.isArray(payload.items) ? payload.items : (Array.isArray(payload) ? payload : []));
+      const candidates = comfyuiCandidatesFromPayload(payload);
       if (!candidates.length) {
         if (typeof showToast === "function") showToast("未发现局域网 ComfyUI 实例");
         return;
@@ -1548,7 +1572,7 @@
       const wrap = document.getElementById("comfyui-instances-panel");
       if (wrap) {
         const list = candidates.map((c) => {
-          const url = escapeHtml(c.http_url || c.url || "");
+          const url = escapeHtml(c.http_url || c.base_url || c.url || "");
           const label = escapeHtml(c.name || url || "未知实例");
           return `<div class="kv" style="gap:8px"><span>${label}</span><strong>${url}</strong><button class="btn small soft" type="button" data-api-action="add-discovered-comfyui" data-url="${url}" data-name="${label}">添加</button></div>`;
         }).join("");
@@ -1600,16 +1624,16 @@
     try {
       const payload = await request(API.comfyuiInstances);
       if (requestId !== comfyuiStatusRequestId) return;
-      const items = Array.isArray(payload.instances) ? payload.instances : (Array.isArray(payload.items) ? payload.items : (Array.isArray(payload) ? payload : []));
+      const items = comfyuiInstancesFromPayload(payload);
       const active = items.find((i) => i.is_active) || items[0];
       if (!active) {
         applyComfyuiStatusIndicator({ color: "orange", text: "ComfyUI 未配置" });
         return;
       }
-      const connStatus = active.last_connection_status || active.connection_status || "";
+      const connStatus = comfyuiConnectionStatus(active);
       if (connStatus === "ok" || connStatus === "connected") {
         applyComfyuiStatusIndicator({ color: "green", text: `ComfyUI 已连接 · ${active.name || ""}`.trim() });
-      } else if (connStatus === "failed" || connStatus === "error" || connStatus === "unreachable") {
+      } else if (connStatus === "unreachable" || connStatus === "failed" || connStatus === "error") {
         applyComfyuiStatusIndicator({ color: "red", text: `ComfyUI 连接失败 · ${active.name || ""}`.trim() });
       } else {
         applyComfyuiStatusIndicator({ color: "orange", text: `ComfyUI 未检测 · ${active.name || ""}`.trim() });

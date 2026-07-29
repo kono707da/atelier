@@ -7,11 +7,13 @@
 - 资源缓存（save/list）
 - ComfyUI 客户端单元测试（mock 和真实连接）
 
-ComfyUI 真实连接测试是可选的：仅当 127.0.0.1:8188 可达时运行。
+ComfyUI 真实连接测试是可选的：优先读取 ATELIER_COMFYUI_TEST_URL，
+其次读取 ATELIER_COMFYUI_URL，未配置时使用 http://127.0.0.1:8188。
 """
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -30,13 +32,20 @@ from backend.app.comfyui_client import (
 )
 
 
-def _is_comfyui_reachable(host: str = "127.0.0.1", port: int = 8188) -> bool:
+COMFYUI_TEST_URL = (
+    os.environ.get("ATELIER_COMFYUI_TEST_URL")
+    or os.environ.get("ATELIER_COMFYUI_URL")
+    or "http://127.0.0.1:8188"
+).rstrip("/")
+
+
+def _is_comfyui_reachable(base_url: str = COMFYUI_TEST_URL) -> bool:
     """快速检测 ComfyUI 是否可达。"""
     import httpx
 
     try:
         response = httpx.get(
-            f"http://{host}:{port}/system_stats",
+            f"{base_url}/system_stats",
             timeout=httpx.Timeout(3.0),
         )
         return response.status_code == 200
@@ -521,8 +530,16 @@ class ComfyuiApiCacheTests(_ComfyuiBase):
 class ComfyuiRealIntegrationTests(_ComfyuiBase):
     """真实 ComfyUI 集成测试。
 
-    需要 127.0.0.1:8188 可达。测试数据写入临时隔离数据库。
+    需要 COMFYUI_TEST_URL 指向的实例可达。测试数据写入临时隔离数据库。
     """
+
+    def setUp(self) -> None:
+        super().setUp()
+        response = self.client.put(
+            "/api/settings/comfyui",
+            json={"base_url": COMFYUI_TEST_URL},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
 
     def test_real_test_connection(self) -> None:
         response = self.client.post("/api/comfyui/test-connection")
