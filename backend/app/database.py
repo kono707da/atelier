@@ -335,6 +335,8 @@ class DatabaseManager:
                     archived_at TEXT,
                     deleted_at TEXT,
                     source_material_id TEXT,
+                    link_mode TEXT NOT NULL DEFAULT 'independent',
+                    kind TEXT NOT NULL DEFAULT 'single',
                     revision INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
@@ -348,7 +350,9 @@ class DatabaseManager:
                             'composite_template'
                         )
                     ),
-                    CHECK (validation_status IN ('unverified', 'verified'))
+                    CHECK (validation_status IN ('unverified', 'verified')),
+                    CHECK (link_mode IN ('independent', 'link')),
+                    CHECK (kind IN ('single', 'shot_template', 'scene_pack', 'transition_pack'))
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_materials_type_updated
@@ -511,6 +515,29 @@ class DatabaseManager:
                 CREATE INDEX IF NOT EXISTS idx_material_versions_material
                     ON material_versions(material_id, version_number DESC);
 
+                CREATE TABLE IF NOT EXISTS material_pack_items (
+                    id TEXT PRIMARY KEY,
+                    pack_material_id TEXT NOT NULL,
+                    member_material_id TEXT NOT NULL,
+                    member_material_page_id TEXT,
+                    slot_role TEXT NOT NULL DEFAULT '',
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (pack_material_id)
+                        REFERENCES materials(id) ON DELETE CASCADE,
+                    FOREIGN KEY (member_material_id)
+                        REFERENCES materials(id) ON DELETE RESTRICT,
+                    FOREIGN KEY (member_material_page_id)
+                        REFERENCES material_pages(id) ON DELETE SET NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_material_pack_items_pack
+                    ON material_pack_items(pack_material_id, sort_order);
+
+                CREATE INDEX IF NOT EXISTS idx_material_pack_items_member
+                    ON material_pack_items(member_material_id);
+
                 CREATE TABLE IF NOT EXISTS small_scene_page_mappings (
                     id TEXT PRIMARY KEY,
                     scene_page_id TEXT NOT NULL,
@@ -625,6 +652,10 @@ class DatabaseManager:
             self._run_migration(
                 connection, "v0.8.1", "Fix stale FK references to materials_old_v052 after materials table rebuild",
                 self._migrate_fix_materials_fk_references,
+            )
+            self._run_migration(
+                connection, "v0.8.2", "Extend materials with link_mode/kind and add material_pack_items table for MOD-02 reuse modes and packs",
+                self._migrate_materials_mod02_extend,
             )
             marker = connection.execute(
                 "SELECT value FROM atelier_meta WHERE key = 'environment'"
@@ -2415,6 +2446,65 @@ class DatabaseManager:
             # 5. 重建索引
             for idx_sql in index_sqls:
                 connection.execute(idx_sql)
+
+    def _migrate_materials_mod02_extend(self, connection) -> None:
+        """v0.8.2: 扩展 materials 表,新增 link_mode 和 kind 字段,并新增
+        material_pack_items 表用于镜头模板/场景包/转场包的成员管理。
+
+        - link_mode: 'independent' (默认,独立副本) 或 'link' (链接引用源素材)
+        - kind: 'single' (默认,普通素材) / 'shot_template' / 'scene_pack' /
+          'transition_pack'
+        - material_pack_items: 包类型素材的成员列表,记录 member_material_id
+          和 member_material_page_id、slot_role、sort_order
+
+        幂等:通过 PRAGMA 检查列是否存在。
+        """
+        mat_exists = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='materials'",
+        ).fetchone()
+        if mat_exists:
+            cols = [row["name"] for row in connection.execute("PRAGMA table_info(materials)").fetchall()]
+            if "link_mode" not in cols:
+                connection.execute(
+                    "ALTER TABLE materials ADD COLUMN link_mode TEXT NOT NULL DEFAULT 'independent'"
+                )
+            if "kind" not in cols:
+                connection.execute(
+                    "ALTER TABLE materials ADD COLUMN kind TEXT NOT NULL DEFAULT 'single'"
+                )
+            # 补回 link_mode='independent' 和 kind='single' 给历史 NULL 值
+            connection.execute(
+                "UPDATE materials SET link_mode = 'independent' WHERE link_mode IS NULL"
+            )
+            connection.execute(
+                "UPDATE materials SET kind = 'single' WHERE kind IS NULL"
+            )
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS material_pack_items (
+                id TEXT PRIMARY KEY,
+                pack_material_id TEXT NOT NULL,
+                member_material_id TEXT NOT NULL,
+                member_material_page_id TEXT,
+                slot_role TEXT NOT NULL DEFAULT '',
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (pack_material_id) REFERENCES materials(id) ON DELETE CASCADE,
+                FOREIGN KEY (member_material_id) REFERENCES materials(id) ON DELETE RESTRICT,
+                FOREIGN KEY (member_material_page_id) REFERENCES material_pages(id) ON DELETE SET NULL
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_material_pack_items_pack "
+            "ON material_pack_items(pack_material_id, sort_order)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_material_pack_items_member "
+            "ON material_pack_items(member_material_id)"
+        )
 
     def activate(self, environment: DatabaseEnvironment) -> None:
         target_environment = self._validate_environment(environment)
@@ -7578,7 +7668,7 @@ class DatabaseManager:
         "id, name, material_type, description, content, "
         "prompt_text, negative_prompt, validation_status, notes, "
         "preview_original_path, preview_thumbnail_path, "
-        "archived_at, deleted_at, source_material_id, "
+        "archived_at, deleted_at, source_material_id, link_mode, kind, "
         "revision, created_at, updated_at"
     )
 
@@ -8046,6 +8136,38 @@ class DatabaseManager:
                 )
         return self.get_material(material_id, environment=target_environment)
 
+    def delete_material_version(
+        self,
+        material_id: str,
+        version_number: int,
+        environment: DatabaseEnvironment | None = None,
+    ) -> bool:
+        """Delete a specific version snapshot of a material.
+
+        Returns True if a row was deleted, False if the version did not exist.
+        Refuses to delete the only remaining version to preserve at least one
+        historical snapshot; caller should handle the False return as 409.
+        """
+        target_environment = environment or self._active_environment
+        with self._lock, self.connection(target_environment) as connection:
+            existing = connection.execute(
+                "SELECT id FROM materials WHERE id = ?",
+                (material_id,),
+            ).fetchone()
+            if existing is None:
+                raise ValueError("素材不存在。")
+            total = connection.execute(
+                "SELECT COUNT(*) FROM material_versions WHERE material_id = ?",
+                (material_id,),
+            ).fetchone()[0]
+            if total <= 1:
+                return False
+            cursor = connection.execute(
+                "DELETE FROM material_versions WHERE material_id = ? AND version_number = ?",
+                (material_id, version_number),
+            )
+            return cursor.rowcount > 0
+
     # ── Material Copy (v0.5.2) ─────────────────────────────────────────
 
     def copy_material(
@@ -8053,13 +8175,19 @@ class DatabaseManager:
         material_id: str,
         *,
         new_name: str,
+        mode: Literal["independent", "link"] = "independent",
         environment: DatabaseEnvironment | None = None,
     ) -> dict[str, object]:
         """Copy a material and its pages. Returns the new material.
 
-        The new material has: name=new_name, source_material_id=source_id,
-        status='unverified', no preview images. Pages are copied with
-        source_page_id set to the source page id.
+        Modes:
+        - ``independent`` (default): deep copy. New material has its own pages,
+          ``source_material_id`` records the origin for traceability only.
+          Editing the copy does not affect the source.
+        - ``link``: lightweight reference. New material row still owns no pages,
+          but ``source_material_id`` points to the origin and ``link_mode='link'``
+          is recorded. Reads resolve pages from the source material at query
+          time so source edits propagate to all links.
         """
         target_environment = environment or self._active_environment
         clean_name = self._normalize_material_name(new_name)
@@ -8077,40 +8205,267 @@ class DatabaseManager:
                     id, name, material_type, description, content,
                     prompt_text, negative_prompt, validation_status, notes,
                     preview_original_path, preview_thumbnail_path,
-                    archived_at, deleted_at, source_material_id,
+                    archived_at, deleted_at, source_material_id, link_mode,
                     revision, created_at, updated_at
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?, 'unverified', ?, NULL, NULL, NULL, NULL, ?, 1, ?, ?)""",
+                VALUES(?, ?, ?, ?, ?, ?, ?, 'unverified', ?, NULL, NULL, NULL, NULL, ?, ?, 1, ?, ?)""",
                 (new_material_id, clean_name, source["material_type"],
                  source["description"], source["content"],
                  source["prompt_text"], source["negative_prompt"],
-                 source["notes"], material_id, now, now),
+                 source["notes"], material_id, mode, now, now),
             )
-            # Copy tags
+            # Copy tags (both modes keep tag set; link mode tags can drift)
             tags = self._get_material_tags(connection, material_id)
             if tags:
                 self._sync_material_tags(connection, new_material_id, tags, now)
-            # Copy pages
-            pages = connection.execute(
-                """SELECT id, name, description, content, prompt_text, negative_prompt,
-                          sort_order
+            # Independent mode: copy pages. Link mode: pages resolved at read.
+            if mode == "independent":
+                pages = connection.execute(
+                    """SELECT id, name, description, content, prompt_text, negative_prompt,
+                              sort_order
+                       FROM material_pages WHERE material_id = ?
+                       ORDER BY sort_order ASC""",
+                    (material_id,),
+                ).fetchall()
+                for page in pages:
+                    new_page_id = str(uuid4())
+                    connection.execute(
+                        """INSERT INTO material_pages
+                           (id, material_id, name, description, content, prompt_text,
+                            negative_prompt, preview_original_path, preview_thumbnail_path,
+                            source_page_id, sort_order, revision, created_at, updated_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, 1, ?, ?)""",
+                        (new_page_id, new_material_id, page["name"], page["description"],
+                         page["content"], page["prompt_text"], page["negative_prompt"],
+                         page["id"], page["sort_order"], now, now),
+                    )
+        return self.get_material(new_material_id, environment=target_environment)
+
+    def resolve_material_pages(
+        self,
+        material_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> list[dict[str, object]]:
+        """Return the effective pages for a material, resolving links.
+
+        For materials with ``link_mode='link'``, pages are read from the
+        ``source_material_id`` chain. For independent materials, returns the
+        material's own pages. Follows up to 10 hops to prevent cycles.
+        """
+        target_environment = environment or self._active_environment
+        with self.connection(target_environment) as connection:
+            current_id = material_id
+            visited: set[str] = set()
+            for _ in range(10):
+                if current_id in visited:
+                    break
+                visited.add(current_id)
+                row = connection.execute(
+                    "SELECT source_material_id, link_mode FROM materials WHERE id = ?",
+                    (current_id,),
+                ).fetchone()
+                if row is None:
+                    return []
+                if row["link_mode"] != "link" or not row["source_material_id"]:
+                    break
+                current_id = row["source_material_id"]
+            rows = connection.execute(
+                """SELECT id, material_id, name, description, content, prompt_text,
+                          negative_prompt, preview_original_path, preview_thumbnail_path,
+                          source_page_id, sort_order, revision, created_at, updated_at
                    FROM material_pages WHERE material_id = ?
                    ORDER BY sort_order ASC""",
-                (material_id,),
+                (current_id,),
             ).fetchall()
-            for page in pages:
-                new_page_id = str(uuid4())
-                connection.execute(
-                    """INSERT INTO material_pages
-                       (id, material_id, name, description, content, prompt_text,
-                        negative_prompt, preview_original_path, preview_thumbnail_path,
-                        source_page_id, sort_order, revision, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, 1, ?, ?)""",
-                    (new_page_id, new_material_id, page["name"], page["description"],
-                     page["content"], page["prompt_text"], page["negative_prompt"],
-                     page["id"], page["sort_order"], now, now),
-                )
-        return self.get_material(new_material_id, environment=target_environment)
+        return [dict(row) for row in rows]
+
+    # ── Material Pack Items (MOD-02 v0.8.2) ────────────────────────────
+
+    _VALID_MATERIAL_KINDS: tuple[str, ...] = (
+        "single",
+        "shot_template",
+        "scene_pack",
+        "transition_pack",
+    )
+
+    _PACK_ITEM_SELECT_COLUMNS = (
+        "id, pack_material_id, member_material_id, member_material_page_id, "
+        "slot_role, sort_order, created_at, updated_at"
+    )
+
+    def list_material_pack_items(
+        self,
+        pack_material_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> list[dict[str, object]]:
+        """List all members of a pack material, ordered by sort_order."""
+        target_environment = environment or self._active_environment
+        with self.connection(target_environment) as connection:
+            rows = connection.execute(
+                f"""SELECT {self._PACK_ITEM_SELECT_COLUMNS}
+                    FROM material_pack_items
+                    WHERE pack_material_id = ?
+                    ORDER BY sort_order ASC""",
+                (pack_material_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def add_material_pack_item(
+        self,
+        pack_material_id: str,
+        *,
+        member_material_id: str,
+        member_material_page_id: str | None = None,
+        slot_role: str = "",
+        sort_order: int | None = None,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        """Add a member to a pack material.
+
+        If sort_order is None, appends to the end (max+1). Validates that the
+        pack material exists and has kind != 'single'. Returns the new item.
+        """
+        target_environment = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        item_id = str(uuid4())
+        with self._lock, self.connection(target_environment) as connection:
+            pack = connection.execute(
+                "SELECT id, kind FROM materials WHERE id = ?",
+                (pack_material_id,),
+            ).fetchone()
+            if pack is None:
+                raise ValueError("包素材不存在。")
+            if pack["kind"] == "single":
+                raise ValueError("普通素材不能添加包成员,请先将其 kind 设置为包类型。")
+            member = connection.execute(
+                "SELECT id FROM materials WHERE id = ?",
+                (member_material_id,),
+            ).fetchone()
+            if member is None:
+                raise ValueError("成员素材不存在。")
+            if member_material_page_id is not None:
+                page = connection.execute(
+                    "SELECT id FROM material_pages WHERE id = ? AND material_id = ?",
+                    (member_material_page_id, member_material_id),
+                ).fetchone()
+                if page is None:
+                    raise ValueError("成员素材页不存在或不属于该成员素材。")
+            if sort_order is None:
+                max_order = connection.execute(
+                    "SELECT COALESCE(MAX(sort_order), -1) FROM material_pack_items "
+                    "WHERE pack_material_id = ?",
+                    (pack_material_id,),
+                ).fetchone()[0]
+                sort_order = max_order + 1
+            connection.execute(
+                f"""INSERT INTO material_pack_items
+                    ({self._PACK_ITEM_SELECT_COLUMNS})
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (item_id, pack_material_id, member_material_id,
+                 member_material_page_id, slot_role, sort_order, now, now),
+            )
+        return {
+            "id": item_id,
+            "pack_material_id": pack_material_id,
+            "member_material_id": member_material_id,
+            "member_material_page_id": member_material_page_id,
+            "slot_role": slot_role,
+            "sort_order": sort_order,
+            "created_at": now,
+            "updated_at": now,
+        }
+
+    def update_material_pack_item(
+        self,
+        item_id: str,
+        *,
+        slot_role: str | None = None,
+        sort_order: int | None = None,
+        member_material_page_id: str | None = None,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        """Update a pack item's slot_role, sort_order, or page reference.
+
+        Returns the updated item, or None if not found.
+        """
+        target_environment = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self.connection(target_environment) as connection:
+            existing = connection.execute(
+                f"SELECT {self._PACK_ITEM_SELECT_COLUMNS} FROM material_pack_items WHERE id = ?",
+                (item_id,),
+            ).fetchone()
+            if existing is None:
+                return None
+            updates: list[str] = ["updated_at = ?"]
+            params: list[object] = [now]
+            if slot_role is not None:
+                updates.append("slot_role = ?")
+                params.append(slot_role)
+            if sort_order is not None:
+                updates.append("sort_order = ?")
+                params.append(sort_order)
+            if member_material_page_id is not None:
+                # Validate page belongs to the member material
+                page = connection.execute(
+                    "SELECT id FROM material_pages WHERE id = ? AND material_id = ?",
+                    (member_material_page_id, existing["member_material_id"]),
+                ).fetchone()
+                if page is None:
+                    raise ValueError("成员素材页不存在或不属于该成员素材。")
+                updates.append("member_material_page_id = ?")
+                params.append(member_material_page_id)
+            params.append(item_id)
+            connection.execute(
+                f"UPDATE material_pack_items SET {', '.join(updates)} WHERE id = ?",
+                params,
+            )
+            row = connection.execute(
+                f"SELECT {self._PACK_ITEM_SELECT_COLUMNS} FROM material_pack_items WHERE id = ?",
+                (item_id,),
+            ).fetchone()
+        return dict(row)
+
+    def remove_material_pack_item(
+        self,
+        item_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> bool:
+        """Remove a member from a pack. Returns True if deleted."""
+        target_environment = environment or self._active_environment
+        with self._lock, self.connection(target_environment) as connection:
+            cursor = connection.execute(
+                "DELETE FROM material_pack_items WHERE id = ?",
+                (item_id,),
+            )
+            return cursor.rowcount > 0
+
+    def set_material_kind(
+        self,
+        material_id: str,
+        kind: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        """Change the kind of a material (single/shot_template/scene_pack/transition_pack).
+
+        Returns the updated material, or None if not found.
+        """
+        if kind not in self._VALID_MATERIAL_KINDS:
+            raise ValueError(f"不支持的素材 kind: {kind}")
+        target_environment = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self.connection(target_environment) as connection:
+            existing = connection.execute(
+                "SELECT id FROM materials WHERE id = ?",
+                (material_id,),
+            ).fetchone()
+            if existing is None:
+                return None
+            connection.execute(
+                "UPDATE materials SET kind = ?, updated_at = ? WHERE id = ?",
+                (kind, now, material_id),
+            )
+        return self.get_material(material_id, environment=target_environment)
 
     # ── Branch Overrides (v0.5.4) ──────────────────────────────────────
 
