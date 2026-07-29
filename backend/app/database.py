@@ -8456,13 +8456,23 @@ class DatabaseManager:
         target_environment = environment or self._active_environment
         with self.connection(target_environment) as connection:
             rows = connection.execute(
-                """SELECT id, project_id, label, created_at
+                """SELECT id, project_id, label, snapshot_data, created_at
                    FROM story_snapshots
                    WHERE project_id = ?
                    ORDER BY created_at DESC""",
                 (project_id,),
             ).fetchall()
-        return [dict(row) for row in rows]
+        snapshots: list[dict[str, object]] = []
+        for row in rows:
+            item = dict(row)
+            try:
+                data = json.loads(str(item.pop("snapshot_data")))
+                item["page_count"] = len(data.get("shot_pages", []))
+            except (TypeError, ValueError, AttributeError):
+                item.pop("snapshot_data", None)
+                item["page_count"] = 0
+            snapshots.append(item)
+        return snapshots
 
     def get_story_snapshot(
         self,
@@ -8740,8 +8750,8 @@ class DatabaseManager:
                     before_state, after_state, created_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (redo_id, op["project_id"], op["operation_type"], entity_type, entity_id,
-                 json.dumps(current_state, ensure_ascii=False) if current_state else None,
-                 json.dumps(before, ensure_ascii=False), now),
+                 json.dumps(before, ensure_ascii=False),
+                 json.dumps(current_state, ensure_ascii=False) if current_state else None, now),
             )
         return {
             "undone_operation_id": operation_id,

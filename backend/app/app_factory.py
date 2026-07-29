@@ -421,6 +421,7 @@ class AddNodeRequest(BaseModel):
 class UpdateNodeRequest(BaseModel):
     title: str | None = Field(default=None, max_length=200)
     widgets_values: list | None = None
+    mode: int | None = Field(default=None, ge=0)
     flags: dict | None = None
     properties: dict | None = None
 
@@ -1114,6 +1115,8 @@ class CompileRequest(BaseModel):
     instance_count: int = Field(default=1, ge=1, le=100)
     seed_strategy: str = Field(default="fixed")
     seed_base: int | None = Field(default=None, ge=0)
+    width: int | None = Field(default=None, ge=64, le=16384)
+    height: int | None = Field(default=None, ge=64, le=16384)
     workflow_id: str | None = None
     workflow_version_id: str | None = None
     skip_adopted: bool = False
@@ -1145,6 +1148,8 @@ class BatchConfigRequest(BaseModel):
     instance_count: int = Field(default=1, ge=1, le=100)
     seed_strategy: str = Field(default="fixed")
     seed_base: int | None = Field(default=None, ge=0)
+    width: int | None = Field(default=None, ge=64, le=16384)
+    height: int | None = Field(default=None, ge=64, le=16384)
     workflow_id: str | None = None
     workflow_version_id: str | None = None
     skip_adopted: bool = False
@@ -1443,6 +1448,27 @@ def _lookup_project_id_for_large_scene(manager: DatabaseManager, large_scene_id:
         chapter = manager.get_chapter(chapter_id)
         if chapter:
             return chapter.get("project_id")
+    except Exception:
+        pass
+    return None
+
+
+def _lookup_project_id_for_branch(manager: DatabaseManager, branch_id: str) -> str | None:
+    """通过分支 ID 反查所属项目 ID（用于操作记录）。"""
+    try:
+        branch = manager.get_branch(branch_id)
+        if not branch:
+            return None
+        parent_type = branch.get("parent_type")
+        parent_id = branch.get("parent_id")
+        if parent_type == "large_scene":
+            return _lookup_project_id_for_large_scene(manager, str(parent_id))
+        if parent_type == "small_scene":
+            small_scene = manager.get_small_scene(str(parent_id))
+            if small_scene:
+                return _lookup_project_id_for_large_scene(
+                    manager, str(small_scene.get("large_scene_id"))
+                )
     except Exception:
         pass
     return None
@@ -2512,6 +2538,8 @@ def create_app(
                 if value_idx < len(request.widgets_values):
                     inp["value"] = request.widgets_values[value_idx]
                     value_idx += 1
+        if request.mode is not None:
+            target["mode"] = request.mode
         if request.flags is not None:
             current_flags = target.get("flags", {}) if isinstance(target.get("flags"), dict) else {}
             current_flags.update(request.flags)
@@ -5286,6 +5314,9 @@ def create_app(
 
     @app.patch("/api/branches/{branch_id}")
     def update_branch(branch_id: str, request: UpdateBranchRequest) -> dict[str, object]:
+        before = manager.get_branch(branch_id)
+        if before is None:
+            raise HTTPException(status_code=404, detail="分支不存在")
         try:
             branch = manager.update_branch(
                 branch_id,
@@ -5300,6 +5331,19 @@ def create_app(
             raise HTTPException(status_code=409, detail=str(error)) from error
         if branch is None:
             raise HTTPException(status_code=404, detail="分支不存在")
+        project_id = _lookup_project_id_for_branch(manager, branch_id)
+        if project_id:
+            try:
+                manager.record_operation(
+                    project_id,
+                    "rename",
+                    "branch",
+                    branch_id,
+                    before_state=before,
+                    after_state=branch,
+                )
+            except Exception:
+                logger.warning("记录分支编辑操作失败", exc_info=True)
         return {
             "database_environment": manager.active_environment,
             "branch": branch,
@@ -6036,6 +6080,8 @@ def create_app(
                 instance_count=request.instance_count,
                 seed_strategy=request.seed_strategy,
                 seed_base=request.seed_base,
+                width_override=request.width,
+                height_override=request.height,
                 workflow_id_override=request.workflow_id,
                 workflow_version_id_override=request.workflow_version_id,
                 skip_adopted=request.skip_adopted,
@@ -6066,6 +6112,8 @@ def create_app(
             instance_count=request.config.instance_count,
             seed_strategy=request.config.seed_strategy,
             seed_base=request.config.seed_base,
+            width=request.config.width,
+            height=request.config.height,
             workflow_id=request.config.workflow_id,
             workflow_version_id=request.config.workflow_version_id,
             skip_adopted=request.config.skip_adopted,
@@ -6118,6 +6166,8 @@ def create_app(
                 instance_count=request.config.instance_count,
                 seed_strategy=request.config.seed_strategy,
                 seed_base=request.config.seed_base,
+                width=request.config.width,
+                height=request.config.height,
                 workflow_id=request.config.workflow_id,
                 workflow_version_id=request.config.workflow_version_id,
                 skip_adopted=request.config.skip_adopted,

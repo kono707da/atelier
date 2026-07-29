@@ -269,6 +269,21 @@ class SSEGeneratorTests(unittest.TestCase):
 
         asyncio.run(_test())
 
+    def test_current_terminal_state_stops_and_unsubscribes(self) -> None:
+        """订阅前任务已完成时只推送一次终态并立即释放订阅。"""
+
+        async def _test():
+            tracker = ProgressTracker()
+            tracker.update("prompt-1", {"type": "execution_success", "data": {}})
+            gen = sse_progress_generator(tracker, "prompt-1", timeout_seconds=2.0)
+            events = [event async for event in gen]
+            self.assertEqual(len(events), 1)
+            data = json.loads(events[0][6:].strip())
+            self.assertEqual(data["status"], "completed")
+            self.assertNotIn("prompt-1", tracker._subscribers)
+
+        asyncio.run(_test())
+
     def test_stops_on_completion(self) -> None:
         """任务完成时 SSE 停止推送。"""
 
@@ -489,6 +504,33 @@ class PollHistoryTests(_ProgressTestBase):
         response = self.client.get(f"/api/attempts/{attempt_id}")
         self.assertEqual(response.json()["attempt"]["status"], "failed")
 
+    def test_poll_current_comfyui_error_shape_marks_failed(self) -> None:
+        """Current ComfyUI uses completed=false and execution_error messages."""
+        _, attempt_id, prompt_id = self._setup_submitted_attempt()
+        self.mock_comfyui.get_history.return_value = {
+            prompt_id: {
+                "status": {
+                    "status_str": "error",
+                    "completed": False,
+                    "messages": [
+                        [
+                            "execution_error",
+                            {"exception_message": "model inputs are incompatible"},
+                        ]
+                    ],
+                },
+                "outputs": {},
+            },
+        }
+        result = poll_comfyui_history_for_attempt(
+            self.manager, self.mock_comfyui, attempt_id
+        )
+        self.assertEqual(result["status"], "error")
+        response = self.client.get(f"/api/attempts/{attempt_id}")
+        attempt = response.json()["attempt"]
+        self.assertEqual(attempt["status"], "failed")
+        self.assertIn("model inputs are incompatible", attempt["error_message"])
+
     def test_poll_not_found_returns_none(self) -> None:
         """历史中不存在 prompt_id 时返回 None。"""
         _, attempt_id, prompt_id = self._setup_submitted_attempt()
@@ -559,6 +601,31 @@ class RecoverSubmittedTests(_ProgressTestBase):
         self.assertEqual(result["recovered_failed"], 1)
         response = self.client.get(f"/api/attempts/{attempt_id}")
         self.assertEqual(response.json()["attempt"]["status"], "failed")
+
+    def test_recover_current_comfyui_error_shape(self) -> None:
+        """Recovery accepts the current ComfyUI history error structure."""
+        _, attempt_id, prompt_id = self._setup_submitted_attempt()
+        self.mock_comfyui.get_history.return_value = {
+            prompt_id: {
+                "status": {
+                    "status_str": "error",
+                    "completed": False,
+                    "messages": [
+                        [
+                            "execution_error",
+                            {"exception_message": "current history error"},
+                        ]
+                    ],
+                },
+                "outputs": {},
+            },
+        }
+        result = recover_submitted_attempts(self.manager, self.mock_comfyui)
+        self.assertEqual(result["recovered_failed"], 1)
+        response = self.client.get(f"/api/attempts/{attempt_id}")
+        attempt = response.json()["attempt"]
+        self.assertEqual(attempt["status"], "failed")
+        self.assertIn("current history error", attempt["error_message"])
 
     def test_recover_not_found_marks_unknown(self) -> None:
         """重启后 ComfyUI 历史中不存在，标记 unknown。"""

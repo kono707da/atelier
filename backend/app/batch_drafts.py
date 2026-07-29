@@ -40,6 +40,8 @@ class BatchConfig:
     instance_count: int = 1
     seed_strategy: str = "fixed"
     seed_base: int | None = None
+    width: int | None = None
+    height: int | None = None
     workflow_id: str | None = None
     workflow_version_id: str | None = None
     skip_adopted: bool = False
@@ -50,6 +52,8 @@ class BatchConfig:
             "instance_count": self.instance_count,
             "seed_strategy": self.seed_strategy,
             "seed_base": self.seed_base,
+            "width": self.width,
+            "height": self.height,
             "workflow_id": self.workflow_id,
             "workflow_version_id": self.workflow_version_id,
             "skip_adopted": self.skip_adopted,
@@ -63,6 +67,8 @@ class BatchConfig:
             instance_count=int(data.get("instance_count", 1)),
             seed_strategy=data.get("seed_strategy", "fixed"),
             seed_base=data.get("seed_base"),
+            width=data.get("width"),
+            height=data.get("height"),
             workflow_id=data.get("workflow_id"),
             workflow_version_id=data.get("workflow_version_id"),
             skip_adopted=bool(data.get("skip_adopted", False)),
@@ -81,6 +87,9 @@ class BatchConfig:
             raise ValueError("instance_count 必须 <= 100")
         if self.seed_base is not None and self.seed_base < 0:
             raise ValueError("seed_base 必须 >= 0")
+        for label, value in (("width", self.width), ("height", self.height)):
+            if value is not None and not 64 <= int(value) <= 16384:
+                raise ValueError(f"{label} 必须在 64 到 16384 之间")
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -298,6 +307,8 @@ def preview_draft(
         instance_count=config.instance_count,
         seed_strategy=config.seed_strategy,
         seed_base=config.seed_base,
+        width_override=config.width,
+        height_override=config.height,
         workflow_id_override=config.workflow_id,
         workflow_version_id_override=config.workflow_version_id,
         skip_adopted=config.skip_adopted,

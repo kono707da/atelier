@@ -38,6 +38,8 @@ class BatchConfigTests(unittest.TestCase):
         self.assertIsNone(cfg.workflow_id)
         self.assertFalse(cfg.skip_adopted)
         self.assertFalse(cfg.only_failed)
+        self.assertIsNone(cfg.width)
+        self.assertIsNone(cfg.height)
 
     def test_from_dict(self) -> None:
         cfg = BatchConfig.from_dict({
@@ -46,12 +48,16 @@ class BatchConfigTests(unittest.TestCase):
             "seed_base": 100,
             "workflow_id": "w1",
             "skip_adopted": True,
+            "width": 832,
+            "height": 1216,
         })
         self.assertEqual(cfg.instance_count, 4)
         self.assertEqual(cfg.seed_strategy, "increment")
         self.assertEqual(cfg.seed_base, 100)
         self.assertEqual(cfg.workflow_id, "w1")
         self.assertTrue(cfg.skip_adopted)
+        self.assertEqual(cfg.width, 832)
+        self.assertEqual(cfg.height, 1216)
         self.assertFalse(cfg.only_failed)
 
     def test_to_dict_roundtrip(self) -> None:

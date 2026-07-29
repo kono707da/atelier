@@ -241,6 +241,42 @@ class BranchApiTests(unittest.TestCase):
             response.json()["branch"]["description"], "更新后的描述"
         )
 
+    def test_update_branch_records_undoable_operation(self) -> None:
+        branch = self.manager.create_branch(
+            "small_scene", str(self.small_scene["id"]), "原始分支"
+        )
+        response = self.client.patch(
+            f"/api/branches/{branch['id']}",
+            json={
+                "name": "修改分支",
+                "description": "修改说明",
+                "condition_value": "修改条件",
+                "return_point": "主线第 2 页",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        operations = self.client.get(
+            f"/api/projects/{self.project['id']}/operations"
+        ).json()["items"]
+        self.assertEqual(len(operations), 1)
+        self.assertEqual(operations[0]["entity_type"], "branch")
+        self.assertEqual(operations[0]["before_state"]["name"], "原始分支")
+        self.assertEqual(operations[0]["after_state"]["name"], "修改分支")
+
+        undo = self.client.post(
+            f"/api/operations/{operations[0]['id']}/undo"
+        )
+        self.assertEqual(undo.status_code, 200)
+        self.assertEqual(
+            self.manager.get_branch(str(branch["id"]))["name"], "原始分支"
+        )
+        redo_id = undo.json()["redo_operation_id"]
+        redo = self.client.post(f"/api/operations/{redo_id}/redo")
+        self.assertEqual(redo.status_code, 200)
+        restored = self.manager.get_branch(str(branch["id"]))
+        self.assertEqual(restored["name"], "修改分支")
+        self.assertEqual(restored["description"], "修改说明")
+
     def test_update_branch_is_enabled_toggle(self) -> None:
         branch = self.manager.create_branch(
             "large_scene", str(self.large_scene["id"]), "开关分支"

@@ -137,6 +137,8 @@ class ProgressTracker:
                 self._subscribers[prompt_id].remove(queue)
             except ValueError:
                 pass
+            if not self._subscribers[prompt_id]:
+                self._subscribers.pop(prompt_id, None)
 
     def _notify(self, prompt_id: str, data: dict[str, Any]) -> None:
         """通知所有订阅者。"""
@@ -269,6 +271,30 @@ class ComfyUIWebSocketListener:
 # ──────────────────────────────────────────────────────────────────
 
 
+def _history_error_message(status_info: dict[str, Any]) -> str:
+    """Extract an error from both legacy and current ComfyUI history shapes."""
+    completed = status_info.get("completed")
+    if isinstance(completed, dict):
+        legacy_error = completed.get("error")
+        if legacy_error:
+            return str(legacy_error)
+    messages = status_info.get("messages")
+    if isinstance(messages, list):
+        for message in reversed(messages):
+            if not isinstance(message, (list, tuple)) or len(message) < 2:
+                continue
+            if message[0] != "execution_error" or not isinstance(message[1], dict):
+                continue
+            detail = message[1]
+            return str(
+                detail.get("exception_message")
+                or detail.get("exception_type")
+                or detail.get("message")
+                or "执行错误"
+            )
+    return str(status_info.get("error") or status_info.get("message") or "执行错误")
+
+
 def poll_comfyui_history_for_attempt(
     manager: Any,
     comfyui_client: ComfyUIClient,
@@ -324,7 +350,7 @@ def poll_comfyui_history_for_attempt(
         if status_str == "success":
             mark_attempt_completed(manager, attempt_id, environment=environment)
         elif status_str == "error":
-            error_msg = status_info.get("completed", {}).get("error", "执行错误")
+            error_msg = _history_error_message(status_info)
             from .task_queue import mark_attempt_failed
             mark_attempt_failed(
                 manager,
@@ -413,7 +439,7 @@ def recover_submitted_attempts(
             mark_attempt_completed(manager, attempt_id, environment=environment)
             recovered_completed += 1
         elif status_str == "error":
-            error_msg = status_info.get("completed", {}).get("error", "执行错误")
+            error_msg = _history_error_message(status_info)
             from .task_queue import mark_attempt_failed
             mark_attempt_failed(
                 manager,
@@ -459,12 +485,18 @@ async def sse_progress_generator(
 
     queue = await tracker.subscribe(prompt_id)
 
-    # 先发送当前状态（如果有）
-    current = tracker.get(prompt_id)
-    if current:
-        yield _format_sse_event(current)
-
     try:
+        # 先发送当前状态（如果有）。已经处于终态时必须立即结束，
+        # 否则 TestClient 和真实 EventSource 都会继续等待到 300 秒超时。
+        current = tracker.get(prompt_id)
+        if current:
+            is_terminal = current.get("status") in ("completed", "error", "interrupted")
+            yield _format_sse_event(current)
+            # current 是跟踪器中的可变字典；必须使用 yield 之前捕获的状态，
+            # 避免消费者在两次迭代之间更新它后跳过队列里的终态事件。
+            if is_terminal:
+                return
+
         deadline = asyncio.get_event_loop().time() + timeout_seconds
         while True:
             remaining = deadline - asyncio.get_event_loop().time()

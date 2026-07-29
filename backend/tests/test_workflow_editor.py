@@ -272,6 +272,16 @@ class NodeCrudTests(_EditorBase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["node"]["title"], "采样器（重命名）")
 
+    def test_update_node_mode(self) -> None:
+        wf = self._create_workflow()
+        self._import_sample_draft(wf["id"])
+        response = self.client.put(
+            f"/api/workflows/{wf['id']}/draft/nodes/2",
+            json={"mode": 2},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["node"]["mode"], 2)
+
     def test_update_unknown_node_rejected(self) -> None:
         """未知节点为只读，不能编辑。"""
         wf = self._create_workflow()

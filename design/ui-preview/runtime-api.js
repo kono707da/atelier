@@ -112,8 +112,15 @@
     workflowSlot: (workflowId, slotName) => `/api/workflows/${workflowId}/semantic-slots/${slotName}`,
     workflowDraftNodes: (id) => `/api/workflows/${id}/draft/nodes`,
     workflowDraftNode: (id, nodeId) => `/api/workflows/${id}/draft/nodes/${nodeId}`,
+    workflowDraftNodeDuplicate: (id, nodeId) => `/api/workflows/${id}/draft/nodes/${nodeId}/duplicate`,
+    workflowDraftNodeReorder: (id, nodeId) => `/api/workflows/${id}/draft/nodes/${nodeId}/reorder`,
+    workflowDraftNodeAssignGroup: (id, nodeId) => `/api/workflows/${id}/draft/nodes/${nodeId}/assign-group`,
     workflowDraftLinks: (id) => `/api/workflows/${id}/draft/links`,
     workflowDraftLink: (id, linkId) => `/api/workflows/${id}/draft/links/${linkId}`,
+    workflowDraftLayoutCompute: (id) => `/api/workflows/${id}/draft/layout/compute`,
+    workflowDraftGroups: (id) => `/api/workflows/${id}/draft/groups`,
+    workflowDraftGroup: (id, groupId) => `/api/workflows/${id}/draft/groups/${groupId}`,
+    workflowDraftFocus: (id) => `/api/workflows/${id}/draft/focus`,
     projectDefaultWorkflow: (projectId) => `/api/projects/${projectId}/default-workflow`,
     projectPrecheck: (projectId) => `/api/projects/${projectId}/precheck`,
     projectSnapshots: (projectId) => `/api/projects/${projectId}/snapshots`,
@@ -123,6 +130,33 @@
     operationUndo: (id) => `/api/operations/${id}/undo`,
     operationRedo: (id) => `/api/operations/${id}/redo`,
     storyTreeBranches: (parentType, parentId) => `/api/${parentType}/${parentId}/branches`,
+    batchDrafts: (projectId) => `/api/projects/${projectId}/batch-drafts`,
+    batchDraft: (id) => `/api/batch-drafts/${id}`,
+    batchDraftPreview: (id) => `/api/batch-drafts/${id}/preview`,
+    batchDraftCommit: (id) => `/api/batch-drafts/${id}/commit`,
+    projectBatches: (projectId) => `/api/projects/${projectId}/batches`,
+    batch: (id) => `/api/batches/${id}`,
+    batchStatus: (id) => `/api/batches/${id}/status`,
+    batchTasks: (id) => `/api/batches/${id}/tasks`,
+    batchProgress: (id) => `/api/batches/${id}/progress`,
+    tasks: "/api/tasks",
+    task: (id) => `/api/tasks/${id}`,
+    taskPriority: (id) => `/api/tasks/${id}/priority`,
+    taskClaim: "/api/tasks/claim",
+    taskAttempts: (id) => `/api/tasks/${id}/attempts`,
+    taskEvents: (id) => `/api/tasks/${id}/events`,
+    taskErrorDetail: (id) => `/api/tasks/${id}/error-detail`,
+    taskPreviewApiJson: (id) => `/api/tasks/${id}/preview-api-json`,
+    taskSubmit: (taskId, attemptId) => `/api/tasks/${taskId}/attempts/${attemptId}/submit-to-comfyui`,
+    attempt: (id) => `/api/attempts/${id}`,
+    attemptProgress: (id) => `/api/attempts/${id}/progress`,
+    attemptProgressSse: (id) => `/api/attempts/${id}/progress/sse`,
+    attemptProgressPoll: (id) => `/api/attempts/${id}/progress/poll`,
+    attemptCollectOutputs: (id) => `/api/attempts/${id}/collect-outputs`,
+    taskCenterSummary: "/api/task-center/summary",
+    recoverSubmittedTasks: "/api/tasks/recover-submitted",
+    expireStaleLeases: "/api/tasks/expire-stale-leases",
+    imageInstances: "/api/image-instances",
   };
 
   const emptyStateCopy = {
@@ -1025,11 +1059,12 @@
     submit.textContent = "正在导入…";
     error.textContent = "";
     try {
+      const sourceFormat = formatSelect.value === "ui" ? "ui_json" : "api_json";
       // 分两步：先创建空工作流，再导入 JSON 到草稿。
       // 后端 create_workflow 不接受 graph 参数，必须用独立 import 接口。
       const createResp = await request(API.workflows, {
         method: "POST",
-        body: JSON.stringify({ name, source_type: "import" }),
+        body: JSON.stringify({ name, source_type: sourceFormat }),
       });
       const workflowId = createResp.workflow?.id;
       if (!workflowId) {
@@ -1038,7 +1073,7 @@
       try {
         await request(API.workflowImport(workflowId), {
           method: "POST",
-          body: JSON.stringify({ raw_json: parsed, source_format: "auto" }),
+          body: JSON.stringify({ raw_json: parsed, source_format: sourceFormat }),
         });
       } catch (importError) {
         // 导入失败时删除刚创建的空工作流，避免残留垃圾数据。
@@ -1079,7 +1114,7 @@
       const formData = new FormData();
       formData.append("file", file);
       formData.append("name", file.name.replace(/\.[^.]+$/, "").slice(0, 120) || "从图片提取的工作流");
-      formData.append("source_type", "image");
+      formData.append("source_type", "image_metadata");
       if (typeof showToast === "function") showToast("正在从图片提取工作流…");
       try {
         await request(API.workflows, {
@@ -2719,8 +2754,9 @@
           <span class="story-toolbar-count">${chapters.length} 个章节 · ${largeSceneTotal} 个大场景 · ${smallSceneTotal} 个小场景</span>
           <span class="spacer"></span>
           <button class="tool" type="button" data-api-action="manage-branches" data-project-id="${escapeHtml(project.id)}" title="分支管理">分支管理</button>
-          <button class="tool" type="button" data-api-action="undo-operation" data-project-id="${escapeHtml(project.id)}" title="撤销上一步操作">撤销</button>
-          <button class="tool" type="button" data-api-action="redo-operation" data-project-id="${escapeHtml(project.id)}" title="重做已撤销操作">重做</button>
+          <span class="story-operation-recent" id="story-operation-recent">最近操作：无</span>
+          <button class="tool" type="button" data-api-action="undo-operation" data-project-id="${escapeHtml(project.id)}" title="撤销上一步操作" disabled>撤销</button>
+          <button class="tool" type="button" data-api-action="redo-operation" data-project-id="${escapeHtml(project.id)}" title="重做已撤销操作" disabled>重做</button>
           <button class="tool" type="button" data-story-canvas-action="zoom-out" title="缩小画布">−</button>
           <button class="tool story-zoom-label" type="button" data-story-canvas-action="zoom-reset" id="story-canvas-zoom-label">100%</button>
           <button class="tool" type="button" data-story-canvas-action="zoom-in" title="放大画布">＋</button>
@@ -3322,6 +3358,7 @@
       storyWorkspaceShell(project, hierarchy.chapters, hierarchy.backendAvailable)
     );
     bindStoryHierarchy(project.id);
+    await refreshStoryOperationControls(project.id);
   }
 
   // ==================== 剧本分支管理 ====================
@@ -3443,8 +3480,12 @@
           </select>
           <label class="label">分支名称</label>
           <input name="name" class="modal-input" maxlength="80" autocomplete="off" placeholder="例如：分支A" required />
+          <label class="label">说明（可选）</label>
+          <textarea name="description" class="modal-input" maxlength="500" rows="2" placeholder="这个分支用于处理什么变化"></textarea>
           <label class="label">条件（可选）</label>
-          <input name="condition" class="modal-input" maxlength="200" autocomplete="off" placeholder="分支触发条件描述" />
+          <input name="condition" class="modal-input" maxlength="500" autocomplete="off" placeholder="分支触发条件描述" />
+          <label class="label">返回点（可选）</label>
+          <input name="return_point" class="modal-input" maxlength="500" autocomplete="off" placeholder="例如：完成后返回主线第 5 页" />
           <div class="modal-error" id="create-branch-error" role="alert"></div>
           <button class="btn small primary" type="button" data-api-action="create-branch">创建分支</button>
         </form>
@@ -3474,7 +3515,10 @@
   }
 
   function renderBranchCard(branch) {
-    const isActive = branch.is_active !== false && branch.is_active !== 0;
+    const isActive = branch.is_enabled !== false && branch.is_enabled !== 0;
+    const condition = branch.condition_value || branch.condition || "";
+    const description = branch.description || "";
+    const returnPoint = branch.return_point || "";
     return `
       <div class="branch-card" data-branch-id="${escapeHtml(branch.id)}">
         <div class="branch-card-head">
@@ -3482,10 +3526,12 @@
           <span class="branch-card-status ${isActive ? "active" : "inactive"}">${isActive ? "启用" : "禁用"}</span>
         </div>
         <div class="branch-card-meta">
-          ${branch.condition ? `<span>条件：${escapeHtml(branch.condition)}</span>` : '<span class="muted">无条件</span>'}
+          ${description ? `<span>说明：${escapeHtml(description)}</span>` : ""}
+          ${condition ? `<span>条件：${escapeHtml(condition)}</span>` : '<span class="muted">无条件</span>'}
+          ${returnPoint ? `<span>返回点：${escapeHtml(returnPoint)}</span>` : ""}
         </div>
         <div class="branch-card-actions">
-          <button class="btn small" type="button" data-api-action="edit-branch" data-branch-id="${escapeHtml(branch.id)}" data-branch-name="${escapeHtml(branch.name)}" data-branch-condition="${escapeHtml(branch.condition || "")}" data-branch-active="${isActive ? "1" : "0"}">编辑</button>
+          <button class="btn small" type="button" data-api-action="edit-branch" data-branch-id="${escapeHtml(branch.id)}" data-branch-name="${escapeHtml(branch.name)}" data-branch-description="${escapeHtml(description)}" data-branch-condition="${escapeHtml(condition)}" data-branch-return-point="${escapeHtml(returnPoint)}" data-branch-active="${isActive ? "1" : "0"}">编辑</button>
           <button class="btn small soft" type="button" data-api-action="toggle-branch-active" data-branch-id="${escapeHtml(branch.id)}" data-branch-active="${isActive ? "1" : "0"}" data-branch-name="${escapeHtml(branch.name)}">${isActive ? "禁用" : "启用"}</button>
           <button class="btn small soft" type="button" data-api-action="add-branch-override" data-branch-id="${escapeHtml(branch.id)}" data-branch-name="${escapeHtml(branch.name)}">覆盖项</button>
           <button class="btn small danger-soft" type="button" data-api-action="delete-branch" data-branch-id="${escapeHtml(branch.id)}" data-branch-name="${escapeHtml(branch.name)}">删除</button>
@@ -3502,7 +3548,9 @@
     const submitBtn = button;
     const parentValue = form.querySelector('[name="parent"]').value;
     const name = form.querySelector('[name="name"]').value.trim().replace(/\s+/g, " ");
+    const description = form.querySelector('[name="description"]').value.trim();
     const condition = form.querySelector('[name="condition"]').value.trim();
+    const returnPoint = form.querySelector('[name="return_point"]').value.trim();
     if (!name) {
       if (error) error.textContent = "请输入分支名称。";
       form.querySelector('[name="name"]').focus();
@@ -3519,12 +3567,21 @@
     try {
       await request(API.branches(parentType, parentId), {
         method: "POST",
-        body: JSON.stringify({ name, condition: condition || undefined }),
+        body: JSON.stringify({
+          name,
+          description,
+          condition_type: condition ? "description" : "",
+          condition_value: condition,
+          return_point: returnPoint || null,
+        }),
       });
       if (typeof showToast === "function") showToast(`分支「${name}」已创建`);
       const modal = document.getElementById("branch-manage-modal");
       const projectId = modal?.dataset.projectId;
-      if (projectId) await refreshBranchList(projectId);
+      if (projectId) {
+        await refreshBranchList(projectId);
+        await refreshStoryOperationControls(projectId);
+      }
     } catch (requestError) {
       if (error) error.textContent = requestError.message;
     } finally {
@@ -3538,14 +3595,20 @@
     if (!card) return;
     const branchId = button.dataset.branchId;
     const name = button.dataset.branchName || "";
+    const description = button.dataset.branchDescription || "";
     const condition = button.dataset.branchCondition || "";
+    const returnPoint = button.dataset.branchReturnPoint || "";
     const isActive = button.dataset.branchActive === "1";
     card.innerHTML = `
       <form class="branch-edit-form" data-branch-id="${escapeHtml(branchId)}">
         <label class="label">分支名称</label>
         <input name="name" class="modal-input" maxlength="80" value="${escapeHtml(name)}" required />
+        <label class="label">说明</label>
+        <textarea name="description" class="modal-input" maxlength="500" rows="2">${escapeHtml(description)}</textarea>
         <label class="label">条件</label>
-        <input name="condition" class="modal-input" maxlength="200" value="${escapeHtml(condition)}" />
+        <input name="condition" class="modal-input" maxlength="500" value="${escapeHtml(condition)}" />
+        <label class="label">返回点</label>
+        <input name="return_point" class="modal-input" maxlength="500" value="${escapeHtml(returnPoint)}" />
         <label class="label">启用状态</label>
         <select name="is_active" class="modal-input">
           <option value="1" ${isActive ? "selected" : ""}>启用</option>
@@ -3566,7 +3629,9 @@
     const branchId = button.dataset.branchId;
     const error = form.querySelector(".modal-error");
     const name = form.querySelector('[name="name"]').value.trim().replace(/\s+/g, " ");
+    const description = form.querySelector('[name="description"]').value.trim();
     const condition = form.querySelector('[name="condition"]').value.trim();
+    const returnPoint = form.querySelector('[name="return_point"]').value.trim();
     const isActive = form.querySelector('[name="is_active"]').value === "1";
     if (!name) {
       if (error) error.textContent = "请输入分支名称。";
@@ -3577,12 +3642,22 @@
     try {
       await request(API.branch(branchId), {
         method: "PATCH",
-        body: JSON.stringify({ name, condition: condition || undefined, is_active: isActive }),
+        body: JSON.stringify({
+          name,
+          description,
+          condition_type: condition ? "description" : "",
+          condition_value: condition,
+          return_point: returnPoint,
+          is_enabled: isActive,
+        }),
       });
       if (typeof showToast === "function") showToast(`分支「${name}」已更新`);
       const modal = document.getElementById("branch-manage-modal");
       const projectId = modal?.dataset.projectId;
-      if (projectId) await refreshBranchList(projectId);
+      if (projectId) {
+        await refreshBranchList(projectId);
+        await refreshStoryOperationControls(projectId);
+      }
     } catch (requestError) {
       if (error) error.textContent = requestError.message;
     } finally {
@@ -3604,7 +3679,10 @@
       if (typeof showToast === "function") showToast(`分支「${name}」已删除`);
       const modal = document.getElementById("branch-manage-modal");
       const projectId = modal?.dataset.projectId;
-      if (projectId) await refreshBranchList(projectId);
+      if (projectId) {
+        await refreshBranchList(projectId);
+        await refreshStoryOperationControls(projectId);
+      }
     } catch (requestError) {
       if (typeof showToast === "function") showToast(requestError.message);
     }
@@ -3614,12 +3692,15 @@
     try {
       await request(API.branch(branchId), {
         method: "PATCH",
-        body: JSON.stringify({ is_active: !currentActive }),
+        body: JSON.stringify({ is_enabled: !currentActive }),
       });
       if (typeof showToast === "function") showToast(`分支「${name}」已${currentActive ? "禁用" : "启用"}`);
       const modal = document.getElementById("branch-manage-modal");
       const projectId = modal?.dataset.projectId;
-      if (projectId) await refreshBranchList(projectId);
+      if (projectId) {
+        await refreshBranchList(projectId);
+        await refreshStoryOperationControls(projectId);
+      }
     } catch (requestError) {
       if (typeof showToast === "function") showToast(requestError.message);
     }
@@ -3648,14 +3729,36 @@
             <option value="material">素材</option>
             <option value="parameter">参数</option>
           </select>
-          <label class="label">目标ID</label>
-          <input name="target_id" class="modal-input" maxlength="100" placeholder="被覆盖对象的ID" required />
-          <label class="label">覆盖值</label>
-          <textarea name="override_value" class="modal-input" rows="2" placeholder="覆盖后的值（JSON或文本）"></textarea>
+          <label class="label">作用目标 ID（可选）</label>
+          <input name="target_id" class="modal-input" maxlength="100" placeholder="留空表示整个分支；也可填写页面 ID" />
+          <div data-override-fields="character">
+            <label class="label">人物 ID</label>
+            <input name="character_id" class="modal-input" maxlength="100" placeholder="要采用的人物 ID" />
+            <label class="label">人物变体 ID（可选）</label>
+            <input name="variant_id" class="modal-input" maxlength="100" placeholder="要采用的人物变体 ID" />
+          </div>
+          <div data-override-fields="material" hidden>
+            <label class="label">素材 ID</label>
+            <input name="material_id" class="modal-input" maxlength="100" placeholder="要采用的素材 ID" />
+            <label class="label">素材页 ID（可选）</label>
+            <input name="material_page_id" class="modal-input" maxlength="100" placeholder="要采用的素材页 ID" />
+          </div>
+          <div data-override-fields="parameter" hidden>
+            <label class="label">参数键</label>
+            <input name="param_key" class="modal-input" maxlength="100" placeholder="例如 width" />
+            <label class="label">参数值</label>
+            <textarea name="param_value" class="modal-input" rows="2" maxlength="2000" placeholder="例如 1024"></textarea>
+          </div>
           <div class="modal-error" role="alert"></div>
           <button class="btn small primary" type="button" data-api-action="add-branch-override" data-branch-id="${escapeHtml(branchId)}" data-mode="save">添加覆盖</button>
         </form>
       `;
+      const typeSelect = section.querySelector('[name="override_type"]');
+      typeSelect?.addEventListener("change", () => {
+        section.querySelectorAll("[data-override-fields]").forEach((group) => {
+          group.hidden = group.dataset.overrideFields !== typeSelect.value;
+        });
+      });
     } catch (error) {
       section.innerHTML = `<div class="branch-modal-error">覆盖项加载失败：${escapeHtml(error.message)}</div>`;
     }
@@ -3664,11 +3767,21 @@
   function renderBranchOverrideItem(override) {
     const typeLabels = { character: "人物", material: "素材", parameter: "参数" };
     const typeLabel = typeLabels[override.override_type] || override.override_type || "未知";
+    let value = "";
+    if (override.override_type === "character") {
+      value = [override.character_id, override.variant_id].filter(Boolean).join(" / ");
+    } else if (override.override_type === "material") {
+      value = [override.material_id, override.material_page_id].filter(Boolean).join(" / ");
+    } else {
+      value = [override.param_key, override.param_value]
+        .filter((item) => item !== null && item !== undefined && item !== "")
+        .join(" = ");
+    }
     return `
       <div class="branch-override-item">
         <span class="branch-override-type">${escapeHtml(typeLabel)}</span>
         <span class="branch-override-target">${escapeHtml(override.target_id || "")}</span>
-        <span class="branch-override-value">${escapeHtml(override.override_value || "")}</span>
+        <span class="branch-override-value">${escapeHtml(value || "未设置")}</span>
         <button class="btn small danger-soft" type="button" data-api-action="delete-branch-override" data-override-id="${escapeHtml(override.id)}">删除</button>
       </div>
     `;
@@ -3681,9 +3794,17 @@
     const error = form.querySelector(".modal-error");
     const overrideType = form.querySelector('[name="override_type"]').value;
     const targetId = form.querySelector('[name="target_id"]').value.trim();
-    const overrideValue = form.querySelector('[name="override_value"]').value.trim();
-    if (!targetId) {
-      if (error) error.textContent = "请输入目标ID。";
+    const characterId = form.querySelector('[name="character_id"]').value.trim();
+    const variantId = form.querySelector('[name="variant_id"]').value.trim();
+    const materialId = form.querySelector('[name="material_id"]').value.trim();
+    const materialPageId = form.querySelector('[name="material_page_id"]').value.trim();
+    const paramKey = form.querySelector('[name="param_key"]').value.trim();
+    const paramValue = form.querySelector('[name="param_value"]').value.trim();
+    const typeIsValid = (overrideType === "character" && characterId)
+      || (overrideType === "material" && materialId)
+      || (overrideType === "parameter" && paramKey && paramValue);
+    if (!typeIsValid) {
+      if (error) error.textContent = "请填写当前覆盖类型所需的 ID 或参数键值。";
       return;
     }
     button.disabled = true;
@@ -3693,11 +3814,18 @@
         method: "POST",
         body: JSON.stringify({
           override_type: overrideType,
-          target_id: targetId,
-          override_value: overrideValue || undefined,
+          target_id: targetId || null,
+          character_id: overrideType === "character" ? characterId : null,
+          variant_id: overrideType === "character" ? (variantId || null) : null,
+          material_id: overrideType === "material" ? materialId : null,
+          material_page_id: overrideType === "material" ? (materialPageId || null) : null,
+          param_key: overrideType === "parameter" ? paramKey : null,
+          param_value: overrideType === "parameter" ? paramValue : null,
         }),
       });
       if (typeof showToast === "function") showToast("覆盖项已添加");
+      const section = document.querySelector(`[data-branch-overrides="${CSS.escape(branchId)}"]`);
+      if (section) section.innerHTML = "";
       await showBranchOverrides(branchId, "");
     } catch (requestError) {
       if (error) error.textContent = requestError.message;
@@ -3721,7 +3849,10 @@
       const section = document.querySelector(".branch-overrides-section:not(:empty)");
       if (section) {
         const branchId = section.dataset.branchOverrides;
-        if (branchId) await showBranchOverrides(branchId, "");
+        if (branchId) {
+          section.innerHTML = "";
+          await showBranchOverrides(branchId, "");
+        }
       }
     } catch (requestError) {
       if (typeof showToast === "function") showToast(requestError.message);
@@ -3788,8 +3919,6 @@
           <form id="create-snapshot-form" class="snapshot-create-form">
             <label class="label">标签</label>
             <input name="label" class="modal-input" maxlength="80" autocomplete="off" placeholder="例如：v1.0 初稿" required />
-            <label class="label">描述（可选）</label>
-            <textarea name="description" class="modal-input" rows="2" maxlength="500" placeholder="快照内容描述"></textarea>
             <div class="modal-error" id="create-snapshot-error" role="alert"></div>
             <button class="btn small primary" type="button" data-api-action="create-snapshot" data-project-id="${escapeHtml(projectId)}">创建快照</button>
           </form>
@@ -3818,7 +3947,6 @@
           <strong>${escapeHtml(snapshot.label || "未命名")}</strong>
           <span class="snapshot-card-time">${escapeHtml(created)}</span>
         </div>
-        ${snapshot.description ? `<p class="snapshot-card-desc">${escapeHtml(snapshot.description)}</p>` : ""}
         <div class="snapshot-card-meta">
           <span>页数：${escapeHtml(String(pageCount))}</span>
         </div>
@@ -3835,7 +3963,6 @@
     const projectId = button.dataset.projectId;
     const error = form.querySelector(".modal-error");
     const label = form.querySelector('[name="label"]').value.trim().replace(/\s+/g, " ");
-    const description = form.querySelector('[name="description"]').value.trim();
     if (!label) {
       if (error) error.textContent = "请输入快照标签。";
       return;
@@ -3846,7 +3973,7 @@
     try {
       await request(API.projectSnapshots(projectId), {
         method: "POST",
-        body: JSON.stringify({ label, description: description || undefined }),
+        body: JSON.stringify({ label }),
       });
       if (typeof showToast === "function") showToast(`快照「${label}」已创建`);
       await refreshSnapshotList(projectId);
@@ -3883,12 +4010,17 @@
     try {
       const payload = await request(API.projectOperations(projectId));
       const operations = payload.items || [];
-      const undoable = operations.find((op) => op.can_undo !== false && op.undone !== true);
+      const redoKey = `atelier-story-redo-${projectId}`;
+      const pendingRedoId = window.sessionStorage.getItem(redoKey);
+      const undoable = pendingRedoId ? null : operations[0];
       if (!undoable) {
         if (typeof showToast === "function") showToast("没有可撤销的操作");
         return;
       }
-      await request(API.operationUndo(undoable.id), { method: "POST" });
+      const result = await request(API.operationUndo(undoable.id), { method: "POST" });
+      if (result.redo_operation_id) {
+        window.sessionStorage.setItem(redoKey, result.redo_operation_id);
+      }
       if (typeof showToast === "function") showToast("操作已撤销");
       const project = await resolveCurrentProject();
       if (project) await renderProductionStoryCanvasV3(project);
@@ -3899,14 +4031,14 @@
 
   async function redoLastOperation(projectId) {
     try {
-      const payload = await request(API.projectOperations(projectId));
-      const operations = payload.items || [];
-      const redoable = operations.find((op) => op.can_redo !== false && op.undone === true);
-      if (!redoable) {
+      const redoKey = `atelier-story-redo-${projectId}`;
+      const redoOperationId = window.sessionStorage.getItem(redoKey);
+      if (!redoOperationId) {
         if (typeof showToast === "function") showToast("没有可重做的操作");
         return;
       }
-      await request(API.operationRedo(redoable.id), { method: "POST" });
+      await request(API.operationRedo(redoOperationId), { method: "POST" });
+      window.sessionStorage.removeItem(redoKey);
       if (typeof showToast === "function") showToast("操作已重做");
       const project = await resolveCurrentProject();
       if (project) await renderProductionStoryCanvasV3(project);
@@ -4099,14 +4231,41 @@
   function renderPrecheckItem(item, level) {
     const type = item.type || item.code || "未知";
     const description = item.description || item.message || "";
-    const target = item.target || item.target_id || item.related_object || "";
+    const target = item.entity_name || item.target || item.target_id || item.related_object || "";
+    const entityId = item.entity_id || item.target_id || "";
+    const entityType = item.entity_type || "";
     return `
       <div class="precheck-item precheck-item-${level}">
         <span class="precheck-item-type">${escapeHtml(String(type))}</span>
         <span class="precheck-item-desc">${escapeHtml(description)}</span>
         ${target ? `<span class="precheck-item-target">${escapeHtml(String(target))}</span>` : ""}
+        ${entityId ? `<button class="btn small soft" type="button" data-api-action="jump-precheck-issue" data-entity-id="${escapeHtml(String(entityId))}" data-entity-type="${escapeHtml(String(entityType))}">前往处理</button>` : ""}
       </div>
     `;
+  }
+
+  function jumpToPrecheckIssue(entityType, entityId) {
+    let target = null;
+    if (entityType === "shot_page") {
+      target = document.querySelector(`[data-scene-page-id="${CSS.escape(entityId)}"]`);
+    } else if (entityType === "small_scene") {
+      target = document.querySelector(`[data-small-scene-id="${CSS.escape(entityId)}"]`);
+    } else if (entityType === "large_scene") {
+      target = document.querySelector(`[data-large-scene-id="${CSS.escape(entityId)}"]`);
+    } else if (entityType === "chapter") {
+      target = document.querySelector(`[data-chapter-id="${CSS.escape(entityId)}"]`);
+    }
+    if (!target) {
+      if (typeof showToast === "function") showToast("当前画布中找不到对应对象");
+      return;
+    }
+    closePrecheckModal();
+    if (entityType === "shot_page" || entityType === "small_scene") {
+      openSmallSceneRoute(target.dataset.smallSceneId || entityId, entityType === "shot_page" ? entityId : "");
+      return;
+    }
+    target.scrollIntoView({ behavior: "smooth", block: "center" });
+    target.click();
   }
 
   const specTypeLabels = {
@@ -7650,7 +7809,7 @@
       });
       closeChapterModal();
       const project = await resolveCurrentProject();
-      await renderProductionStoryCanvas(project);
+      await renderProductionStoryCanvasV3(project);
       if (typeof showToast === "function") showToast(`章节「${name}」已创建`);
     } catch (requestError) {
       error.textContent = requestError.message;
@@ -7840,7 +7999,7 @@
       });
       closeLargeSceneEditModal();
       const project = await resolveCurrentProject();
-      await renderProductionStoryCanvas(project);
+      await renderProductionStoryCanvasV3(project);
       if (typeof showToast === "function") showToast(`大场景「${name}」已更新`);
     } catch (requestError) {
       error.textContent = requestError.message;
@@ -7881,7 +8040,7 @@
       });
       closeLargeSceneModal();
       const project = await resolveCurrentProject();
-      await renderProductionStoryCanvas(project);
+      await renderProductionStoryCanvasV3(project);
       if (typeof showToast === "function") showToast(`大场景「${name}」已创建`);
     } catch (requestError) {
       error.textContent = requestError.message;
@@ -8547,7 +8706,7 @@
   async function refreshAfterRename(type, id) {
     if (type === "chapter" || type === "large-scene") {
       const project = await resolveCurrentProject();
-      await renderProductionStoryCanvas(project);
+      await renderProductionStoryCanvasV3(project);
       return;
     }
     if (type === "character") {
@@ -8572,7 +8731,7 @@
     try {
       await request(`/api/chapters/${chapterId}`, { method: "DELETE" });
       const project = await resolveCurrentProject();
-      await renderProductionStoryCanvas(project);
+      await renderProductionStoryCanvasV3(project);
       if (typeof showToast === "function") showToast(`章节「${name}」已删除`);
     } catch (requestError) {
       if (typeof showToast === "function") showToast(requestError.message);
@@ -8590,7 +8749,7 @@
     try {
       await request(`/api/large-scenes/${largeSceneId}`, { method: "DELETE" });
       const project = await resolveCurrentProject();
-      await renderProductionStoryCanvas(project);
+      await renderProductionStoryCanvasV3(project);
       if (typeof showToast === "function") showToast(`大场景「${name}」已删除`);
     } catch (requestError) {
       if (typeof showToast === "function") showToast(requestError.message);
@@ -8898,12 +9057,12 @@
           }),
         });
         const project = await resolveCurrentProject();
-        await renderProductionStoryCanvas(project);
+        await renderProductionStoryCanvasV3(project);
         if (typeof showToast === "function") showToast("大场景已移动");
       } catch (requestError) {
         // Restore canvas to last server state
         const project = await resolveCurrentProject();
-        await renderProductionStoryCanvas(project);
+        await renderProductionStoryCanvasV3(project);
         if (typeof showToast === "function") {
           showToast("移动失败：" + requestError.message);
         } else {
@@ -9058,6 +9217,975 @@
     }
   }
 
+  async function refreshStoryOperationControls(projectId) {
+    const undoButton = document.querySelector(`[data-api-action="undo-operation"][data-project-id="${CSS.escape(projectId)}"]`);
+    const redoButton = document.querySelector(`[data-api-action="redo-operation"][data-project-id="${CSS.escape(projectId)}"]`);
+    const recent = document.getElementById("story-operation-recent");
+    if (!undoButton || !redoButton) return;
+    try {
+      const payload = await request(API.projectOperations(projectId));
+      const operations = payload.items || [];
+      const redoKey = `atelier-story-redo-${projectId}`;
+      let pendingRedoId = window.sessionStorage.getItem(redoKey);
+      if (pendingRedoId && operations[0] && String(operations[0].id) !== String(pendingRedoId)) {
+        window.sessionStorage.removeItem(redoKey);
+        pendingRedoId = null;
+      }
+      undoButton.disabled = !operations.length || Boolean(pendingRedoId);
+      redoButton.disabled = !pendingRedoId;
+      const latest = operations[0];
+      const operationLabels = {
+        move: "移动",
+        create: "新建",
+        delete: "删除",
+        rename: "编辑",
+        reorder: "排序",
+        map: "建立映射",
+        unmap: "取消映射",
+      };
+      const entityLabels = {
+        chapter: "章节",
+        large_scene: "大场景",
+        small_scene: "小场景",
+        shot_page: "场景页",
+        branch: "分支",
+        mapping: "素材映射",
+      };
+      if (recent) {
+        recent.textContent = latest
+          ? `最近操作：${operationLabels[latest.operation_type] || latest.operation_type} ${entityLabels[latest.entity_type] || latest.entity_type}`
+          : "最近操作：无";
+      }
+    } catch (error) {
+      undoButton.disabled = true;
+      redoButton.disabled = true;
+      if (recent) recent.textContent = "操作历史读取失败";
+    }
+  }
+
+  // ==================== 阶段 3：批量配置与任务中心 ====================
+
+  const batchUiState = {
+    project: null,
+    drafts: [],
+    batches: [],
+    workflows: [],
+    tree: null,
+    activeDraftId: "",
+  };
+
+  const taskUiState = {
+    project: null,
+    batches: [],
+    tasks: [],
+    summary: {},
+    status: "all",
+    batchId: "",
+    hasError: false,
+    runnerActive: false,
+    runnerBatchId: "",
+    currentProgress: null,
+    refreshTimer: null,
+  };
+
+  function stage3Date(value) {
+    if (!value) return "—";
+    const date = new Date(value);
+    return Number.isNaN(date.getTime())
+      ? "—"
+      : date.toLocaleString("zh-CN", {
+          month: "2-digit",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+        });
+  }
+
+  function stage3Status(statusValue) {
+    const labels = {
+      pending: ["等待开始", "orange"],
+      running: ["运行中", "blue"],
+      retrying: ["等待重试", "orange"],
+      paused: ["已暂停", ""],
+      completed: ["已完成", "green"],
+      cancelled: ["已取消", ""],
+      failed: ["失败", "red"],
+      submitted: ["已提交", "blue"],
+      unknown: ["状态未知", "orange"],
+    };
+    const current = labels[statusValue] || [statusValue || "未知", ""];
+    return `<span class="status ${current[1]}"><i class="dot"></i>${escapeHtml(current[0])}</span>`;
+  }
+
+  function stage3Navigate(pageKey, extra = {}) {
+    const params = new URLSearchParams();
+    params.set("page", pageKey);
+    const projectId = extra.project || batchUiState.project?.id || taskUiState.project?.id;
+    if (projectId) params.set("project", projectId);
+    Object.entries(extra).forEach(([key, value]) => {
+      if (key !== "project" && value) params.set(key, value);
+    });
+    window.location.search = `?${params.toString()}`;
+  }
+
+  function batchTargetOptions(project, tree, selectedScope, selectedScopeId) {
+    const selected = (scope, id) =>
+      scope === selectedScope && String(id || "") === String(selectedScopeId || "")
+        ? " selected"
+        : "";
+    const options = [
+      `<option value="project|"${selected("project", null)}>整个项目 · ${escapeHtml(project.name)}</option>`,
+    ];
+    const chapters = Array.isArray(tree?.chapters) ? tree.chapters : [];
+    chapters.forEach((chapter) => {
+      options.push(
+        `<option value="chapter|${escapeHtml(chapter.id)}"${selected("chapter", chapter.id)}>章节 · ${escapeHtml(chapter.name)}</option>`
+      );
+      (chapter.large_scenes || []).forEach((largeScene) => {
+        options.push(
+          `<option value="large_scene|${escapeHtml(largeScene.id)}"${selected("large_scene", largeScene.id)}>　大场景 · ${escapeHtml(largeScene.name)}</option>`
+        );
+        (largeScene.branches || []).forEach((branch) => {
+          options.push(
+            `<option value="branch|${escapeHtml(branch.id)}"${selected("branch", branch.id)}>　　分支 · ${escapeHtml(branch.name)}</option>`
+          );
+        });
+        (largeScene.small_scenes || []).forEach((smallScene) => {
+          options.push(
+            `<option value="small_scene|${escapeHtml(smallScene.id)}"${selected("small_scene", smallScene.id)}>　　小场景 · ${escapeHtml(smallScene.name)}</option>`
+          );
+          (smallScene.branches || []).forEach((branch) => {
+            options.push(
+              `<option value="branch|${escapeHtml(branch.id)}"${selected("branch", branch.id)}>　　　分支 · ${escapeHtml(branch.name)}</option>`
+            );
+          });
+          (smallScene.pages || []).forEach((page) => {
+            options.push(
+              `<option value="shot_pages|${escapeHtml(page.id)}"${selected("shot_pages", page.id)}>　　　页面 · ${escapeHtml(page.name || page.title || "未命名页")}</option>`
+            );
+          });
+        });
+      });
+    });
+    return options.join("");
+  }
+
+  function batchWorkflowOptions(workflows, config) {
+    const currentWorkflow = config?.workflow_id || "";
+    const currentVersion = config?.workflow_version_id || "";
+    const options = [
+      `<option value="|"${currentWorkflow ? "" : " selected"}>使用项目默认工作流</option>`,
+    ];
+    workflows.forEach((workflow) => {
+      const versionId = workflow.current_version_id || "";
+      const isSelected =
+        workflow.id === currentWorkflow &&
+        (!currentVersion || versionId === currentVersion);
+      const versionText = versionId ? "已发布版本" : "未发布";
+      options.push(
+        `<option value="${escapeHtml(workflow.id)}|${escapeHtml(versionId)}"${isSelected ? " selected" : ""}${versionId ? "" : " disabled"}>${escapeHtml(workflow.name)} · ${versionText}</option>`
+      );
+    });
+    return options.join("");
+  }
+
+  function batchPreviewMarkup(preview) {
+    if (!preview) {
+      return `
+        <section class="stage3-preview-empty">
+          <span>PREVIEW</span>
+          <h3>尚未编译预览</h3>
+          <p>先保存配置，再点击“编译预览”。这里会显示实际页面、最终参数、阻塞项和警告。</p>
+        </section>
+      `;
+    }
+    const summary = preview.summary || {};
+    const items = Array.isArray(preview.items) ? preview.items : [];
+    const blockers = Array.isArray(preview.blocking_errors) ? preview.blocking_errors : [];
+    const warnings = Array.isArray(preview.warnings) ? preview.warnings : [];
+    const estimatedTasks = items.reduce(
+      (total, item) => total + (Number(item.instance_count) || 1),
+      0
+    );
+    const issueMarkup = [...blockers.map((item) => ({ ...item, level: "blocker" })), ...warnings.map((item) => ({ ...item, level: "warning" }))]
+      .slice(0, 20)
+      .map(
+        (item) => `
+          <div class="stage3-issue ${item.level}">
+            <span>${item.level === "blocker" ? "!" : "△"}</span>
+            <div><strong>${item.level === "blocker" ? "阻塞" : "警告"}</strong><p>${escapeHtml(item.message || item.type || "未说明")}</p></div>
+          </div>
+        `
+      )
+      .join("");
+    const rows = items
+      .slice(0, 200)
+      .map((item) => {
+        const effective = item.effective_config || {};
+        const size =
+          effective.width && effective.height
+            ? `${effective.width} × ${effective.height}`
+            : "工作流默认";
+        return `
+          <tr>
+            <td><strong>${escapeHtml(item.shot_page_title || item.sort_key || "未命名页")}</strong><small>${escapeHtml([item.chapter_name, item.large_scene_name, item.small_scene_name].filter(Boolean).join(" / "))}</small></td>
+            <td>${escapeHtml(item.branch_name || "主线")}</td>
+            <td>${escapeHtml(item.workflow_label || item.workflow_version_id || "未设置")}</td>
+            <td>${escapeHtml(size)}</td>
+            <td>${Number(item.instance_count) || 1}</td>
+            <td>${escapeHtml(item.seed_strategy || "fixed")}${item.seed_value === null || item.seed_value === undefined ? "" : `<small>${escapeHtml(item.seed_value)}</small>`}</td>
+          </tr>
+        `;
+      })
+      .join("");
+    return `
+      <div class="stage3-metrics">
+        <div><span>范围页面</span><strong>${Number(summary.total_pages) || 0}</strong></div>
+        <div><span>可运行项</span><strong>${items.length}</strong></div>
+        <div><span>预计任务</span><strong>${estimatedTasks}</strong></div>
+        <div><span>跳过</span><strong>${Number(summary.skipped_pages) || 0}</strong></div>
+        <div class="${blockers.length ? "danger" : ""}"><span>阻塞</span><strong>${blockers.length}</strong></div>
+        <div class="${warnings.length ? "warning" : ""}"><span>警告</span><strong>${warnings.length}</strong></div>
+      </div>
+      ${issueMarkup ? `<div class="stage3-issues">${issueMarkup}</div>` : '<div class="stage3-success-note">完整性检查通过，没有阻塞项或警告。</div>'}
+      <div class="stage3-table-wrap">
+        <table class="table stage3-table">
+          <thead><tr><th>页面与来源</th><th>分支</th><th>工作流</th><th>尺寸</th><th>实例</th><th>种子</th></tr></thead>
+          <tbody>${rows || '<tr><td colspan="6"><div class="stage3-empty-row">当前范围没有可运行页面。</div></td></tr>'}</tbody>
+        </table>
+      </div>
+      ${items.length > 200 ? `<div class="stage3-table-note">当前显示前 200 项，共 ${items.length} 项；提交时会固化全部项目。</div>` : ""}
+    `;
+  }
+
+  function batchDraftWorkspace(project, draft) {
+    const config = draft.config || {};
+    const preview = draft.preview_stale ? null : draft.preview;
+    return `
+      <div class="stage3-layout">
+        <aside class="panel stage3-sidebar">
+          <div class="panel-header">
+            <div><div class="panel-title">批量草稿</div><div class="panel-sub">保存后可刷新或继续编辑</div></div>
+            <button class="btn small" type="button" data-api-action="batch-new-draft">新建</button>
+          </div>
+          <label class="label" for="batch-draft-select">当前草稿</label>
+          <select class="field stage3-control" id="batch-draft-select">
+            ${batchUiState.drafts.map((item) => `<option value="${escapeHtml(item.id)}"${item.id === draft.id ? " selected" : ""}>${escapeHtml(item.name || "未命名草稿")}</option>`).join("")}
+          </select>
+          <div class="stage3-sidebar-actions">
+            <button class="btn small danger-soft" type="button" data-api-action="batch-delete-draft" data-draft-id="${escapeHtml(draft.id)}">删除草稿</button>
+          </div>
+          <div class="stage3-batch-list">
+            <div class="label">已固化批次</div>
+            ${batchUiState.batches.length
+              ? batchUiState.batches.slice(0, 20).map((batch) => `
+                <button type="button" class="stage3-batch-card" data-api-action="open-task-center" data-batch-id="${escapeHtml(batch.id)}">
+                  <span>${stage3Status(batch.status)}</span>
+                  <strong>${escapeHtml(batch.name || "未命名批次")}</strong>
+                  <small>${Number(batch.item_count) || 0} 项 · ${stage3Date(batch.created_at)}</small>
+                </button>`).join("")
+              : '<div class="stage3-sidebar-empty">还没有固化批次</div>'}
+          </div>
+        </aside>
+        <main class="stage3-main">
+          <section class="panel stage3-config-panel">
+            <div class="panel-header">
+              <div><div class="panel-title">生成配置</div><div class="panel-sub">修改后需要重新编译预览</div></div>
+              <span class="status ${draft.preview_stale ? "orange" : "green"}"><i class="dot"></i>${draft.preview_stale ? "预览已过期" : "预览已同步"}</span>
+            </div>
+            <div class="stage3-form-grid">
+              <div class="stage3-span-2">
+                <label class="label" for="batch-name">草稿名称</label>
+                <input class="field stage3-control" id="batch-name" maxlength="120" value="${escapeHtml(draft.name || "")}" />
+              </div>
+              <div class="stage3-span-2">
+                <label class="label" for="batch-target">生成范围</label>
+                <select class="field stage3-control" id="batch-target">${batchTargetOptions(project, batchUiState.tree, draft.scope, draft.scope_id)}</select>
+              </div>
+              <div>
+                <label class="label" for="batch-instance-count">每页实例数</label>
+                <input class="field stage3-control" id="batch-instance-count" type="number" min="1" max="100" value="${Number(config.instance_count) || 1}" />
+              </div>
+              <div>
+                <label class="label" for="batch-seed-strategy">种子策略</label>
+                <select class="field stage3-control" id="batch-seed-strategy">
+                  <option value="fixed"${config.seed_strategy === "fixed" ? " selected" : ""}>固定</option>
+                  <option value="random"${config.seed_strategy === "random" ? " selected" : ""}>随机</option>
+                  <option value="increment"${config.seed_strategy === "increment" ? " selected" : ""}>递增</option>
+                  <option value="reuse_last"${config.seed_strategy === "reuse_last" ? " selected" : ""}>沿用上次</option>
+                </select>
+              </div>
+              <div>
+                <label class="label" for="batch-seed-base">基础种子</label>
+                <input class="field stage3-control" id="batch-seed-base" type="number" min="0" value="${config.seed_base ?? ""}" placeholder="留空使用默认" />
+              </div>
+              <div>
+                <label class="label">输出尺寸</label>
+                <div class="stage3-inline-fields">
+                  <input class="field stage3-control" id="batch-width" type="number" min="64" max="16384" value="${config.width ?? ""}" placeholder="宽" />
+                  <span>×</span>
+                  <input class="field stage3-control" id="batch-height" type="number" min="64" max="16384" value="${config.height ?? ""}" placeholder="高" />
+                </div>
+              </div>
+              <div class="stage3-span-2">
+                <label class="label" for="batch-workflow">工作流版本</label>
+                <select class="field stage3-control" id="batch-workflow">${batchWorkflowOptions(batchUiState.workflows, config)}</select>
+              </div>
+              <label class="stage3-check"><input id="batch-skip-adopted" type="checkbox"${config.skip_adopted ? " checked" : ""} /><span><strong>跳过已有采用结果的页面</strong><small>不会再次创建这些页面的任务</small></span></label>
+              <label class="stage3-check"><input id="batch-only-failed" type="checkbox"${config.only_failed ? " checked" : ""} /><span><strong>只重新运行失败页面</strong><small>不会复制已经成功的任务</small></span></label>
+            </div>
+            <div class="stage3-config-actions">
+              <button class="btn" type="button" data-api-action="batch-save-draft">保存草稿</button>
+              <button class="btn soft" type="button" data-api-action="batch-preview-draft">编译预览</button>
+              <button class="btn primary" type="button" data-api-action="batch-commit-draft"${preview?.items?.length ? "" : " disabled"}>确认并固化批次</button>
+            </div>
+          </section>
+          <section class="panel stage3-preview-panel">
+            <div class="panel-header"><div><div class="panel-title">最终跑图清单</div><div class="panel-sub">提交前看到的是后端实际编译结果</div></div></div>
+            <div id="batch-preview-content">${batchPreviewMarkup(preview)}</div>
+          </section>
+        </main>
+      </div>
+    `;
+  }
+
+  function batchNoDraftMarkup(project) {
+    return `
+      <section class="panel stage3-first-draft">
+        <span class="production-empty-icon">B</span>
+        <h2>建立第一个批量草稿</h2>
+        <p>草稿只保存范围和生成策略，不会立即向 ComfyUI 提交。</p>
+        <div class="stage3-first-draft-form">
+          <input id="batch-first-name" class="field stage3-control" maxlength="120" placeholder="输入草稿名称" />
+          <button class="btn primary" type="button" data-api-action="batch-create-first-draft" data-project-id="${escapeHtml(project.id)}">创建草稿</button>
+        </div>
+      </section>
+    `;
+  }
+
+  async function renderProductionBatch(project) {
+    const page = document.querySelector(".page-scroll");
+    if (!page || !project) return;
+    batchUiState.project = project;
+    page.innerHTML = `
+      <div class="page-header">
+        <div><h1 class="page-title">批量配置</h1><p class="page-subtitle">从项目结构编译真实跑图清单，确认后再建立任务。</p></div>
+        <div class="header-actions"><button class="btn" type="button" data-api-action="open-task-center">任务中心</button></div>
+      </div>
+      <section class="stage3-loading"><i></i><span>正在读取草稿、结构和工作流…</span></section>
+    `;
+    const [draftPayload, batchPayload, treePayload, workflowPayload] = await Promise.all([
+      request(API.batchDrafts(project.id)),
+      request(API.projectBatches(project.id)),
+      request(API.storyTree(project.id)),
+      request(`${API.workflows}?limit=200&offset=0&sort=updated_desc`),
+    ]);
+    batchUiState.drafts = Array.isArray(draftPayload.drafts) ? draftPayload.drafts : [];
+    batchUiState.batches = Array.isArray(batchPayload.batches) ? batchPayload.batches : [];
+    batchUiState.tree = treePayload || { chapters: [] };
+    batchUiState.workflows = Array.isArray(workflowPayload.items) ? workflowPayload.items : [];
+    const requestedDraft = new URLSearchParams(window.location.search).get("draft");
+    const activeDraft =
+      batchUiState.drafts.find((draft) => draft.id === requestedDraft) ||
+      batchUiState.drafts[0] ||
+      null;
+    batchUiState.activeDraftId = activeDraft?.id || "";
+    const header = page.querySelector(".page-header");
+    [...page.children].forEach((child) => {
+      if (child !== header) child.remove();
+    });
+    page.insertAdjacentHTML(
+      "beforeend",
+      activeDraft ? batchDraftWorkspace(project, activeDraft) : batchNoDraftMarkup(project)
+    );
+    const draftSelect = document.getElementById("batch-draft-select");
+    if (draftSelect) {
+      draftSelect.addEventListener("change", () => {
+        stage3Navigate("batch", { project: project.id, draft: draftSelect.value });
+      });
+    }
+    bindBatchDraftDirtyTracking();
+  }
+
+  function bindBatchDraftDirtyTracking() {
+    const controls = document.querySelectorAll(
+      ".stage3-config-panel .stage3-control, #batch-skip-adopted, #batch-only-failed"
+    );
+    const markStale = () => {
+      const commitButton = document.querySelector('[data-api-action="batch-commit-draft"]');
+      if (commitButton) commitButton.disabled = true;
+      const status = document.querySelector(".stage3-config-panel .status");
+      if (status) {
+        status.classList.remove("green");
+        status.classList.add("orange");
+        status.innerHTML = '<i class="dot"></i>预览已过期';
+      }
+    };
+    controls.forEach((control) => {
+      control.addEventListener("input", markStale);
+      control.addEventListener("change", markStale);
+    });
+  }
+
+  function readBatchDraftForm() {
+    const targetValue = document.getElementById("batch-target")?.value || "project|";
+    const separator = targetValue.indexOf("|");
+    const scope = separator >= 0 ? targetValue.slice(0, separator) : "project";
+    const scopeId = separator >= 0 ? targetValue.slice(separator + 1) : "";
+    const workflowValue = document.getElementById("batch-workflow")?.value || "|";
+    const workflowSeparator = workflowValue.indexOf("|");
+    const workflowId = workflowValue.slice(0, workflowSeparator);
+    const workflowVersionId = workflowValue.slice(workflowSeparator + 1);
+    const optionalNumber = (id) => {
+      const raw = document.getElementById(id)?.value?.trim();
+      return raw === "" || raw === undefined ? null : Number(raw);
+    };
+    return {
+      name: document.getElementById("batch-name")?.value.trim() || "未命名批量草稿",
+      scope,
+      scope_id: scope === "project" ? null : scopeId,
+      config: {
+        instance_count: Number(document.getElementById("batch-instance-count")?.value) || 1,
+        seed_strategy: document.getElementById("batch-seed-strategy")?.value || "fixed",
+        seed_base: optionalNumber("batch-seed-base"),
+        width: optionalNumber("batch-width"),
+        height: optionalNumber("batch-height"),
+        workflow_id: workflowId || null,
+        workflow_version_id: workflowVersionId || null,
+        skip_adopted: Boolean(document.getElementById("batch-skip-adopted")?.checked),
+        only_failed: Boolean(document.getElementById("batch-only-failed")?.checked),
+      },
+    };
+  }
+
+  async function createBatchDraftFromInput(inputId) {
+    const nameInput = document.getElementById(inputId);
+    const name = nameInput?.value.trim();
+    if (!name) {
+      if (typeof showToast === "function") showToast("请先输入草稿名称");
+      nameInput?.focus();
+      return;
+    }
+    const payload = await request(API.batchDrafts(batchUiState.project.id), {
+      method: "POST",
+      body: JSON.stringify({ name, scope: "project" }),
+    });
+    if (typeof showToast === "function") showToast("批量草稿已创建");
+    stage3Navigate("batch", {
+      project: batchUiState.project.id,
+      draft: payload.draft?.id,
+    });
+  }
+
+  async function saveBatchDraft({ quiet = false } = {}) {
+    if (!batchUiState.activeDraftId) return null;
+    const payload = await request(API.batchDraft(batchUiState.activeDraftId), {
+      method: "PATCH",
+      body: JSON.stringify(readBatchDraftForm()),
+    });
+    if (!quiet && typeof showToast === "function") showToast("批量草稿已保存");
+    return payload.draft;
+  }
+
+  async function previewBatchDraft() {
+    const previewContent = document.getElementById("batch-preview-content");
+    if (previewContent) {
+      previewContent.innerHTML = '<section class="stage3-loading"><i></i><span>正在编译全部页面…</span></section>';
+    }
+    try {
+      await saveBatchDraft({ quiet: true });
+      const payload = await request(API.batchDraftPreview(batchUiState.activeDraftId), {
+        method: "POST",
+        body: JSON.stringify({ force: true, resolve_slots: true }),
+      });
+      if (previewContent) previewContent.innerHTML = batchPreviewMarkup(payload.preview);
+      const commitButton = document.querySelector('[data-api-action="batch-commit-draft"]');
+      if (commitButton) commitButton.disabled = !(payload.preview?.items?.length);
+      if (typeof showToast === "function") showToast("编译预览已更新");
+    } catch (error) {
+      if (previewContent) {
+        previewContent.innerHTML = `<section class="stage3-error"><strong>编译失败</strong><p>${escapeHtml(error.message)}</p><button class="btn small" type="button" data-api-action="batch-preview-draft">重试</button></section>`;
+      }
+    }
+  }
+
+  async function commitBatchDraft() {
+    const draftPayload = await request(API.batchDraft(batchUiState.activeDraftId));
+    const preview = draftPayload.draft?.preview;
+    if (!preview || draftPayload.draft?.preview_stale || !preview.items?.length) {
+      if (typeof showToast === "function") showToast("请先完成编译预览");
+      return;
+    }
+    const blockers = preview.blocking_errors?.length || 0;
+    const warnings = preview.warnings?.length || 0;
+    const taskCount = preview.items.reduce(
+      (total, item) => total + (Number(item.instance_count) || 1),
+      0
+    );
+    const message =
+      `将固化 ${preview.items.length} 个页面、${taskCount} 个生成任务。` +
+      (blockers ? `\n有 ${blockers} 个阻塞页面不会进入队列。` : "") +
+      (warnings ? `\n另有 ${warnings} 条警告，请确认已查看。` : "") +
+      "\n固化后的批次快照不会随草稿修改。是否继续？";
+    if (!window.confirm(message)) return;
+    const commitPayload = await request(API.batchDraftCommit(batchUiState.activeDraftId), {
+      method: "POST",
+      body: JSON.stringify({ name: readBatchDraftForm().name }),
+    });
+    const batch = commitPayload.batch;
+    await request(API.batchTasks(batch.id), {
+      method: "POST",
+      body: JSON.stringify({ max_attempts: 3 }),
+    });
+    if (typeof showToast === "function") showToast("批次和持久化任务已创建");
+    stage3Navigate("tasks", { project: batchUiState.project.id, batch: batch.id });
+  }
+
+  function taskBatchControls(batch) {
+    if (!batch) return '<span class="stage3-help">选择一个批次后可开始执行。</span>';
+    const controls = [];
+    if (batch.status === "pending" || batch.status === "paused") {
+      controls.push(`<button class="btn primary" type="button" data-api-action="task-start-batch" data-batch-id="${escapeHtml(batch.id)}">${batch.status === "paused" ? "继续批次" : "开始批次"}</button>`);
+    }
+    if (batch.status === "running") {
+      controls.push(`<button class="btn primary" type="button" data-api-action="${taskUiState.runnerActive ? "task-stop-runner" : "task-run-queue"}" data-batch-id="${escapeHtml(batch.id)}">${taskUiState.runnerActive ? "停止自动领取" : "连续运行待处理项"}</button>`);
+      controls.push(`<button class="btn" type="button" data-api-action="task-pause-batch" data-batch-id="${escapeHtml(batch.id)}">暂停批次</button>`);
+    }
+    if (!["completed", "cancelled"].includes(batch.status)) {
+      controls.push(`<button class="btn danger-soft" type="button" data-api-action="task-cancel-batch" data-batch-id="${escapeHtml(batch.id)}">取消批次</button>`);
+    }
+    return controls.join("");
+  }
+
+  function taskRowActions(task) {
+    const actions = [
+      `<button class="btn small" type="button" data-api-action="task-show-detail" data-task-id="${escapeHtml(task.id)}">详情</button>`,
+    ];
+    if (task.status === "pending" || task.status === "retrying") {
+      actions.push(`<button class="btn small soft" type="button" data-api-action="task-control" data-task-action="pause" data-task-id="${escapeHtml(task.id)}">暂停</button>`);
+    } else if (task.status === "paused") {
+      actions.push(`<button class="btn small soft" type="button" data-api-action="task-control" data-task-action="resume" data-task-id="${escapeHtml(task.id)}">继续</button>`);
+    } else if (task.status === "failed" || task.status === "cancelled") {
+      actions.push(`<button class="btn small soft" type="button" data-api-action="task-control" data-task-action="retry" data-task-id="${escapeHtml(task.id)}">重试</button>`);
+    } else if (task.status === "running" && task.last_attempt_id) {
+      actions.push(`<button class="btn small soft" type="button" data-api-action="task-resume-attempt" data-attempt-id="${escapeHtml(task.last_attempt_id)}">恢复进度</button>`);
+    }
+    return actions.join("");
+  }
+
+  function taskProgressBanner() {
+    const progress = taskUiState.currentProgress;
+    if (!progress) return "";
+    const percent = Math.max(0, Math.min(100, Number(progress.percent) || 0));
+    return `
+      <section class="stage3-live-progress">
+        <div>
+          <span class="stage3-live-dot"></span>
+          <strong>${escapeHtml(progress.label || "正在运行")}</strong>
+          <small>${escapeHtml(progress.node || progress.message || "等待 ComfyUI 进度")}</small>
+        </div>
+        <div class="stage3-progress-track"><i style="width:${percent}%"></i></div>
+        <span>${percent}%</span>
+      </section>
+    `;
+  }
+
+  function taskCenterMarkup(project) {
+    const selectedBatch =
+      taskUiState.batches.find((batch) => batch.id === taskUiState.batchId) || null;
+    const summary = taskUiState.summary || {};
+    const rows = taskUiState.tasks.map((task) => {
+      const item = task.item || {};
+      return `
+        <tr>
+          <td><strong>${escapeHtml(item.shot_page_title || task.sort_key || task.id.slice(0, 8))}</strong><small>${escapeHtml([item.chapter_name, item.large_scene_name, item.small_scene_name].filter(Boolean).join(" / "))}</small></td>
+          <td>${stage3Status(task.status)}</td>
+          <td>${escapeHtml(task.batch_name || task.batch_id.slice(0, 8))}</td>
+          <td>${Number(task.attempt_count) || 0} / ${Number(task.max_attempts) || 0}</td>
+          <td><input class="stage3-priority" type="number" min="0" max="1000" value="${Number(task.priority) || 0}" data-task-priority-id="${escapeHtml(task.id)}" aria-label="任务优先级" /></td>
+          <td>${task.error_message ? `<span class="stage3-error-text" title="${escapeHtml(task.error_message)}">${escapeHtml(task.error_type || "错误")}</span>` : "—"}</td>
+          <td class="stage3-row-actions">${taskRowActions(task)}</td>
+        </tr>
+      `;
+    }).join("");
+    return `
+      <div class="page-header">
+        <div><h1 class="page-title">任务中心</h1><p class="page-subtitle">持久化任务、真实 ComfyUI 进度、错误和产出都在这里。</p></div>
+        <div class="header-actions">
+          <button class="btn" type="button" data-api-action="task-recover-submitted">恢复中断任务</button>
+          <button class="btn primary" type="button" data-api-action="open-batch-page">新建批次</button>
+        </div>
+      </div>
+      <div class="stage3-metrics stage3-task-metrics">
+        <div><span>全部任务</span><strong>${Number(summary.total_tasks) || 0}</strong></div>
+        <div><span>运行中</span><strong>${(Number(summary.running) || 0) + (Number(summary.retrying) || 0)}</strong></div>
+        <div><span>等待</span><strong>${Number(summary.pending) || 0}</strong></div>
+        <div><span>完成</span><strong>${Number(summary.completed) || 0}</strong></div>
+        <div class="${Number(summary.failed) ? "danger" : ""}"><span>失败</span><strong>${Number(summary.failed) || 0}</strong></div>
+        <div><span>批次</span><strong>${Number(summary.total_batches) || 0}</strong></div>
+      </div>
+      ${taskProgressBanner()}
+      <section class="panel stage3-task-panel">
+        <div class="stage3-task-toolbar">
+          <select class="field stage3-control" id="task-batch-filter">
+            <option value="">全部批次</option>
+            ${taskUiState.batches.map((batch) => `<option value="${escapeHtml(batch.id)}"${batch.id === taskUiState.batchId ? " selected" : ""}>${escapeHtml(batch.name || "未命名批次")} · ${stage3Date(batch.created_at)}</option>`).join("")}
+          </select>
+          <select class="field stage3-control" id="task-status-filter">
+            <option value="all"${taskUiState.status === "all" ? " selected" : ""}>全部状态</option>
+            <option value="pending"${taskUiState.status === "pending" ? " selected" : ""}>等待</option>
+            <option value="running"${taskUiState.status === "running" ? " selected" : ""}>运行中</option>
+            <option value="paused"${taskUiState.status === "paused" ? " selected" : ""}>已暂停</option>
+            <option value="failed"${taskUiState.status === "failed" ? " selected" : ""}>失败</option>
+            <option value="completed"${taskUiState.status === "completed" ? " selected" : ""}>已完成</option>
+          </select>
+          <label class="stage3-filter-check"><input type="checkbox" id="task-error-filter"${taskUiState.hasError ? " checked" : ""} /> 只看错误</label>
+          <button class="btn small" type="button" data-api-action="task-refresh">刷新</button>
+          ${Number(summary.failed) ? '<button class="btn small soft" type="button" data-api-action="task-retry-failed">只重试失败项</button>' : ""}
+          <span class="spacer"></span>
+          <div class="stage3-batch-controls">${stage3Status(selectedBatch?.status)}${taskBatchControls(selectedBatch)}</div>
+        </div>
+        <div class="stage3-table-wrap stage3-task-table-wrap">
+          <table class="table stage3-table">
+            <thead><tr><th>页面与来源</th><th>状态</th><th>批次</th><th>尝试</th><th>优先级</th><th>错误</th><th>操作</th></tr></thead>
+            <tbody>${rows || '<tr><td colspan="7"><div class="stage3-empty-row">当前筛选条件下没有任务。</div></td></tr>'}</tbody>
+          </table>
+        </div>
+      </section>
+    `;
+  }
+
+  async function renderProductionTasks(project, { preserveProgress = false } = {}) {
+    const page = document.querySelector(".page-scroll");
+    if (!page || !project) return;
+    taskUiState.project = project;
+    if (!preserveProgress) {
+      const params = new URLSearchParams(window.location.search);
+      taskUiState.batchId = params.get("batch") || taskUiState.batchId || "";
+    }
+    const query = new URLSearchParams({ project_id: project.id, limit: "200", offset: "0" });
+    if (taskUiState.status !== "all") query.set("status", taskUiState.status);
+    if (taskUiState.batchId) query.set("batch_id", taskUiState.batchId);
+    if (taskUiState.hasError) query.set("has_error", "true");
+    if (!preserveProgress) {
+      page.innerHTML = '<section class="stage3-loading"><i></i><span>正在读取持久化任务…</span></section>';
+    }
+    const [summaryPayload, taskPayload, batchPayload] = await Promise.all([
+      request(`${API.taskCenterSummary}?project_id=${encodeURIComponent(project.id)}`),
+      request(`${API.tasks}?${query.toString()}`),
+      request(API.projectBatches(project.id)),
+    ]);
+    taskUiState.summary = summaryPayload.summary || {};
+    taskUiState.tasks = Array.isArray(taskPayload.tasks) ? taskPayload.tasks : [];
+    taskUiState.batches = Array.isArray(batchPayload.batches) ? batchPayload.batches : [];
+    page.innerHTML = taskCenterMarkup(project);
+    bindTaskCenterFilters();
+  }
+
+  function bindTaskCenterFilters() {
+    const batchFilter = document.getElementById("task-batch-filter");
+    const statusFilter = document.getElementById("task-status-filter");
+    const errorFilter = document.getElementById("task-error-filter");
+    batchFilter?.addEventListener("change", async () => {
+      taskUiState.batchId = batchFilter.value;
+      await renderProductionTasks(taskUiState.project, { preserveProgress: true });
+    });
+    statusFilter?.addEventListener("change", async () => {
+      taskUiState.status = statusFilter.value;
+      await renderProductionTasks(taskUiState.project, { preserveProgress: true });
+    });
+    errorFilter?.addEventListener("change", async () => {
+      taskUiState.hasError = errorFilter.checked;
+      await renderProductionTasks(taskUiState.project, { preserveProgress: true });
+    });
+    document.querySelectorAll("[data-task-priority-id]").forEach((input) => {
+      input.addEventListener("change", async () => {
+        try {
+          await request(API.taskPriority(input.dataset.taskPriorityId), {
+            method: "PATCH",
+            body: JSON.stringify({ priority: Number(input.value) || 0 }),
+          });
+          if (typeof showToast === "function") showToast("任务优先级已更新");
+        } catch (error) {
+          if (typeof showToast === "function") showToast(error.message);
+        }
+      });
+    });
+  }
+
+  function updateTaskLiveProgress(data, label) {
+    const value = Number(data?.value);
+    const max = Number(data?.max);
+    const percent = Number.isFinite(value) && Number.isFinite(max) && max > 0
+      ? Math.round((value / max) * 100)
+      : data?.status === "completed"
+        ? 100
+        : Number(data?.percent) || 0;
+    taskUiState.currentProgress = {
+      label: label || "ComfyUI 正在生成",
+      node: data?.current_node ? `节点 ${data.current_node}` : "",
+      message: data?.message || data?.status || "",
+      percent,
+    };
+    const oldBanner = document.querySelector(".stage3-live-progress");
+    const metrics = document.querySelector(".stage3-task-metrics");
+    if (oldBanner) oldBanner.outerHTML = taskProgressBanner();
+    else if (metrics) metrics.insertAdjacentHTML("afterend", taskProgressBanner());
+  }
+
+  function monitorAttemptWithSse(attemptId, label) {
+    return new Promise((resolve) => {
+      let settled = false;
+      let polling = false;
+      const source = new EventSource(API.attemptProgressSse(attemptId));
+      const timer = window.setTimeout(() => finish("timeout"), 300000);
+      const pollTimer = window.setInterval(async () => {
+        if (settled || polling) return;
+        polling = true;
+        try {
+          const payload = await request(API.attemptProgressPoll(attemptId), {
+            method: "POST",
+            body: "{}",
+          });
+          const result = payload.result || {};
+          const status = result.completed ? "completed" : result.status;
+          updateTaskLiveProgress(
+            { status, percent: result.completed ? 100 : Number(result.percent) || 0 },
+            label
+          );
+          if (["completed", "error", "interrupted"].includes(status)) finish(status);
+        } catch (error) {
+          // The prompt may not be present in history during the first few polls.
+        } finally {
+          polling = false;
+        }
+      }, 1600);
+      function finish(status) {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timer);
+        window.clearInterval(pollTimer);
+        source.close();
+        resolve(status);
+      }
+      source.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          updateTaskLiveProgress(data, label);
+          if (["completed", "error", "interrupted", "timeout"].includes(data.status)) {
+            finish(data.status);
+          }
+        } catch (error) {
+          // Ignore malformed transient events; the polling fallback remains available.
+        }
+      };
+      source.onerror = () => finish("sse_error");
+    });
+  }
+
+  async function pollAttemptUntilTerminal(attemptId, label) {
+    for (let index = 0; index < 150; index += 1) {
+      try {
+        const payload = await request(API.attemptProgressPoll(attemptId), {
+          method: "POST",
+          body: "{}",
+        });
+        const result = payload.result || {};
+        updateTaskLiveProgress(
+          { status: result.completed ? "completed" : result.status, percent: result.completed ? 100 : 0 },
+          label
+        );
+        if (result.completed) return "completed";
+        if (result.status === "error") return "error";
+      } catch (error) {
+        // A prompt may not be in history yet. Keep polling until the bounded deadline.
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 2000));
+    }
+    return "timeout";
+  }
+
+  async function executeClaim(claim) {
+    const label = claim.item?.shot_page_title || claim.sort_key || claim.task_id.slice(0, 8);
+    updateTaskLiveProgress({ status: "submitting", percent: 0 }, `正在提交：${label}`);
+    const submitPayload = await request(API.taskSubmit(claim.task_id, claim.attempt_id), {
+      method: "POST",
+      body: "{}",
+    });
+    const result = submitPayload.result || {};
+    if (result.timeout || !result.prompt_id) {
+      if (typeof showToast === "function") showToast("提交状态不确定，已保留记录且不会自动重复提交");
+      return "unknown";
+    }
+    let status = await monitorAttemptWithSse(claim.attempt_id, `正在生成：${label}`);
+    if (status === "sse_error" || status === "timeout") {
+      status = await pollAttemptUntilTerminal(claim.attempt_id, `轮询恢复：${label}`);
+    }
+    if (status === "completed") {
+      const outputPayload = await request(API.attemptCollectOutputs(claim.attempt_id), {
+        method: "POST",
+        body: "{}",
+      });
+      const collected = Number(outputPayload.result?.collected) || 0;
+      if (typeof showToast === "function") showToast(`任务完成，已保存 ${collected} 张图片实例`);
+    } else if (status === "error" || status === "interrupted") {
+      if (typeof showToast === "function") showToast("ComfyUI 执行失败，错误已记录");
+    }
+    return status;
+  }
+
+  async function runTaskQueue(batchId) {
+    if (taskUiState.runnerActive) return;
+    taskUiState.runnerActive = true;
+    taskUiState.runnerBatchId = batchId;
+    await renderProductionTasks(taskUiState.project, { preserveProgress: true });
+    try {
+      while (taskUiState.runnerActive) {
+        const claimPayload = await request(API.taskClaim, {
+          method: "POST",
+          body: JSON.stringify({
+            lease_holder: `atelier-web-${window.sessionStorage.getItem("atelier-runner-id") || Date.now()}`,
+            lease_seconds: 600,
+            batch_id: batchId || null,
+          }),
+        });
+        const claim = claimPayload.claim;
+        if (!claim) {
+          if (typeof showToast === "function") showToast("当前批次没有待处理任务");
+          break;
+        }
+        await executeClaim(claim);
+        await renderProductionTasks(taskUiState.project, { preserveProgress: true });
+      }
+    } catch (error) {
+      if (typeof showToast === "function") showToast(`任务执行已停止：${error.message}`);
+    } finally {
+      taskUiState.runnerActive = false;
+      taskUiState.runnerBatchId = "";
+      taskUiState.currentProgress = null;
+      await renderProductionTasks(taskUiState.project, { preserveProgress: true });
+    }
+  }
+
+  async function updateTaskBatchStatus(batchId, statusValue) {
+    await request(API.batchStatus(batchId), {
+      method: "PATCH",
+      body: JSON.stringify({ status: statusValue }),
+    });
+    if (statusValue !== "running") taskUiState.runnerActive = false;
+    await renderProductionTasks(taskUiState.project, { preserveProgress: true });
+  }
+
+  async function collectAttemptOutputsOnce(attemptId) {
+    const existing = await request(
+      `${API.imageInstances}?attempt_id=${encodeURIComponent(attemptId)}&limit=1&offset=0`
+    );
+    if (Number(existing.count) > 0) return Number(existing.count);
+    const outputPayload = await request(API.attemptCollectOutputs(attemptId), {
+      method: "POST",
+      body: "{}",
+    });
+    return Number(outputPayload.result?.collected) || 0;
+  }
+
+  async function resumeTaskAttempt(attemptId) {
+    const attemptPayload = await request(API.attempt(attemptId));
+    const attempt = attemptPayload.attempt || {};
+    if (!attempt.prompt_id) {
+      throw new Error("该尝试没有 prompt_id，不能从 ComfyUI 恢复");
+    }
+    let status = attempt.status === "completed"
+      ? "completed"
+      : await monitorAttemptWithSse(attemptId, "正在恢复 ComfyUI 进度");
+    if (status === "sse_error" || status === "timeout") {
+      status = await pollAttemptUntilTerminal(attemptId, "正在轮询 ComfyUI 历史");
+    }
+    if (status === "completed") {
+      const count = await collectAttemptOutputsOnce(attemptId);
+      if (typeof showToast === "function") showToast(`恢复完成，已有或新收集 ${count} 张图片`);
+    }
+    taskUiState.currentProgress = null;
+    await renderProductionTasks(taskUiState.project, { preserveProgress: true });
+  }
+
+  async function retryFailedTasks() {
+    const params = new URLSearchParams({
+      project_id: taskUiState.project.id,
+      status: "failed",
+      limit: "1000",
+      offset: "0",
+    });
+    if (taskUiState.batchId) params.set("batch_id", taskUiState.batchId);
+    const payload = await request(`${API.tasks}?${params.toString()}`);
+    const failedTasks = Array.isArray(payload.tasks) ? payload.tasks : [];
+    if (!failedTasks.length) {
+      if (typeof showToast === "function") showToast("没有可重试的失败任务");
+      return;
+    }
+    if (!window.confirm(`只把 ${failedTasks.length} 个失败任务放回队列；已成功任务不会改变。是否继续？`)) {
+      return;
+    }
+    for (const task of failedTasks) {
+      await request(API.task(task.id), {
+        method: "PATCH",
+        body: JSON.stringify({ action: "retry" }),
+      });
+    }
+    if (typeof showToast === "function") showToast(`已重新排队 ${failedTasks.length} 个失败任务`);
+    await renderProductionTasks(taskUiState.project, { preserveProgress: true });
+  }
+
+  function ensureTaskDetailModal() {
+    let modal = document.getElementById("task-detail-modal");
+    if (modal) return modal;
+    modal = document.createElement("div");
+    modal.id = "task-detail-modal";
+    modal.className = "atelier-modal-backdrop";
+    modal.hidden = true;
+    modal.innerHTML = `
+      <section class="atelier-modal stage3-detail-modal" role="dialog" aria-modal="true" aria-labelledby="task-detail-title">
+        <div class="stage3-detail-head"><div><span class="developer-eyebrow">TASK TRACE</span><h2 id="task-detail-title">任务追踪</h2></div><button class="btn small" type="button" data-api-action="task-close-detail">关闭</button></div>
+        <div id="task-detail-content" class="stage3-detail-content"></div>
+      </section>
+    `;
+    document.body.appendChild(modal);
+    return modal;
+  }
+
+  async function showTaskDetail(taskId) {
+    const modal = ensureTaskDetailModal();
+    const content = modal.querySelector("#task-detail-content");
+    modal.hidden = false;
+    requestAnimationFrame(() => modal.classList.add("show"));
+    content.innerHTML = '<section class="stage3-loading"><i></i><span>正在读取任务快照与事件…</span></section>';
+    try {
+      const payload = await request(API.taskErrorDetail(taskId));
+      const task = payload.task || {};
+      const item = task.item || {};
+      content.innerHTML = `
+        <div class="stage3-detail-grid">
+          <section><label>页面</label><strong>${escapeHtml(item.shot_page_title || task.sort_key || "未命名")}</strong><small>${escapeHtml([item.chapter_name, item.large_scene_name, item.small_scene_name].filter(Boolean).join(" / "))}</small></section>
+          <section><label>状态</label>${stage3Status(task.status)}<small>尝试 ${Number(task.attempt_count) || 0} / ${Number(task.max_attempts) || 0}</small></section>
+          <section><label>工作流快照</label><strong>${escapeHtml(item.workflow_label || item.workflow_version_id || "未设置")}</strong><small>${escapeHtml(item.input_hash || "")}</small></section>
+          <section><label>错误</label><strong>${escapeHtml(task.error_type || "无")}</strong><small>${escapeHtml(task.error_message || "没有技术错误")}</small></section>
+        </div>
+        <h3>尝试记录</h3>
+        <div class="stage3-trace-list">${(payload.attempts || []).map((attempt) => `<div><span>${stage3Status(attempt.status)}</span><strong>#${attempt.attempt_number}</strong><small>${escapeHtml(attempt.prompt_id || "尚无 prompt_id")} · ${stage3Date(attempt.created_at)}</small></div>`).join("") || "<p>还没有尝试记录。</p>"}</div>
+        <h3>事件</h3>
+        <div class="stage3-trace-list">${(payload.events || []).map((event) => `<div><strong>${escapeHtml(event.event_type)}</strong><small>${stage3Date(event.created_at)}</small></div>`).join("") || "<p>还没有事件。</p>"}</div>
+      `;
+    } catch (error) {
+      content.innerHTML = `<section class="stage3-error"><strong>读取失败</strong><p>${escapeHtml(error.message)}</p></section>`;
+    }
+  }
+
+  function closeTaskDetail() {
+    const modal = document.getElementById("task-detail-modal");
+    if (!modal) return;
+    modal.classList.remove("show");
+    window.setTimeout(() => { modal.hidden = true; }, 150);
+  }
+
   async function refreshDatabaseState() {
     try {
       document.body.dataset.databaseEnvironment = "production";
@@ -9078,6 +10206,14 @@
         await renderProductionWorkflows();
       } else if (pageKey === "workflow-canvas") {
         await renderProductionWorkflowCanvas();
+      } else if (pageKey === "batch") {
+        const project = await resolveCurrentProject();
+        applyProjectHeader(project, pageKey);
+        await renderProductionBatch(project);
+      } else if (pageKey === "tasks") {
+        const project = await resolveCurrentProject();
+        applyProjectHeader(project, pageKey);
+        await renderProductionTasks(project);
       } else if (pageKey === "settings") {
         await renderProductionSettings();
       } else if (pageKey !== "settings") {
@@ -9114,7 +10250,29 @@
     selectedNodeId: null,
     pendingLinkFrom: null, // 新增连线时暂存输出端口 {nodeId, slot}
     loading: false,
+    paletteSearchTimer: null,
+    pendingMutation: Promise.resolve(),
+    layoutGroups: [],
+    zoom: 1,
+    focus: null,
   };
+
+  function normalizeWorkflowNodeDefinitions(payload) {
+    if (!payload || typeof payload !== "object") return null;
+    if (!Array.isArray(payload.items)) return payload;
+    const definitions = {};
+    payload.items.forEach((item) => {
+      const nodeClass = item?.node_class;
+      if (!nodeClass) return;
+      definitions[nodeClass] = {
+        name: item.display_name || nodeClass,
+        category: item.category || "其他",
+        python_module: item.python_module || "",
+        is_custom_node: Boolean(item.is_custom_node),
+      };
+    });
+    return definitions;
+  }
 
   // 将草稿中的 normalized_graph 字符串解析为图对象，容错空值和非法 JSON。
   function parseWorkflowGraph(draft) {
@@ -9192,6 +10350,43 @@
     return 38 + 8 + slotIndex * 26 + 13;
   }
 
+  function workflowLinkParts(link) {
+    if (Array.isArray(link)) {
+      return {
+        id: link[0],
+        sourceNode: link[1],
+        sourceSlot: Number(link[2]) || 0,
+        targetNode: link[3],
+        targetSlot: Number(link[4]) || 0,
+        type: link[5] || "",
+      };
+    }
+    return {
+      id: link?.id,
+      sourceNode: link?.source_node,
+      sourceSlot: Number(link?.source_slot) || 0,
+      targetNode: link?.target_node,
+      targetSlot: Number(link?.target_slot) || 0,
+      type: link?.type || "",
+    };
+  }
+
+  async function autoLayoutWorkflow() {
+    const nodes = workflowCanvasState.graph.nodes || [];
+    if (!nodes.length) return;
+    try {
+      await request(API.workflowDraftLayoutCompute(workflowCanvasState.workflowId), {
+        method: "POST",
+        body: "{}",
+      });
+      await loadWorkflowCanvasData(workflowCanvasState.workflowId);
+      refreshWorkflowCanvasAndInspector();
+      if (typeof showToast === "function") showToast("自动布局已完成");
+    } catch (error) {
+      if (typeof showToast === "function") showToast(error.message);
+    }
+  }
+
   // 工作流画布空状态：未传入工作流 ID 时显示。
   function workflowCanvasEmptyHTML(message) {
     return `
@@ -9223,13 +10418,11 @@
       : '<span class="chip green">已保存</span>';
     return `
       <div class="toolbar" id="workflow-canvas-toolbar">
-        <button class="tool" type="button" data-api-action="workflow-undo" title="撤销">撤销</button>
-        <button class="tool" type="button" data-api-action="workflow-redo" title="重做">重做</button>
         <button class="tool active" type="button" data-api-action="workflow-layout-ltr" title="从左到右布局">从左到右</button>
-        <button class="tool" type="button" data-api-action="workflow-focus-path" title="聚焦主路径">聚焦路径</button>
+        <button class="tool ${state.focus ? "active" : ""}" type="button" data-api-action="workflow-focus-path" title="聚焦当前节点的上下游">${state.focus ? "取消聚焦" : "聚焦路径"}</button>
         <span class="spacer"></span>
         <button class="tool" type="button" data-api-action="workflow-zoom-out" title="缩小">−</button>
-        <button class="tool" type="button" data-api-action="workflow-zoom-reset" title="重置缩放">100%</button>
+        <button class="tool" type="button" data-api-action="workflow-zoom-reset" title="重置缩放">${Math.round((state.zoom || 1) * 100)}%</button>
         <button class="tool" type="button" data-api-action="workflow-zoom-in" title="放大">＋</button>
         <button class="tool" type="button" data-api-action="workflow-auto-layout" title="自动整理">自动整理</button>
         <span class="spacer"></span>
@@ -9322,13 +10515,33 @@
       return `<div class="node-field"><span class="node-field-name">参数${i}</span><span class="node-value">${escapeHtml(display)}</span></div>`;
     }).join("");
 
+    const isDimmed = Array.isArray(workflowCanvasState.focus?.dimmed)
+      && workflowCanvasState.focus.dimmed.map(String).includes(String(node.id));
+    const isUnknown = Boolean(node.is_unknown);
+    const isCollapsed = Boolean(node.flags?.collapsed);
     return `
-      <div class="node-card ${isSelected ? "selected" : ""}" style="left:${x}px;top:${y}px" data-api-action="select-workflow-node" data-node-id="${id}">
+      <div class="node-card ${isSelected ? "selected" : ""} ${isDimmed ? "workflow-node-dimmed" : ""} ${isUnknown ? "workflow-node-unknown" : ""} ${isCollapsed ? "workflow-node-collapsed" : ""}" style="left:${x}px;top:${y}px" data-api-action="select-workflow-node" data-node-id="${id}">
         <div class="node-head"><i class="node-type ${color}"></i>${title}</div>
-        <div class="node-body">${fields || `<div class="node-field"><span class="node-field-name">类型</span><span class="node-value">${type}</span></div>`}</div>
+        <div class="node-body">${isUnknown ? '<div class="node-field"><span class="node-field-name">状态</span><span class="node-value">未知节点 · 只读保留</span></div>' : (fields || `<div class="node-field"><span class="node-field-name">类型</span><span class="node-value">${type}</span></div>`)}</div>
         ${inputPorts}${outputPorts}
       </div>
     `;
+  }
+
+  function workflowGroupsHTML(nodes, groups) {
+    if (!Array.isArray(groups) || !groups.length) return "";
+    const nodeMap = new Map(nodes.map((node) => [String(node.id), node]));
+    return groups.map((group) => {
+      const members = (group.members || []).map(String).map((id) => nodeMap.get(id)).filter(Boolean);
+      if (!members.length) return "";
+      const xs = members.map((node) => Number(node.position?.[0]) || 0);
+      const ys = members.map((node) => Number(node.position?.[1]) || 0);
+      const x = Math.min(...xs) - 24;
+      const y = Math.min(...ys) - 38;
+      const right = Math.max(...members.map((node) => (Number(node.position?.[0]) || 0) + 208));
+      const bottom = Math.max(...members.map((node) => (Number(node.position?.[1]) || 0) + workflowNodeHeight(node)));
+      return `<div class="workflow-group-lane" style="left:${x}px;top:${y}px;width:${right - x + 24}px;height:${bottom - y + 24}px;border-color:${escapeHtml(group.color || "#3f789e")}"><span style="background:${escapeHtml(group.color || "#3f789e")}">${escapeHtml(group.title || "未命名分组")}</span></div>`;
+    }).join("");
   }
 
   // 渲染 SVG 连线：每条连线包含可见路径和不可见点击区域。
@@ -9339,13 +10552,13 @@
     });
     const links = graph.links || [];
     const paths = links.map((link) => {
-      if (!Array.isArray(link) || link.length < 6) return "";
-      const linkId = link[0];
-      const fromId = String(link[1]);
-      const fromSlot = Number(link[2]) || 0;
-      const toId = String(link[3]);
-      const toSlot = Number(link[4]) || 0;
-      const type = link[5] || "";
+      const part = workflowLinkParts(link);
+      const linkId = part.id;
+      const fromId = String(part.sourceNode);
+      const fromSlot = part.sourceSlot;
+      const toId = String(part.targetNode);
+      const toSlot = part.targetSlot;
+      const type = part.type;
       const fromNode = nodeMap[fromId];
       const toNode = nodeMap[toId];
       if (!fromNode || !toNode) return "";
@@ -9394,7 +10607,8 @@
     const linksHTML = workflowLinksSVG(graph);
     return `
       <div class="canvas" id="workflow-canvas-area" style="overflow:auto">
-        <div class="workflow-stage" style="position:relative;width:${stageWidth}px;height:${stageHeight}px;inset:auto;transform:none">
+        <div class="workflow-stage" style="position:relative;width:${stageWidth}px;height:${stageHeight}px;inset:auto;transform:scale(${workflowCanvasState.zoom || 1});transform-origin:0 0">
+          ${workflowGroupsHTML(nodes, workflowCanvasState.layoutGroups)}
           ${linksHTML}
           ${nodesHTML}
         </div>
@@ -9419,6 +10633,9 @@
     const inputs = Array.isArray(node.inputs) ? node.inputs : [];
     const outputs = Array.isArray(node.outputs) ? node.outputs : [];
     const nodeId = escapeHtml(node.id);
+    const isUnknown = Boolean(node.is_unknown);
+    const groups = workflowCanvasState.layoutGroups || [];
+    const assignedGroup = groups.find((group) => (group.members || []).map(String).includes(String(node.id)));
     // 当前节点绑定的插槽
     const boundSlots = slots.filter((s) => String(s.node_id) === String(node.id));
 
@@ -9451,8 +10668,8 @@
       ? boundSlots.map((slot) => `
         <div class="mini-list-item">
           <span class="mini-list-icon">◇</span>
-          <div class="mini-list-text">${escapeHtml(slot.slot_type || "插槽")}<div class="mini-list-sub">${escapeHtml(slot.slot_key || slot.display_name || "")}</div></div>
-          <button class="btn small danger-soft" type="button" data-api-action="delete-workflow-slot" data-slot-id="${escapeHtml(slot.id)}" data-slot-name="${escapeHtml(slot.slot_key || slot.display_name || "")}">删除</button>
+          <div class="mini-list-text">${escapeHtml(slot.slot_type || "插槽")}<div class="mini-list-sub">${escapeHtml(slot.slot_name || slot.slot_key || slot.display_name || "")}</div></div>
+          <button class="btn small danger-soft" type="button" data-api-action="delete-workflow-slot" data-slot-id="${escapeHtml(slot.id)}" data-slot-name="${escapeHtml(slot.slot_name || slot.slot_key || slot.display_name || "")}">删除</button>
         </div>
       `).join("")
       : '<div class="empty-note">该节点尚未绑定语义插槽</div>';
@@ -9467,14 +10684,15 @@
       </div>
       <div class="inspector-section">
         <label class="label">节点标题</label>
-        <input class="modal-input" id="workflow-inspector-title" type="text" value="${escapeHtml(title)}" style="width:100%;height:32px;font-size:11px" />
+        <input class="modal-input" id="workflow-inspector-title" type="text" value="${escapeHtml(title)}" style="width:100%;height:32px;font-size:11px" ${isUnknown ? "disabled" : ""} />
         <div style="height:8px"></div>
         <label class="label">节点模式</label>
-        <select class="modal-input" id="workflow-inspector-mode" style="width:100%;height:32px;font-size:11px">
+        <select class="modal-input" id="workflow-inspector-mode" style="width:100%;height:32px;font-size:11px" ${isUnknown ? "disabled" : ""}>
           <option value="0" ${mode === 0 ? "selected" : ""}>激活</option>
-          <option value="2" ${mode === 2 ? "selected" : ""}>跳过</option>
-          <option value="4" ${mode === 4 ? "selected" : ""}>禁用</option>
+          <option value="2" ${mode === 2 ? "selected" : ""}>禁用</option>
+          <option value="4" ${mode === 4 ? "selected" : ""}>旁路</option>
         </select>
+        ${isUnknown ? '<div class="empty-note" style="margin-top:8px">节点定义未同步，节点与未知字段会原样保留，但不允许编辑。</div>' : ""}
       </div>
       <div class="inspector-section">
         <label class="label">组件值 (widgets_values)</label>
@@ -9495,7 +10713,34 @@
           <button class="btn small soft" type="button" data-api-action="add-workflow-slot" data-node-id="${nodeId}">绑定插槽</button>
         </div>
       </div>
+      <div class="inspector-section">
+        <label class="label">规整位置</label>
+        <div class="workflow-inspector-actions">
+          <button class="btn small" type="button" data-api-action="reorder-workflow-node" data-node-id="${nodeId}" data-reorder-action="forward">前移</button>
+          <button class="btn small" type="button" data-api-action="reorder-workflow-node" data-node-id="${nodeId}" data-reorder-action="backward">后移</button>
+          <button class="btn small" type="button" data-api-action="reorder-workflow-node" data-node-id="${nodeId}" data-reorder-action="prev_column">上一列</button>
+          <button class="btn small" type="button" data-api-action="reorder-workflow-node" data-node-id="${nodeId}" data-reorder-action="next_column">下一列</button>
+          <button class="btn small" type="button" data-api-action="reorder-workflow-node" data-node-id="${nodeId}" data-reorder-action="to_top">置顶</button>
+          <button class="btn small" type="button" data-api-action="reorder-workflow-node" data-node-id="${nodeId}" data-reorder-action="to_bottom">置底</button>
+        </div>
+      </div>
+      <div class="inspector-section">
+        <label class="label">分组泳道</label>
+        <select class="modal-input" data-workflow-group-select data-node-id="${nodeId}" style="width:100%;height:32px;font-size:11px">
+          <option value="">不属于任何分组</option>
+          ${groups.map((group) => `<option value="${escapeHtml(group.id)}" ${assignedGroup && String(assignedGroup.id) === String(group.id) ? "selected" : ""}>${escapeHtml(group.title || "未命名分组")}</option>`).join("")}
+        </select>
+        <div class="workflow-group-create-row">
+          <input class="modal-input" id="workflow-new-group-title" maxlength="80" placeholder="新分组名称" />
+          <button class="btn small soft" type="button" data-api-action="create-workflow-group" data-node-id="${nodeId}">新建并加入</button>
+        </div>
+        ${assignedGroup ? `<button class="btn small danger-soft" type="button" data-api-action="delete-workflow-group" data-group-id="${escapeHtml(assignedGroup.id)}" data-group-title="${escapeHtml(assignedGroup.title || "未命名分组")}">删除当前分组</button>` : ""}
+      </div>
       <div class="inspector-section" style="display:flex;gap:7px;flex-wrap:wrap">
+        <button class="btn small" type="button" data-api-action="focus-workflow-node" data-node-id="${nodeId}" data-focus-direction="upstream">聚焦上游</button>
+        <button class="btn small" type="button" data-api-action="focus-workflow-node" data-node-id="${nodeId}" data-focus-direction="downstream">聚焦下游</button>
+        <button class="btn small soft" type="button" data-api-action="toggle-workflow-node-collapse" data-node-id="${nodeId}">${node.flags?.collapsed ? "展开节点" : "折叠节点"}</button>
+        <button class="btn small soft" type="button" data-api-action="duplicate-workflow-node" data-node-id="${nodeId}" ${isUnknown ? "disabled" : ""}>复制节点</button>
         <button class="btn small danger-soft" type="button" data-api-action="delete-workflow-node" data-node-id="${nodeId}">删除节点</button>
       </div>
     `;
@@ -9531,8 +10776,8 @@
 
     // 异步加载节点定义（不阻塞画布渲染）
     if (!workflowCanvasState.objectInfoLoaded) {
-      request(API.comfyuiObjectInfo).then((payload) => {
-        workflowCanvasState.objectInfo = payload || null;
+      request(`${API.comfyuiObjectInfo}?limit=500&offset=0`).then((payload) => {
+        workflowCanvasState.objectInfo = normalizeWorkflowNodeDefinitions(payload);
         workflowCanvasState.objectInfoLoaded = true;
         renderWorkflowCanvasPalette();
       }).catch(() => {
@@ -9564,7 +10809,10 @@
 
   // 加载工作流草稿数据并更新本地状态。
   async function loadWorkflowCanvasData(workflowId) {
-    const response = await request(API.workflowDraft(workflowId));
+    const [response, slotResponse] = await Promise.all([
+      request(API.workflowDraft(workflowId)),
+      request(API.workflowSlots(workflowId)).catch(() => ({ slots: [] })),
+    ]);
     // API 返回 {database_environment, draft: {...}}，提取 draft 对象。
     const draft = response.draft || response;
     // 工作流名称不在 draft 中，通过工作流详情 API 获取（如果有的话）。
@@ -9579,7 +10827,17 @@
     workflowCanvasState.draftRevision = draft.draft_revision != null ? draft.draft_revision : null;
     workflowCanvasState.isDirty = Boolean(draft.is_dirty);
     workflowCanvasState.graph = parseWorkflowGraph(draft);
-    workflowCanvasState.slots = parseWorkflowSlots(draft);
+    workflowCanvasState.slots = Array.isArray(slotResponse.slots)
+      ? slotResponse.slots
+      : parseWorkflowSlots(draft);
+    try {
+      const layoutState = typeof draft.layout_state === "string"
+        ? JSON.parse(draft.layout_state || "{}")
+        : (draft.layout_state || {});
+      workflowCanvasState.layoutGroups = Array.isArray(layoutState.groups) ? layoutState.groups : [];
+    } catch (_) {
+      workflowCanvasState.layoutGroups = [];
+    }
     if (!workflowCanvasState.selectedNodeId) {
       const first = (workflowCanvasState.graph.nodes || [])[0];
       if (first) workflowCanvasState.selectedNodeId = first.id;
@@ -9648,7 +10906,8 @@
         const node = (workflowCanvasState.graph.nodes || []).find((n) => String(n.id) === String(workflowCanvasState.selectedNodeId));
         if (!node) return;
         if ((node.title || "") === val) return;
-        await patchWorkflowNode(node.id, { title: val });
+        workflowCanvasState.pendingMutation = patchWorkflowNode(node.id, { title: val });
+        await workflowCanvasState.pendingMutation;
       });
     }
     const modeSelect = inspector.querySelector("#workflow-inspector-mode");
@@ -9658,7 +10917,8 @@
         const node = (workflowCanvasState.graph.nodes || []).find((n) => String(n.id) === String(workflowCanvasState.selectedNodeId));
         if (!node) return;
         if ((Number(node.mode) || 0) === val) return;
-        await patchWorkflowNode(node.id, { mode: val });
+        workflowCanvasState.pendingMutation = patchWorkflowNode(node.id, { mode: val });
+        await workflowCanvasState.pendingMutation;
       });
     }
     const widgetInputs = inspector.querySelectorAll("[data-widget-index]");
@@ -9674,9 +10934,16 @@
         if (raw !== "" && !isNaN(Number(raw)) && raw.length < 12) val = Number(raw);
         if (widgets[idx] === val) return;
         widgets[idx] = val;
-        await patchWorkflowNode(node.id, { widgets_values: widgets });
+        workflowCanvasState.pendingMutation = patchWorkflowNode(node.id, { widgets_values: widgets });
+        await workflowCanvasState.pendingMutation;
       });
     });
+    const groupSelect = inspector.querySelector("[data-workflow-group-select]");
+    if (groupSelect) {
+      groupSelect.addEventListener("change", async () => {
+        await assignWorkflowNodeGroup(groupSelect.dataset.nodeId, groupSelect.value || null);
+      });
+    }
   }
 
   // 绑定节点库搜索过滤。
@@ -9692,6 +10959,23 @@
         const text = item.textContent.toLowerCase();
         item.style.display = q && !text.includes(q) ? "none" : "";
       });
+      window.clearTimeout(workflowCanvasState.paletteSearchTimer);
+      workflowCanvasState.paletteSearchTimer = window.setTimeout(async () => {
+        try {
+          const params = new URLSearchParams({ limit: "300", offset: "0" });
+          if (q) params.set("search", q);
+          const payload = await request(`${API.comfyuiObjectInfo}?${params.toString()}`);
+          workflowCanvasState.objectInfo = normalizeWorkflowNodeDefinitions(payload);
+          renderWorkflowCanvasPalette();
+          const nextSearch = document.getElementById("workflow-palette-search");
+          if (nextSearch) {
+            nextSearch.value = q;
+            nextSearch.focus();
+          }
+        } catch (error) {
+          // Keep the current local result list when the server search fails.
+        }
+      }, 260);
     });
   }
 
@@ -9714,10 +10998,11 @@
   // PATCH 节点字段并刷新本地状态和画布。
   async function patchWorkflowNode(nodeId, patch) {
     try {
-      const updated = await request(API.workflowDraftNode(workflowCanvasState.workflowId, nodeId), {
-        method: "PATCH",
+      const response = await request(API.workflowDraftNode(workflowCanvasState.workflowId, nodeId), {
+        method: "PUT",
         body: JSON.stringify(patch),
       });
+      const updated = response?.node || response;
       // 更新本地节点数据：优先使用后端返回值，回退到本地 patch
       const nodes = workflowCanvasState.graph.nodes || [];
       const idx = nodes.findIndex((n) => String(n.id) === String(nodeId));
@@ -9746,6 +11031,7 @@
     const btn = document.querySelector('[data-api-action="save-workflow-draft"]');
     if (btn) { btn.disabled = true; btn.textContent = "保存中…"; }
     try {
+      await workflowCanvasState.pendingMutation;
       await request(API.workflowDraft(workflowCanvasState.workflowId), {
         method: "PUT",
         body: JSON.stringify({
@@ -9795,10 +11081,20 @@
   async function addWorkflowNode(nodeType) {
     if (!workflowCanvasState.workflowId) return;
     try {
-      const node = await request(API.workflowDraftNodes(workflowCanvasState.workflowId), {
+      const nodes = workflowCanvasState.graph.nodes || [];
+      const maxX = nodes.reduce((value, node) => {
+        const x = Array.isArray(node.position) ? Number(node.position[0]) || 0 : 0;
+        return Math.max(value, x);
+      }, 0);
+      const response = await request(API.workflowDraftNodes(workflowCanvasState.workflowId), {
         method: "POST",
-        body: JSON.stringify({ type: nodeType }),
+        body: JSON.stringify({
+          node_class: nodeType,
+          position_x: maxX + 260,
+          position_y: 80 + (nodes.length % 5) * 140,
+        }),
       });
+      const node = response?.node || response;
       if (node && node.id) {
         (workflowCanvasState.graph.nodes = workflowCanvasState.graph.nodes || []).push(node);
         workflowCanvasState.selectedNodeId = node.id;
@@ -9828,7 +11124,8 @@
       await request(API.workflowDraftNode(workflowCanvasState.workflowId, nodeId), { method: "DELETE" });
       workflowCanvasState.graph.nodes = (workflowCanvasState.graph.nodes || []).filter((n) => String(n.id) !== String(nodeId));
       workflowCanvasState.graph.links = (workflowCanvasState.graph.links || []).filter((l) => {
-        return String(l[1]) !== String(nodeId) && String(l[3]) !== String(nodeId);
+        const part = workflowLinkParts(l);
+        return String(part.sourceNode) !== String(nodeId) && String(part.targetNode) !== String(nodeId);
       });
       if (String(workflowCanvasState.selectedNodeId) === String(nodeId)) {
         workflowCanvasState.selectedNodeId = (workflowCanvasState.graph.nodes[0] || {}).id || null;
@@ -9841,6 +11138,130 @@
     }
   }
 
+  async function duplicateWorkflowNode(nodeId) {
+    try {
+      const response = await request(
+        API.workflowDraftNodeDuplicate(workflowCanvasState.workflowId, nodeId),
+        { method: "POST", body: "{}" }
+      );
+      const node = response.node;
+      if (!node) throw new Error("后端未返回复制后的节点");
+      workflowCanvasState.graph.nodes.push(node);
+      workflowCanvasState.selectedNodeId = node.id;
+      workflowCanvasState.isDirty = true;
+      refreshWorkflowCanvasAndInspector();
+      if (typeof showToast === "function") showToast("节点已复制");
+    } catch (error) {
+      if (typeof showToast === "function") showToast(error.message);
+    }
+  }
+
+  async function reorderWorkflowNode(nodeId, action) {
+    try {
+      await request(API.workflowDraftNodeReorder(workflowCanvasState.workflowId, nodeId), {
+        method: "POST",
+        body: JSON.stringify({ action }),
+      });
+      await loadWorkflowCanvasData(workflowCanvasState.workflowId);
+      workflowCanvasState.selectedNodeId = nodeId;
+      refreshWorkflowCanvasAndInspector();
+      if (typeof showToast === "function") showToast("节点位置已规整");
+    } catch (error) {
+      if (typeof showToast === "function") showToast(error.message);
+    }
+  }
+
+  async function toggleWorkflowNodeCollapse(nodeId) {
+    const node = workflowCanvasState.graph.nodes.find((item) => String(item.id) === String(nodeId));
+    if (!node) return;
+    const flags = { ...(node.flags || {}), collapsed: !Boolean(node.flags?.collapsed) };
+    await patchWorkflowNode(nodeId, { flags });
+    node.flags = flags;
+    refreshWorkflowCanvasAndInspector();
+  }
+
+  async function createWorkflowGroup(nodeId) {
+    const input = document.getElementById("workflow-new-group-title");
+    const title = input?.value.trim().replace(/\s+/g, " ");
+    if (!title) {
+      if (typeof showToast === "function") showToast("请输入分组名称");
+      input?.focus();
+      return;
+    }
+    try {
+      await request(API.workflowDraftGroups(workflowCanvasState.workflowId), {
+        method: "POST",
+        body: JSON.stringify({ title, members: [String(nodeId)] }),
+      });
+      await loadWorkflowCanvasData(workflowCanvasState.workflowId);
+      workflowCanvasState.selectedNodeId = nodeId;
+      refreshWorkflowCanvasAndInspector();
+      if (typeof showToast === "function") showToast(`分组「${title}」已创建`);
+    } catch (error) {
+      if (typeof showToast === "function") showToast(error.message);
+    }
+  }
+
+  async function assignWorkflowNodeGroup(nodeId, groupId) {
+    try {
+      await request(API.workflowDraftNodeAssignGroup(workflowCanvasState.workflowId, nodeId), {
+        method: "POST",
+        body: JSON.stringify({ group_id: groupId }),
+      });
+      await loadWorkflowCanvasData(workflowCanvasState.workflowId);
+      workflowCanvasState.selectedNodeId = nodeId;
+      refreshWorkflowCanvasAndInspector();
+      if (typeof showToast === "function") showToast(groupId ? "节点已加入分组" : "节点已移出分组");
+    } catch (error) {
+      if (typeof showToast === "function") showToast(error.message);
+    }
+  }
+
+  async function deleteWorkflowGroup(groupId, title) {
+    const ok = await confirmDialog({
+      title: "删除分组",
+      message: `确定删除分组「${title}」吗？节点本身不会被删除。`,
+      confirmText: "删除",
+      cancelText: "取消",
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await request(API.workflowDraftGroup(workflowCanvasState.workflowId, groupId), { method: "DELETE" });
+      await loadWorkflowCanvasData(workflowCanvasState.workflowId);
+      refreshWorkflowCanvasAndInspector();
+      if (typeof showToast === "function") showToast("分组已删除");
+    } catch (error) {
+      if (typeof showToast === "function") showToast(error.message);
+    }
+  }
+
+  async function focusWorkflowNode(nodeId, direction = "both") {
+    if (workflowCanvasState.focus && workflowCanvasState.focus.focus_node === String(nodeId)
+        && workflowCanvasState.focus.direction === direction) {
+      workflowCanvasState.focus = null;
+      refreshWorkflowCanvasAndInspector();
+      return;
+    }
+    try {
+      const response = await request(API.workflowDraftFocus(workflowCanvasState.workflowId), {
+        method: "POST",
+        body: JSON.stringify({ node_id: String(nodeId), direction }),
+      });
+      workflowCanvasState.focus = response.focus || null;
+      refreshWorkflowCanvasAndInspector();
+    } catch (error) {
+      if (typeof showToast === "function") showToast(error.message);
+    }
+  }
+
+  function updateWorkflowZoom(delta, reset = false) {
+    workflowCanvasState.zoom = reset
+      ? 1
+      : Math.min(1.5, Math.max(0.5, Math.round(((workflowCanvasState.zoom || 1) + delta) * 10) / 10));
+    refreshWorkflowCanvasAndInspector();
+  }
+
   // 新增连线：POST 到草稿连线集合，类型从源节点输出定义获取。
   async function addWorkflowLink(fromNodeId, fromSlot, toNodeId, toSlot) {
     if (!workflowCanvasState.workflowId) return;
@@ -9848,11 +11269,18 @@
     const outputs = fromNode && Array.isArray(fromNode.outputs) ? fromNode.outputs : [];
     const type = (outputs[fromSlot] || {}).type || "*";
     try {
-      const link = await request(API.workflowDraftLinks(workflowCanvasState.workflowId), {
+      const response = await request(API.workflowDraftLinks(workflowCanvasState.workflowId), {
         method: "POST",
-        body: JSON.stringify({ from_node_id: fromNodeId, from_slot: fromSlot, to_node_id: toNodeId, to_slot: toSlot, type }),
+        body: JSON.stringify({
+          source_node: String(fromNodeId),
+          source_slot: fromSlot,
+          target_node: String(toNodeId),
+          target_slot: toSlot,
+          link_type: type,
+        }),
       });
-      if (link && Array.isArray(link) && link.length >= 6) {
+      const link = response?.link || response;
+      if (link && (Array.isArray(link) || link.id != null)) {
         (workflowCanvasState.graph.links = workflowCanvasState.graph.links || []).push(link);
         workflowCanvasState.isDirty = true;
         refreshWorkflowCanvasAndInspector();
@@ -9881,7 +11309,9 @@
     if (!ok) return;
     try {
       await request(API.workflowDraftLink(workflowCanvasState.workflowId, linkId), { method: "DELETE" });
-      workflowCanvasState.graph.links = (workflowCanvasState.graph.links || []).filter((l) => String(l[0]) !== String(linkId));
+      workflowCanvasState.graph.links = (workflowCanvasState.graph.links || []).filter(
+        (link) => String(workflowLinkParts(link).id) !== String(linkId)
+      );
       workflowCanvasState.isDirty = true;
       refreshWorkflowCanvasAndInspector();
       if (typeof showToast === "function") showToast("连线已删除");
@@ -9996,7 +11426,11 @@
     try {
       await request(API.workflowPublish(workflowCanvasState.workflowId), {
         method: "POST",
-        body: JSON.stringify({ label }),
+        body: JSON.stringify({
+          label,
+          normalized_graph: "",
+          is_validated: true,
+        }),
       });
       workflowCanvasState.isDirty = false;
       closeWorkflowPublishModal();
@@ -10200,9 +11634,8 @@
       await addWorkflowSlot({
         node_id: nodeId,
         slot_type: slotType,
-        slot_key: slotKey,
-        input_name: inputName || null,
-        display_name: slotKey,
+        slot_name: slotKey,
+        input_name: inputName || "",
       });
     } catch (requestError) {
       error.textContent = requestError.message;
@@ -10267,6 +11700,165 @@
 
     if (button.dataset.apiAction === "load-development-progress") {
       await loadDevelopmentProgress();
+      return;
+    }
+
+    // 阶段 3：批量草稿、批次和任务中心
+    if (button.dataset.apiAction === "batch-create-first-draft") {
+      await createBatchDraftFromInput("batch-first-name");
+      return;
+    }
+
+    if (button.dataset.apiAction === "batch-new-draft") {
+      const name = window.prompt("输入新草稿名称", "");
+      if (name === null) return;
+      const trimmed = name.trim();
+      if (!trimmed) {
+        if (typeof showToast === "function") showToast("草稿名称不能为空");
+        return;
+      }
+      const payload = await request(API.batchDrafts(batchUiState.project.id), {
+        method: "POST",
+        body: JSON.stringify({ name: trimmed, scope: "project" }),
+      });
+      stage3Navigate("batch", {
+        project: batchUiState.project.id,
+        draft: payload.draft?.id,
+      });
+      return;
+    }
+
+    if (button.dataset.apiAction === "batch-delete-draft") {
+      if (!window.confirm("删除这个批量草稿？已固化批次和任务不会受影响。")) return;
+      await request(API.batchDraft(button.dataset.draftId), { method: "DELETE" });
+      if (typeof showToast === "function") showToast("批量草稿已删除");
+      stage3Navigate("batch", { project: batchUiState.project.id });
+      return;
+    }
+
+    if (button.dataset.apiAction === "batch-save-draft") {
+      try {
+        await saveBatchDraft();
+        await renderProductionBatch(batchUiState.project);
+      } catch (error) {
+        if (typeof showToast === "function") showToast(error.message);
+      }
+      return;
+    }
+
+    if (button.dataset.apiAction === "batch-preview-draft") {
+      await previewBatchDraft();
+      return;
+    }
+
+    if (button.dataset.apiAction === "batch-commit-draft") {
+      try {
+        await commitBatchDraft();
+      } catch (error) {
+        if (typeof showToast === "function") showToast(error.message);
+      }
+      return;
+    }
+
+    if (button.dataset.apiAction === "open-task-center") {
+      stage3Navigate("tasks", {
+        project: batchUiState.project?.id || taskUiState.project?.id,
+        batch: button.dataset.batchId || "",
+      });
+      return;
+    }
+
+    if (button.dataset.apiAction === "open-batch-page") {
+      stage3Navigate("batch", { project: taskUiState.project?.id });
+      return;
+    }
+
+    if (button.dataset.apiAction === "task-refresh") {
+      await renderProductionTasks(taskUiState.project, { preserveProgress: true });
+      return;
+    }
+
+    if (button.dataset.apiAction === "task-start-batch") {
+      await updateTaskBatchStatus(button.dataset.batchId, "running");
+      if (typeof showToast === "function") showToast("批次已进入运行状态，点击“连续运行待处理项”开始提交");
+      return;
+    }
+
+    if (button.dataset.apiAction === "task-run-queue") {
+      void runTaskQueue(button.dataset.batchId);
+      return;
+    }
+
+    if (button.dataset.apiAction === "task-stop-runner") {
+      taskUiState.runnerActive = false;
+      if (typeof showToast === "function") showToast("将在当前任务结束后停止自动领取");
+      return;
+    }
+
+    if (button.dataset.apiAction === "task-pause-batch") {
+      await updateTaskBatchStatus(button.dataset.batchId, "paused");
+      if (typeof showToast === "function") showToast("批次已暂停，不再领取新任务");
+      return;
+    }
+
+    if (button.dataset.apiAction === "task-cancel-batch") {
+      if (!window.confirm("取消这个批次？已经提交到 ComfyUI 的任务不会被重复提交。")) return;
+      await updateTaskBatchStatus(button.dataset.batchId, "cancelled");
+      if (typeof showToast === "function") showToast("批次已取消");
+      return;
+    }
+
+    if (button.dataset.apiAction === "task-control") {
+      try {
+        await request(API.task(button.dataset.taskId), {
+          method: "PATCH",
+          body: JSON.stringify({ action: button.dataset.taskAction }),
+        });
+        await renderProductionTasks(taskUiState.project, { preserveProgress: true });
+      } catch (error) {
+        if (typeof showToast === "function") showToast(error.message);
+      }
+      return;
+    }
+
+    if (button.dataset.apiAction === "task-retry-failed") {
+      await retryFailedTasks();
+      return;
+    }
+
+    if (button.dataset.apiAction === "task-resume-attempt") {
+      try {
+        await resumeTaskAttempt(button.dataset.attemptId);
+      } catch (error) {
+        if (typeof showToast === "function") showToast(error.message);
+      }
+      return;
+    }
+
+    if (button.dataset.apiAction === "task-recover-submitted") {
+      try {
+        const payload = await request(API.recoverSubmittedTasks, {
+          method: "POST",
+          body: "{}",
+        });
+        const recovery = payload.recovery || {};
+        if (typeof showToast === "function") {
+          showToast(`已核对 ${Number(recovery.checked) || 0} 项：完成 ${Number(recovery.recovered_completed) || 0}，失败 ${Number(recovery.recovered_failed) || 0}，未知 ${Number(recovery.marked_unknown) || 0}`);
+        }
+        await renderProductionTasks(taskUiState.project, { preserveProgress: true });
+      } catch (error) {
+        if (typeof showToast === "function") showToast(error.message);
+      }
+      return;
+    }
+
+    if (button.dataset.apiAction === "task-show-detail") {
+      await showTaskDetail(button.dataset.taskId);
+      return;
+    }
+
+    if (button.dataset.apiAction === "task-close-detail") {
+      closeTaskDetail();
       return;
     }
 
@@ -10900,6 +12492,36 @@
       return;
     }
 
+    if (button.dataset.apiAction === "duplicate-workflow-node") {
+      await duplicateWorkflowNode(button.dataset.nodeId);
+      return;
+    }
+
+    if (button.dataset.apiAction === "toggle-workflow-node-collapse") {
+      await toggleWorkflowNodeCollapse(button.dataset.nodeId);
+      return;
+    }
+
+    if (button.dataset.apiAction === "reorder-workflow-node") {
+      await reorderWorkflowNode(button.dataset.nodeId, button.dataset.reorderAction);
+      return;
+    }
+
+    if (button.dataset.apiAction === "create-workflow-group") {
+      await createWorkflowGroup(button.dataset.nodeId);
+      return;
+    }
+
+    if (button.dataset.apiAction === "delete-workflow-group") {
+      await deleteWorkflowGroup(button.dataset.groupId, button.dataset.groupTitle || "未命名分组");
+      return;
+    }
+
+    if (button.dataset.apiAction === "focus-workflow-node") {
+      await focusWorkflowNode(button.dataset.nodeId, button.dataset.focusDirection || "both");
+      return;
+    }
+
     if (button.dataset.apiAction === "select-workflow-node") {
       selectWorkflowNode(button.dataset.nodeId);
       return;
@@ -10947,18 +12569,38 @@
       return;
     }
 
-    // 工具栏 UI-only 操作（暂未对接后端）
     if (
-      button.dataset.apiAction === "workflow-undo" ||
-      button.dataset.apiAction === "workflow-redo" ||
       button.dataset.apiAction === "workflow-layout-ltr" ||
-      button.dataset.apiAction === "workflow-focus-path" ||
-      button.dataset.apiAction === "workflow-zoom-in" ||
-      button.dataset.apiAction === "workflow-zoom-out" ||
-      button.dataset.apiAction === "workflow-zoom-reset" ||
       button.dataset.apiAction === "workflow-auto-layout"
     ) {
-      if (typeof showToast === "function") showToast("该操作暂未开放");
+      await autoLayoutWorkflow();
+      return;
+    }
+
+    if (button.dataset.apiAction === "workflow-focus-path") {
+      if (workflowCanvasState.focus) {
+        workflowCanvasState.focus = null;
+        refreshWorkflowCanvasAndInspector();
+      } else if (workflowCanvasState.selectedNodeId != null) {
+        await focusWorkflowNode(workflowCanvasState.selectedNodeId, "both");
+      } else if (typeof showToast === "function") {
+        showToast("请先选择一个节点");
+      }
+      return;
+    }
+
+    if (button.dataset.apiAction === "workflow-zoom-in") {
+      updateWorkflowZoom(0.1);
+      return;
+    }
+
+    if (button.dataset.apiAction === "workflow-zoom-out") {
+      updateWorkflowZoom(-0.1);
+      return;
+    }
+
+    if (button.dataset.apiAction === "workflow-zoom-reset") {
+      updateWorkflowZoom(0, true);
       return;
     }
 
@@ -11137,6 +12779,11 @@
 
     if (button.dataset.apiAction === "execute-precheck") {
       await executePrecheck(button);
+      return;
+    }
+
+    if (button.dataset.apiAction === "jump-precheck-issue") {
+      jumpToPrecheckIssue(button.dataset.entityType, button.dataset.entityId);
       return;
     }
   });

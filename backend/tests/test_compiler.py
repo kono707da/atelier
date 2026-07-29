@@ -46,6 +46,7 @@ class ComputeSeedTests(unittest.TestCase):
     def test_increment_strategy(self) -> None:
         self.assertEqual(_compute_seed("increment", 100, "page1"), 100)
         self.assertEqual(_compute_seed("increment", None, "page1"), 0)
+        self.assertEqual(_compute_seed("increment", 100, "page2", 3), 103)
 
     def test_reuse_last_strategy_returns_none(self) -> None:
         self.assertIsNone(_compute_seed("reuse_last", 42, "page1"))

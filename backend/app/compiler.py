@@ -144,6 +144,8 @@ def compile_project(
     instance_count: int = 1,
     seed_strategy: str = "fixed",
     seed_base: int | None = None,
+    width_override: int | None = None,
+    height_override: int | None = None,
     workflow_id_override: str | None = None,
     workflow_version_id_override: str | None = None,
     skip_adopted: bool = False,
@@ -180,6 +182,14 @@ def compile_project(
 
     # 1. 收集所有 shot_page IDs
     page_ids = _collect_page_ids(manager, project_id, scope, scope_id, environment)
+    unfiltered_page_count = len(page_ids)
+    page_ids = _filter_page_ids(
+        manager,
+        page_ids,
+        skip_adopted=skip_adopted,
+        only_failed=only_failed,
+        environment=environment,
+    )
     if not page_ids:
         result.summary = {
             "total_pages": 0,
@@ -192,7 +202,7 @@ def compile_project(
     project_default = manager.get_project_default_workflow(project_id, environment=environment)
 
     # 3. 逐页编译
-    for page_id in page_ids:
+    for seed_index, page_id in enumerate(page_ids):
         item, page_blocking, page_warnings = _compile_page(
             manager,
             project_id,
@@ -200,6 +210,9 @@ def compile_project(
             instance_count=instance_count,
             seed_strategy=seed_strategy,
             seed_base=seed_base,
+            seed_index=seed_index,
+            width_override=width_override,
+            height_override=height_override,
             workflow_id_override=workflow_id_override,
             workflow_version_id_override=workflow_version_id_override,
             project_default_workflow=project_default,
@@ -220,6 +233,7 @@ def compile_project(
         "total_pages": len(page_ids),
         "compiled_items": len(result.items),
         "blocked_pages": len(page_ids) - len(result.items),
+        "skipped_pages": unfiltered_page_count - len(page_ids),
         "instance_count": instance_count,
         "seed_strategy": seed_strategy,
     }
@@ -314,6 +328,59 @@ def _collect_page_ids(
     return page_ids
 
 
+def _filter_page_ids(
+    manager: Any,
+    page_ids: list[str],
+    *,
+    skip_adopted: bool,
+    only_failed: bool,
+    environment: str | None,
+) -> list[str]:
+    """Apply rerun filters without changing the stable structure order.
+
+    ``skip_adopted`` excludes pages that already have at least one adopted
+    image. ``only_failed`` keeps pages represented by a failed task.  The
+    latter is intentionally derived from persisted task snapshots instead of
+    the current project structure so a rerun always points back to the exact
+    page that failed.
+    """
+    if not page_ids or (not skip_adopted and not only_failed):
+        return page_ids
+
+    adopted_ids: set[str] = set()
+    failed_ids: set[str] = set()
+    with manager.connection(environment) as conn:
+        if skip_adopted:
+            adopted_ids = {
+                str(row["shot_page_id"])
+                for row in conn.execute(
+                    "SELECT DISTINCT shot_page_id FROM image_instances "
+                    "WHERE is_adopted = 1"
+                ).fetchall()
+                if row["shot_page_id"]
+            }
+        if only_failed:
+            rows = conn.execute(
+                "SELECT item_snapshot_json FROM tasks "
+                "WHERE status = 'failed' AND deleted_at IS NULL"
+            ).fetchall()
+            for row in rows:
+                try:
+                    snapshot = json.loads(row["item_snapshot_json"] or "{}")
+                except (TypeError, ValueError):
+                    continue
+                shot_page_id = snapshot.get("shot_page_id")
+                if shot_page_id:
+                    failed_ids.add(str(shot_page_id))
+
+    return [
+        page_id
+        for page_id in page_ids
+        if (not skip_adopted or page_id not in adopted_ids)
+        and (not only_failed or page_id in failed_ids)
+    ]
+
+
 def _compile_page(
     manager: Any,
     project_id: str,
@@ -322,6 +389,9 @@ def _compile_page(
     instance_count: int,
     seed_strategy: str,
     seed_base: int | None,
+    seed_index: int,
+    width_override: int | None,
+    height_override: int | None,
     workflow_id_override: str | None,
     workflow_version_id_override: str | None,
     project_default_workflow: dict[str, Any] | None,
@@ -546,9 +616,15 @@ def _compile_page(
             effective["lora_name"] = page_char["default_lora_name"] or ""
             effective["lora_weight"] = page_char["default_lora_weight"]
             effective["model_override"] = page_char["default_model_override"] or ""
+        if width_override is not None:
+            effective["width"] = int(width_override)
+            field_sources["width"] = "batch_override"
+        if height_override is not None:
+            effective["height"] = int(height_override)
+            field_sources["height"] = "batch_override"
 
         # 7. 计算种子
-        seed_value = _compute_seed(seed_strategy, seed_base, page_id)
+        seed_value = _compute_seed(seed_strategy, seed_base, page_id, seed_index)
 
     # 8. 构建 RenderItem
     item_id = str(uuid4())
@@ -591,7 +667,12 @@ def _compile_page(
     return item, blocking, warnings
 
 
-def _compute_seed(strategy: str, base: int | None, page_id: str) -> int | None:
+def _compute_seed(
+    strategy: str,
+    base: int | None,
+    page_id: str,
+    index: int = 0,
+) -> int | None:
     """根据策略计算种子值。"""
     if strategy == "fixed":
         return base if base is not None else 0
@@ -599,7 +680,7 @@ def _compute_seed(strategy: str, base: int | None, page_id: str) -> int | None:
         # 随机种子在提交时生成，编译时返回 None
         return None
     elif strategy == "increment":
-        return base if base is not None else 0
+        return (base if base is not None else 0) + index
     elif strategy == "reuse_last":
         # 复用上一次的种子，编译时返回 None（需查询历史）
         return None
