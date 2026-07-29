@@ -1424,8 +1424,8 @@
       httpInput.focus();
       return;
     }
-    const body = { name, http_url: httpUrl, timeout_seconds: timeoutSeconds };
-    if (wsUrl) body.ws_url = wsUrl;
+    const body = { name, base_url: httpUrl, timeout_seconds: timeoutSeconds };
+    if (wsUrl) body.websocket_url = wsUrl;
     const isEdit = modal.dataset.mode === "edit";
     const instanceId = modal.dataset.instanceId;
     submit.disabled = true;
