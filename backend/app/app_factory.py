@@ -904,6 +904,29 @@ class BatchUpdateSpecValuesRequest(BaseModel):
     updates: list[dict[str, object]]
 
 
+class BatchPasteSpecValueEntry(BaseModel):
+    variant_id: str
+    spec_id: str
+    prompt: str | None = None
+    lora_name: str | None = None
+    lora_weight: float | None = None
+    model_override: str | None = None
+    notes: str | None = None
+
+    @field_validator("lora_weight")
+    @classmethod
+    def lora_weight_range(cls, value: float | None) -> float | None:
+        if value is not None and (value < 0 or value > 2):
+            raise ValueError("LoRA 权重必须在 0 到 2 之间。")
+        return value
+
+
+class BatchPasteSpecValuesRequest(BaseModel):
+    entries: list[BatchPasteSpecValueEntry]
+    apply_variant_defaults: bool = False
+    dry_run: bool = False
+
+
 class SetShotPageCharacterRequest(BaseModel):
     character_id: str
     variant_id: str
@@ -4924,6 +4947,39 @@ def create_app(
         return {
             "database_environment": manager.active_environment,
             "updated": count,
+        }
+
+    @app.post("/api/characters/{character_id}/spec-values/batch-paste")
+    def batch_paste_spec_values(
+        character_id: str, request: BatchPasteSpecValuesRequest
+    ) -> dict[str, object]:
+        if manager.get_character(character_id) is None:
+            raise HTTPException(status_code=404, detail="人物不存在。")
+        try:
+            result = manager.batch_paste_spec_values(
+                character_id,
+                [e.model_dump() for e in request.entries],
+                apply_variant_defaults=request.apply_variant_defaults,
+                dry_run=request.dry_run,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return {
+            "database_environment": manager.active_environment,
+            **result,
+        }
+
+    @app.get("/api/characters/{character_id}/spec-completeness")
+    def check_spec_completeness(character_id: str) -> dict[str, object]:
+        if manager.get_character(character_id) is None:
+            raise HTTPException(status_code=404, detail="人物不存在。")
+        try:
+            result = manager.check_spec_completeness(character_id)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return {
+            "database_environment": manager.active_environment,
+            **result,
         }
 
     @app.get("/api/character-variants/{variant_id}/spec-values")

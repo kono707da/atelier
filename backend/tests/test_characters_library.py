@@ -834,5 +834,249 @@ class ProjectCharacterLinkTests(_CharacterLibraryBase):
         self.assertEqual(response.status_code, 404)
 
 
+# ── 11. Batch paste spec values by coordinates ───────────────
+
+
+class BatchPasteSpecValuesTests(_CharacterLibraryBase):
+    def _seed_matrix(self) -> dict:
+        self._create_spec("full_body")
+        self._create_spec("close_up")
+        char = self._create_character()
+        variants = self.manager.list_character_variants(str(char["id"]))
+        return {
+            "char": char,
+            "variant": variants[0],
+            "values": self.manager.list_spec_values_for_variant(
+                str(variants[0]["id"])
+            ),
+        }
+
+    def test_batch_paste_by_variant_and_spec_id(self) -> None:
+        seed = self._seed_matrix()
+        entries = [
+            {
+                "variant_id": seed["variant"]["id"],
+                "spec_id": seed["values"][0]["spec_id"],
+                "prompt": "1girl, solo",
+                "lora_name": "style.safetensors",
+                "lora_weight": 0.7,
+            },
+            {
+                "variant_id": seed["variant"]["id"],
+                "spec_id": seed["values"][1]["spec_id"],
+                "prompt": "close-up face",
+                "notes": "近景备注",
+            },
+        ]
+        response = self.client.post(
+            f"/api/characters/{seed['char']['id']}/spec-values/batch-paste",
+            json={"entries": entries},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["applied"], 2)
+        self.assertEqual(body["skipped"], 0)
+        self.assertFalse(body["dry_run"])
+        v0 = self.manager.get_character_spec_value(seed["values"][0]["id"])
+        self.assertEqual(v0["prompt"], "1girl, solo")
+        self.assertEqual(v0["lora_name"], "style.safetensors")
+        self.assertAlmostEqual(v0["lora_weight"], 0.7)
+        v1 = self.manager.get_character_spec_value(seed["values"][1]["id"])
+        self.assertEqual(v1["prompt"], "close-up face")
+        self.assertEqual(v1["notes"], "近景备注")
+
+    def test_batch_paste_dry_run_does_not_write(self) -> None:
+        seed = self._seed_matrix()
+        original_prompt = seed["values"][0]["prompt"]
+        response = self.client.post(
+            f"/api/characters/{seed['char']['id']}/spec-values/batch-paste",
+            json={
+                "entries": [
+                    {
+                        "variant_id": seed["variant"]["id"],
+                        "spec_id": seed["values"][0]["spec_id"],
+                        "prompt": "dry-run-should-not-persist",
+                    }
+                ],
+                "dry_run": True,
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertTrue(body["dry_run"])
+        self.assertEqual(body["applied"], 1)
+        self.assertEqual(body["entries"][0]["status"], "would_update")
+        v0 = self.manager.get_character_spec_value(seed["values"][0]["id"])
+        self.assertEqual(v0["prompt"], original_prompt)
+
+    def test_batch_paste_apply_variant_defaults(self) -> None:
+        self._create_spec("full_body")
+        char = self._create_character()
+        # Create a variant with default LoRA settings
+        response = self.client.post(
+            f"/api/characters/{char['id']}/variants",
+            json={
+                "name": "默认LoRA变体",
+                "default_lora_name": "default.safetensors",
+                "default_lora_weight": 0.8,
+                "default_model_override": "custom-model",
+            },
+        )
+        self.assertEqual(response.status_code, 201, response.text)
+        variant = response.json()["variant"]
+        values = self.manager.list_spec_values_for_variant(str(variant["id"]))
+        # Paste with only prompt, defaults should fill lora fields
+        response = self.client.post(
+            f"/api/characters/{char['id']}/spec-values/batch-paste",
+            json={
+                "entries": [
+                    {
+                        "variant_id": variant["id"],
+                        "spec_id": values[0]["spec_id"],
+                        "prompt": "prompt-text",
+                    }
+                ],
+                "apply_variant_defaults": True,
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        v0 = self.manager.get_character_spec_value(values[0]["id"])
+        self.assertEqual(v0["prompt"], "prompt-text")
+        self.assertEqual(v0["lora_name"], "default.safetensors")
+        self.assertAlmostEqual(v0["lora_weight"], 0.8)
+        self.assertEqual(v0["model_override"], "custom-model")
+
+    def test_batch_paste_skips_unknown_coordinates(self) -> None:
+        seed = self._seed_matrix()
+        response = self.client.post(
+            f"/api/characters/{seed['char']['id']}/spec-values/batch-paste",
+            json={
+                "entries": [
+                    {
+                        "variant_id": "missing-variant",
+                        "spec_id": seed["values"][0]["spec_id"],
+                        "prompt": "ignored",
+                    }
+                ]
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["applied"], 0)
+        self.assertEqual(body["skipped"], 1)
+        self.assertEqual(body["entries"][0]["status"], "skipped")
+
+    def test_batch_paste_404_for_missing_character(self) -> None:
+        response = self.client.post(
+            "/api/characters/missing-character/spec-values/batch-paste",
+            json={"entries": []},
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_batch_paste_lora_weight_out_of_range(self) -> None:
+        seed = self._seed_matrix()
+        response = self.client.post(
+            f"/api/characters/{seed['char']['id']}/spec-values/batch-paste",
+            json={
+                "entries": [
+                    {
+                        "variant_id": seed["variant"]["id"],
+                        "spec_id": seed["values"][0]["spec_id"],
+                        "lora_weight": 5.0,
+                    }
+                ]
+            },
+        )
+        self.assertEqual(response.status_code, 422, response.text)
+
+
+# ── 12. Spec completeness check ───────────────────────────────
+
+
+class SpecCompletenessTests(_CharacterLibraryBase):
+    def test_completeness_complete_character(self) -> None:
+        spec = self._create_spec("full_body", is_required=True)
+        char = self._create_character()
+        variants = self.manager.list_character_variants(str(char["id"]))
+        values = self.manager.list_spec_values_for_variant(
+            str(variants[0]["id"])
+        )
+        self.manager.update_character_spec_value(
+            values[0]["id"], prompt="filled"
+        )
+        response = self.client.get(
+            f"/api/characters/{char['id']}/spec-completeness"
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertTrue(body["is_complete"])
+        self.assertEqual(body["missing_required"], [])
+        self.assertEqual(body["required_spec_count"], 1)
+
+    def test_completeness_reports_missing_required(self) -> None:
+        self._create_spec("full_body", is_required=True)
+        char = self._create_character()
+        response = self.client.get(
+            f"/api/characters/{char['id']}/spec-completeness"
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertFalse(body["is_complete"])
+        self.assertEqual(len(body["missing_required"]), 1)
+        missing = body["missing_required"][0]
+        self.assertEqual(missing["variant_name"], "默认")
+        self.assertEqual(missing["spec_label"], "full_body")
+        self.assertEqual(missing["affected_shot_pages"], [])
+
+    def test_completeness_with_affected_shot_pages(self) -> None:
+        self._create_spec("full_body", is_required=True)
+        char = self._create_character()
+        variant = self._create_variant(char["id"], "裙装")
+        shot_page = self._create_shot_page("阻塞场景页")
+        self.client.put(
+            f"/api/shot-pages/{shot_page['id']}/character",
+            json={"character_id": char["id"], "variant_id": variant["id"]},
+        )
+        response = self.client.get(
+            f"/api/characters/{char['id']}/spec-completeness"
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertFalse(body["is_complete"])
+        # Both default and 裙装 variants miss the required spec
+        missing_default = [
+            m for m in body["missing_required"] if m["variant_name"] == "默认"
+        ]
+        missing_skirt = [
+            m for m in body["missing_required"] if m["variant_name"] == "裙装"
+        ]
+        self.assertEqual(len(missing_default), 1)
+        self.assertEqual(len(missing_skirt), 1)
+        # Default variant has no shot page binding
+        self.assertEqual(missing_default[0]["affected_shot_pages"], [])
+        # 裙装 variant is bound to the shot page
+        affected = missing_skirt[0]["affected_shot_pages"]
+        self.assertEqual(len(affected), 1)
+        self.assertEqual(affected[0]["shot_page_id"], shot_page["id"])
+        self.assertEqual(affected[0]["shot_page_title"], "阻塞场景页")
+
+    def test_completeness_404_for_missing_character(self) -> None:
+        response = self.client.get(
+            "/api/characters/missing-id/spec-completeness"
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_completeness_no_required_specs(self) -> None:
+        self._create_spec("full_body", is_required=False)
+        char = self._create_character()
+        response = self.client.get(
+            f"/api/characters/{char['id']}/spec-completeness"
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertTrue(body["is_complete"])
+        self.assertEqual(body["required_spec_count"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()
