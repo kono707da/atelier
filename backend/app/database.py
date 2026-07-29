@@ -603,6 +603,10 @@ class DatabaseManager:
                 self._migrate_workflow_draft_layout_extend,
             )
             self._run_migration(
+                connection, "v0.5.9", "Extend workflow_drafts with is_dirty/draft_revision/source_checksum/draft_checksum for export-after-edit fix",
+                self._migrate_workflow_draft_dirty,
+            )
+            self._run_migration(
                 connection, "v0.7.0", "Add batch_drafts and batches tables for stage 3.2",
                 self._migrate_batch_drafts,
             )
@@ -613,6 +617,10 @@ class DatabaseManager:
             self._run_migration(
                 connection, "v0.7.2", "Add files/image_instances/thumbnails/background_jobs tables for stage 3.6",
                 self._migrate_output_files,
+            )
+            self._run_migration(
+                connection, "v0.8.0", "Add comfyui_instances table for multi-instance management",
+                self._migrate_comfyui_instances,
             )
             marker = connection.execute(
                 "SELECT value FROM atelier_meta WHERE key = 'environment'"
@@ -1858,6 +1866,35 @@ class DatabaseManager:
                 "ALTER TABLE workflow_drafts ADD COLUMN layout_state TEXT"
             )
 
+    def _migrate_workflow_draft_dirty(self, connection) -> None:
+        """v0.5.9: 扩展 workflow_drafts 表，区分来源快照与当前草稿。
+
+        新增字段：
+        - is_dirty: 是否被编辑过（0=未编辑，1=已编辑）。编辑后导出必须基于 normalized_graph。
+        - draft_revision: 草稿修订号，每次编辑递增。前端提交 expected_revision 做乐观并发控制。
+        - source_checksum: 来源快照（raw_ui_json/raw_api_json）的校验和，用于审计。
+        - draft_checksum: 当前草稿（normalized_graph）的校验和。
+
+        幂等：使用 PRAGMA table_info 检查列是否存在。
+        """
+        cols = [row["name"] for row in connection.execute("PRAGMA table_info(workflow_drafts)").fetchall()]
+        if "is_dirty" not in cols:
+            connection.execute(
+                "ALTER TABLE workflow_drafts ADD COLUMN is_dirty INTEGER NOT NULL DEFAULT 0"
+            )
+        if "draft_revision" not in cols:
+            connection.execute(
+                "ALTER TABLE workflow_drafts ADD COLUMN draft_revision INTEGER NOT NULL DEFAULT 0"
+            )
+        if "source_checksum" not in cols:
+            connection.execute(
+                "ALTER TABLE workflow_drafts ADD COLUMN source_checksum TEXT NOT NULL DEFAULT ''"
+            )
+        if "draft_checksum" not in cols:
+            connection.execute(
+                "ALTER TABLE workflow_drafts ADD COLUMN draft_checksum TEXT NOT NULL DEFAULT ''"
+            )
+
     def _migrate_batch_drafts(self, connection) -> None:
         """v0.7.0: 阶段3.2 跑图列表与批量配置。
 
@@ -2186,6 +2223,103 @@ class DatabaseManager:
             "CREATE INDEX IF NOT EXISTS idx_background_jobs_type "
             "ON background_jobs(job_type, status)"
         )
+
+    def _migrate_comfyui_instances(self, connection) -> None:
+        """v0.8.0: 新增 comfyui_instances 表，支持多实例管理。
+
+        表字段（需求 §4.4）：
+        - id: 实例唯一 ID
+        - name: 用户输入名称
+        - base_url: HTTP 地址
+        - websocket_url: 可选 WebSocket 地址
+        - timeout_seconds: 连接超时
+        - download_timeout_seconds: 下载超时
+        - is_active: 是否为活动实例（同一时间仅一个为 1）
+        - last_connection_status: 最近连接状态（unknown/ok/unreachable/error）
+        - last_checked_at: 最近检测时间
+        - comfyui_version: ComfyUI 版本
+        - device_summary: 设备摘要 JSON
+        - node_definition_summary: 节点定义摘要 JSON
+        - created_at, updated_at
+
+        迁移旧单实例设置：将 app_settings 中的 comfyui.base_url 等迁移为一条实例记录，
+        不判断地址是否有效，保留原值不自动更改（需求 §11.1）。
+
+        幂等：CREATE TABLE IF NOT EXISTS + 检查是否已有迁移记录。
+        """
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS comfyui_instances (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                base_url TEXT NOT NULL,
+                websocket_url TEXT NOT NULL DEFAULT '',
+                timeout_seconds REAL NOT NULL DEFAULT 10.0,
+                download_timeout_seconds REAL NOT NULL DEFAULT 60.0,
+                is_active INTEGER NOT NULL DEFAULT 0,
+                last_connection_status TEXT NOT NULL DEFAULT 'unknown',
+                last_checked_at TEXT NOT NULL DEFAULT '',
+                comfyui_version TEXT NOT NULL DEFAULT '',
+                device_summary TEXT NOT NULL DEFAULT '',
+                node_definition_summary TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_comfyui_instances_active "
+            "ON comfyui_instances(is_active) WHERE is_active = 1"
+        )
+
+        # 迁移旧单实例设置：将 app_settings 中的 comfyui.* 迁移为一条实例记录
+        existing_count = connection.execute(
+            "SELECT COUNT(*) as c FROM comfyui_instances"
+        ).fetchone()["c"]
+        if existing_count == 0:
+            old_base_url = connection.execute(
+                "SELECT value FROM app_settings WHERE key = 'comfyui.base_url'"
+            ).fetchone()
+            if old_base_url:
+                base_url = old_base_url["value"] or "http://127.0.0.1:8188"
+                timeout_row = connection.execute(
+                    "SELECT value FROM app_settings WHERE key = 'comfyui.timeout_seconds'"
+                ).fetchone()
+                ws_row = connection.execute(
+                    "SELECT value FROM app_settings WHERE key = 'comfyui.websocket_url'"
+                ).fetchone()
+                try:
+                    timeout = float(timeout_row["value"]) if timeout_row else 10.0
+                except (TypeError, ValueError):
+                    timeout = 10.0
+                websocket_url = ws_row["value"] if ws_row else ""
+                now = datetime.now(timezone.utc).isoformat()
+                connection.execute(
+                    """
+                    INSERT INTO comfyui_instances(
+                        id, name, base_url, websocket_url, timeout_seconds,
+                        download_timeout_seconds, is_active, last_connection_status,
+                        last_checked_at, comfyui_version, device_summary,
+                        node_definition_summary, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "migrated-default",
+                        "默认实例",
+                        base_url,
+                        websocket_url,
+                        timeout,
+                        60.0,
+                        1,  # 标记为活动实例
+                        "unknown",
+                        "",
+                        "",
+                        "",
+                        "",
+                        now,
+                        now,
+                    ),
+                )
 
     def activate(self, environment: DatabaseEnvironment) -> None:
         target_environment = self._validate_environment(environment)
@@ -9284,6 +9418,267 @@ class DatabaseManager:
         return self.get_comfyui_settings(environment=target)
 
     # ──────────────────────────────────────────────────────────────────
+    # ComfyUI 多实例管理（comfyui_instances 表，需求 §4.4）
+    # ──────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _row_to_comfyui_instance(row: sqlite3.Row | None) -> dict[str, object] | None:
+        """将数据库行转换为实例字典。"""
+        if row is None:
+            return None
+        device_summary = row["device_summary"]
+        node_definition_summary = row["node_definition_summary"]
+        try:
+            device_summary_parsed = json.loads(device_summary) if device_summary else []
+        except (TypeError, ValueError):
+            device_summary_parsed = []
+        try:
+            node_summary_parsed = json.loads(node_definition_summary) if node_definition_summary else {}
+        except (TypeError, ValueError):
+            node_summary_parsed = {}
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "base_url": row["base_url"],
+            "websocket_url": row["websocket_url"],
+            "timeout_seconds": float(row["timeout_seconds"]),
+            "download_timeout_seconds": float(row["download_timeout_seconds"]),
+            "is_active": bool(row["is_active"]),
+            "last_connection_status": row["last_connection_status"],
+            "last_checked_at": row["last_checked_at"],
+            "comfyui_version": row["comfyui_version"],
+            "device_summary": device_summary_parsed,
+            "node_definition_summary": node_summary_parsed,
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    def list_comfyui_instances(
+        self,
+        *,
+        environment: DatabaseEnvironment | None = None,
+    ) -> list[dict[str, object]]:
+        """列出所有 ComfyUI 实例。"""
+        target = environment or self._active_environment
+        with self._lock, self.connection(target) as connection:
+            rows = connection.execute(
+                "SELECT * FROM comfyui_instances ORDER BY created_at ASC"
+            ).fetchall()
+        return [self._row_to_comfyui_instance(r) for r in rows if r is not None]  # type: ignore[misc]
+
+    def get_comfyui_instance(
+        self,
+        instance_id: str,
+        *,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        """获取单个 ComfyUI 实例。"""
+        target = environment or self._active_environment
+        with self._lock, self.connection(target) as connection:
+            row = connection.execute(
+                "SELECT * FROM comfyui_instances WHERE id = ?",
+                (instance_id,),
+            ).fetchone()
+        return self._row_to_comfyui_instance(row)
+
+    def get_active_comfyui_instance(
+        self,
+        *,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        """获取当前活动实例。同一时间仅一个。"""
+        target = environment or self._active_environment
+        with self._lock, self.connection(target) as connection:
+            row = connection.execute(
+                "SELECT * FROM comfyui_instances WHERE is_active = 1 LIMIT 1"
+            ).fetchone()
+        return self._row_to_comfyui_instance(row)
+
+    def create_comfyui_instance(
+        self,
+        *,
+        name: str,
+        base_url: str,
+        websocket_url: str = "",
+        timeout_seconds: float = 10.0,
+        download_timeout_seconds: float = 60.0,
+        is_active: bool = False,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        """创建 ComfyUI 实例。
+
+        如果 is_active=True，先将其他实例设为非活动，再插入新实例并标记为活动。
+        """
+        target = environment or self._active_environment
+        instance_id = uuid4().hex
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self.connection(target) as connection:
+            if is_active:
+                connection.execute(
+                    "UPDATE comfyui_instances SET is_active = 0, updated_at = ?",
+                    (now,),
+                )
+            connection.execute(
+                """
+                INSERT INTO comfyui_instances(
+                    id, name, base_url, websocket_url, timeout_seconds,
+                    download_timeout_seconds, is_active, last_connection_status,
+                    last_checked_at, comfyui_version, device_summary,
+                    node_definition_summary, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    instance_id,
+                    name,
+                    base_url,
+                    websocket_url,
+                    timeout_seconds,
+                    download_timeout_seconds,
+                    1 if is_active else 0,
+                    "unknown",
+                    "",
+                    "",
+                    "",
+                    "",
+                    now,
+                    now,
+                ),
+            )
+        result = self.get_comfyui_instance(instance_id, environment=target)
+        assert result is not None
+        return result
+
+    def update_comfyui_instance(
+        self,
+        instance_id: str,
+        *,
+        name: str | None = None,
+        base_url: str | None = None,
+        websocket_url: str | None = None,
+        timeout_seconds: float | None = None,
+        download_timeout_seconds: float | None = None,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        """更新 ComfyUI 实例配置（不包含状态字段）。"""
+        target = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self.connection(target) as connection:
+            existing = connection.execute(
+                "SELECT id FROM comfyui_instances WHERE id = ?",
+                (instance_id,),
+            ).fetchone()
+            if existing is None:
+                return None
+            if name is not None:
+                connection.execute(
+                    "UPDATE comfyui_instances SET name = ?, updated_at = ? WHERE id = ?",
+                    (name, now, instance_id),
+                )
+            if base_url is not None:
+                connection.execute(
+                    "UPDATE comfyui_instances SET base_url = ?, updated_at = ? WHERE id = ?",
+                    (base_url, now, instance_id),
+                )
+            if websocket_url is not None:
+                connection.execute(
+                    "UPDATE comfyui_instances SET websocket_url = ?, updated_at = ? WHERE id = ?",
+                    (websocket_url, now, instance_id),
+                )
+            if timeout_seconds is not None:
+                connection.execute(
+                    "UPDATE comfyui_instances SET timeout_seconds = ?, updated_at = ? WHERE id = ?",
+                    (timeout_seconds, now, instance_id),
+                )
+            if download_timeout_seconds is not None:
+                connection.execute(
+                    "UPDATE comfyui_instances SET download_timeout_seconds = ?, updated_at = ? WHERE id = ?",
+                    (download_timeout_seconds, now, instance_id),
+                )
+        return self.get_comfyui_instance(instance_id, environment=target)
+
+    def delete_comfyui_instance(
+        self,
+        instance_id: str,
+        *,
+        environment: DatabaseEnvironment | None = None,
+    ) -> bool:
+        """删除 ComfyUI 实例。返回是否删除成功。"""
+        target = environment or self._active_environment
+        with self._lock, self.connection(target) as connection:
+            cursor = connection.execute(
+                "DELETE FROM comfyui_instances WHERE id = ?",
+                (instance_id,),
+            )
+            return cursor.rowcount > 0
+
+    def activate_comfyui_instance(
+        self,
+        instance_id: str,
+        *,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        """将指定实例设为活动实例，其他全部设为非活动。"""
+        target = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self.connection(target) as connection:
+            existing = connection.execute(
+                "SELECT id FROM comfyui_instances WHERE id = ?",
+                (instance_id,),
+            ).fetchone()
+            if existing is None:
+                return None
+            connection.execute(
+                "UPDATE comfyui_instances SET is_active = 0, updated_at = ?",
+                (now,),
+            )
+            connection.execute(
+                "UPDATE comfyui_instances SET is_active = 1, updated_at = ? WHERE id = ?",
+                (now, instance_id),
+            )
+        return self.get_comfyui_instance(instance_id, environment=target)
+
+    def update_comfyui_instance_status(
+        self,
+        instance_id: str,
+        *,
+        connection_status: str,
+        comfyui_version: str | None = None,
+        device_summary: list[dict[str, object]] | None = None,
+        node_definition_summary: dict[str, object] | None = None,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        """更新实例的连接状态和检测结果。"""
+        target = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self.connection(target) as connection:
+            existing = connection.execute(
+                "SELECT id FROM comfyui_instances WHERE id = ?",
+                (instance_id,),
+            ).fetchone()
+            if existing is None:
+                return None
+            connection.execute(
+                "UPDATE comfyui_instances SET last_connection_status = ?, last_checked_at = ? WHERE id = ?",
+                (connection_status, now, instance_id),
+            )
+            if comfyui_version is not None:
+                connection.execute(
+                    "UPDATE comfyui_instances SET comfyui_version = ?, updated_at = ? WHERE id = ?",
+                    (comfyui_version, now, instance_id),
+                )
+            if device_summary is not None:
+                connection.execute(
+                    "UPDATE comfyui_instances SET device_summary = ?, updated_at = ? WHERE id = ?",
+                    (json.dumps(device_summary, ensure_ascii=False), now, instance_id),
+                )
+            if node_definition_summary is not None:
+                connection.execute(
+                    "UPDATE comfyui_instances SET node_definition_summary = ?, updated_at = ? WHERE id = ?",
+                    (json.dumps(node_definition_summary, ensure_ascii=False), now, instance_id),
+                )
+        return self.get_comfyui_instance(instance_id, environment=target)
+
+    # ──────────────────────────────────────────────────────────────────
     # ComfyUI 节点定义缓存（comfyui_node_definitions 表）
     # ──────────────────────────────────────────────────────────────────
 
@@ -9919,7 +10314,8 @@ class DatabaseManager:
             )
             draft_row = connection.execute(
                 """
-                SELECT normalized_graph, raw_ui_json, raw_api_json, node_count, semantic_slots_json
+                SELECT normalized_graph, raw_ui_json, raw_api_json, node_count, semantic_slots_json,
+                       is_dirty, draft_revision, source_checksum, draft_checksum
                 FROM workflow_drafts
                 WHERE workflow_id = ?
                 """,
@@ -9931,15 +10327,19 @@ class DatabaseManager:
                     """
                     INSERT INTO workflow_drafts(
                         id, workflow_id, normalized_graph, raw_ui_json, raw_api_json,
-                        node_count, semantic_slots_json, created_at, updated_at
+                        node_count, semantic_slots_json, is_dirty, draft_revision,
+                        source_checksum, draft_checksum, created_at, updated_at
                     )
-                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         new_draft_id, new_id,
                         draft_row["normalized_graph"], draft_row["raw_ui_json"],
                         draft_row["raw_api_json"], draft_row["node_count"],
-                        draft_row["semantic_slots_json"], now, now,
+                        draft_row["semantic_slots_json"],
+                        int(draft_row["is_dirty"] or 0), int(draft_row["draft_revision"] or 0),
+                        draft_row["source_checksum"] or "", draft_row["draft_checksum"] or "",
+                        now, now,
                     ),
                 )
                 connection.execute(
@@ -10117,13 +10517,18 @@ class DatabaseManager:
                 """
                 SELECT id, workflow_id, normalized_graph, raw_ui_json, raw_api_json,
                        node_count, semantic_slots_json, last_node_id, last_link_id,
-                       validation_state, layout_state, created_at, updated_at
+                       validation_state, layout_state, is_dirty, draft_revision,
+                       source_checksum, draft_checksum, created_at, updated_at
                 FROM workflow_drafts
                 WHERE workflow_id = ?
                 """,
                 (workflow_id,),
             ).fetchone()
-        return dict(row) if row else None
+        if row is None:
+            return None
+        result = dict(row)
+        result["is_dirty"] = bool(result.get("is_dirty", 0))
+        return result
 
     def save_workflow_draft(
         self,
@@ -10138,9 +10543,24 @@ class DatabaseManager:
         last_link_id: int | None = None,
         validation_state: str | None = None,
         layout_state: str | None = None,
+        is_dirty: bool | None = None,
+        draft_revision: int | None = None,
+        source_checksum: str | None = None,
+        draft_checksum: str | None = None,
+        expected_revision: int | None = None,
         environment: DatabaseEnvironment | None = None,
     ) -> dict[str, object]:
-        """保存草稿（upsert）。如果没有草稿则创建，有则更新。同时更新 workflow.draft_id 和 node_count。"""
+        """保存草稿（upsert）。如果没有草稿则创建，有则更新。同时更新 workflow.draft_id 和 node_count。
+
+        参数：
+            is_dirty: 是否被编辑过。True 表示导出必须基于 normalized_graph，不再返回来源快照。
+                传入 None 表示不改变现有标记（用于校验等非编辑操作）。
+            draft_revision: 显式设置草稿修订号。一般不传，由 is_dirty=True 触发自增。
+            source_checksum: 来源快照校验和。导入时设置，之后不变。
+            draft_checksum: 当前草稿校验和。
+            expected_revision: 乐观并发控制。传入时校验当前 draft_revision 是否匹配，
+                不匹配抛 ValueError（调用方应返回 409）。
+        """
         target = environment or self._active_environment
         now = datetime.now(timezone.utc).isoformat()
         with self._lock, self.connection(target) as connection:
@@ -10151,16 +10571,43 @@ class DatabaseManager:
             if existing is None:
                 raise ValueError("工作流不存在。")
             existing_draft = connection.execute(
-                "SELECT id, last_node_id, last_link_id, validation_state, layout_state FROM workflow_drafts WHERE workflow_id = ?",
+                """
+                SELECT id, last_node_id, last_link_id, validation_state, layout_state,
+                       is_dirty, draft_revision, source_checksum, draft_checksum
+                FROM workflow_drafts WHERE workflow_id = ?
+                """,
                 (workflow_id,),
             ).fetchone()
             if existing_draft:
                 draft_id = existing_draft["id"]
+                # 乐观并发控制：校验 expected_revision
+                current_revision = int(existing_draft["draft_revision"] or 0)
+                if expected_revision is not None and expected_revision != current_revision:
+                    raise ValueError(
+                        f"草稿修订号不匹配：期望 {expected_revision}，实际 {current_revision}。"
+                    )
                 # 保留未传入字段的现有值（草稿增量更新）
                 resolved_last_node = last_node_id if last_node_id is not None else int(existing_draft["last_node_id"] or 0)
                 resolved_last_link = last_link_id if last_link_id is not None else int(existing_draft["last_link_id"] or 0)
                 resolved_validation = validation_state if validation_state is not None else existing_draft["validation_state"]
                 resolved_layout = layout_state if layout_state is not None else existing_draft["layout_state"]
+                # is_dirty：None 保持现状，True/False 显式设置
+                if is_dirty is None:
+                    resolved_is_dirty = int(existing_draft["is_dirty"] or 0)
+                else:
+                    resolved_is_dirty = 1 if is_dirty else 0
+                # draft_revision：显式传入时使用，否则 is_dirty=True 触发自增
+                if draft_revision is not None:
+                    new_revision = int(draft_revision)
+                elif is_dirty:
+                    new_revision = current_revision + 1
+                else:
+                    new_revision = current_revision
+                # source_checksum：只在首次传入时设置，之后不变（来源快照不可变）
+                resolved_source_checksum = existing_draft["source_checksum"] or ""
+                if not resolved_source_checksum and source_checksum:
+                    resolved_source_checksum = source_checksum
+                resolved_draft_checksum = draft_checksum if draft_checksum is not None else (existing_draft["draft_checksum"] or "")
                 connection.execute(
                     """
                     UPDATE workflow_drafts
@@ -10168,6 +10615,8 @@ class DatabaseManager:
                         node_count = ?, semantic_slots_json = ?,
                         last_node_id = ?, last_link_id = ?, validation_state = ?,
                         layout_state = ?,
+                        is_dirty = ?, draft_revision = ?,
+                        source_checksum = ?, draft_checksum = ?,
                         updated_at = ?
                     WHERE id = ?
                     """,
@@ -10175,24 +10624,33 @@ class DatabaseManager:
                      node_count, semantic_slots_json,
                      resolved_last_node, resolved_last_link, resolved_validation,
                      resolved_layout,
+                     resolved_is_dirty, new_revision,
+                     resolved_source_checksum, resolved_draft_checksum,
                      now, draft_id),
                 )
             else:
+                # 新建草稿：is_dirty 默认为 False（刚导入，未编辑）
+                resolved_is_dirty = 1 if is_dirty else 0
+                new_revision = int(draft_revision) if draft_revision is not None else (1 if is_dirty else 0)
+                resolved_source_checksum = source_checksum or ""
+                resolved_draft_checksum = draft_checksum or ""
                 draft_id = uuid4().hex
                 connection.execute(
                     """
                     INSERT INTO workflow_drafts(
                         id, workflow_id, normalized_graph, raw_ui_json, raw_api_json,
                         node_count, semantic_slots_json, last_node_id, last_link_id,
-                        validation_state, layout_state, created_at, updated_at
+                        validation_state, layout_state, is_dirty, draft_revision,
+                        source_checksum, draft_checksum, created_at, updated_at
                     )
-                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         draft_id, workflow_id, normalized_graph, raw_ui_json, raw_api_json,
                         node_count, semantic_slots_json,
                         last_node_id or 0, last_link_id or 0, validation_state,
-                        layout_state,
+                        layout_state, resolved_is_dirty, new_revision,
+                        resolved_source_checksum, resolved_draft_checksum,
                         now, now,
                     ),
                 )
@@ -10204,13 +10662,16 @@ class DatabaseManager:
                 """
                 SELECT id, workflow_id, normalized_graph, raw_ui_json, raw_api_json,
                        node_count, semantic_slots_json, last_node_id, last_link_id,
-                       validation_state, layout_state, created_at, updated_at
+                       validation_state, layout_state, is_dirty, draft_revision,
+                       source_checksum, draft_checksum, created_at, updated_at
                 FROM workflow_drafts
                 WHERE id = ?
                 """,
                 (draft_id,),
             ).fetchone()
-        return dict(row)
+        result = dict(row)
+        result["is_dirty"] = bool(result.get("is_dirty", 0))
+        return result
 
     def batch_get_node_definitions(
         self,

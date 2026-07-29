@@ -651,5 +651,437 @@ class RoundtripApiTests(_PublishApiBase):
         self.assertEqual(data["original_node_count"], data["roundtrip_node_count"])
 
 
+# ──────────────────────────────────────────────────────────────────
+# 编辑后导出测试（需求 §5.5）
+# ──────────────────────────────────────────────────────────────────
+
+
+def _make_simple_ui_json() -> dict:
+    """构造简单 UI JSON 用于导入测试。"""
+    return {
+        "last_node_id": 2,
+        "last_link_id": 1,
+        "nodes": [
+            {
+                "id": 1,
+                "type": "CheckpointLoaderSimple",
+                "title": "Load Checkpoint",
+                "pos": [0, 0],
+                "size": {"0": 240, "1": 100},
+                "flags": {},
+                "order": 0,
+                "mode": 0,
+                "inputs": [],
+                "outputs": [{"name": "MODEL", "type": "MODEL", "links": [1]}],
+                "widgets_values": ["old_model.safetensors"],
+                "properties": {},
+            },
+            {
+                "id": 2,
+                "type": "KSampler",
+                "title": "KSampler",
+                "pos": [320, 0],
+                "size": {"0": 300, "1": 200},
+                "flags": {},
+                "order": 1,
+                "mode": 0,
+                "inputs": [{"name": "model", "type": "MODEL", "link": 1}],
+                "outputs": [],
+                "widgets_values": [12345, "fixed", 20, 8, "euler", "normal", 1],
+                "properties": {},
+            },
+        ],
+        "links": [[1, 1, 0, 2, 0, "MODEL"]],
+        "groups": [],
+        "config": {},
+        "extra": {},
+        "version": 0.4,
+    }
+
+
+def _make_simple_api_json() -> dict:
+    """构造简单 API JSON 用于导入测试。"""
+    return {
+        "1": {
+            "class_type": "CheckpointLoaderSimple",
+            "inputs": {"ckpt_name": "old_model.safetensors"},
+        },
+        "2": {
+            "class_type": "KSampler",
+            "inputs": {
+                "seed": 12345,
+                "model": ["1", 0],
+            },
+        },
+    }
+
+
+class ExportAfterEditTests(_PublishApiBase):
+    """需求 §5.5：编辑后导出测试。
+
+    覆盖：
+    1. 导入 UI JSON 后不编辑，原样往返
+    2. 修改节点组件值后，UI JSON 导出为新值
+    3. 修改节点组件值后，API JSON 导出为新值
+    4. 新增节点后，导出包含新节点
+    5. 删除节点后，导出不再包含该节点
+    6. 新增、替换和删除连线后，导出反映当前连线
+    7. 分组和布局调整后，UI JSON 反映当前结构
+    8. 未知顶层字段在编辑后仍保留
+    9. 未知节点原始字段在允许的编辑范围内不丢失
+    10. 发布版本保存当前草稿，而不是来源旧 JSON
+    11. 编辑后导出并重新导入，节点、连线和组件值一致
+    """
+
+    def _import_ui_json(self, workflow_id: str, raw_json: dict | None = None) -> dict:
+        """导入 UI JSON 到草稿，返回响应。"""
+        raw_json = raw_json or _make_simple_ui_json()
+        response = self.client.post(
+            f"/api/workflows/{workflow_id}/import",
+            json={"raw_json": raw_json, "source_format": "ui_json"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        return response.json()
+
+    def _import_api_json(self, workflow_id: str, raw_json: dict | None = None) -> dict:
+        """导入 API JSON 到草稿，返回响应。"""
+        raw_json = raw_json or _make_simple_api_json()
+        response = self.client.post(
+            f"/api/workflows/{workflow_id}/import",
+            json={"raw_json": raw_json, "source_format": "api_json"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        return response.json()
+
+    def _export(self, workflow_id: str, fmt: str = "ui_json") -> dict:
+        """导出工作流，返回响应 JSON。"""
+        response = self.client.post(
+            f"/api/workflows/{workflow_id}/export",
+            json={"format": fmt},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        return response.json()
+
+    # ── 1. 导入 UI JSON 后不编辑，原样往返 ──
+
+    def test_import_without_edit_returns_raw_ui_json(self) -> None:
+        """导入 UI JSON 后不编辑，导出原样返回来源快照。"""
+        workflow_id = self._create_workflow("未编辑工作流")
+        raw = _make_simple_ui_json()
+        self._import_ui_json(workflow_id, raw)
+        result = self._export(workflow_id, "ui_json")
+        self.assertFalse(result["is_dirty"])
+        # 未编辑时应原样返回来源 JSON（包含 last_node_id 等顶层字段）
+        self.assertEqual(result["data"]["last_node_id"], 2)
+        self.assertEqual(len(result["data"]["nodes"]), 2)
+
+    # ── 2. 修改节点组件值后，UI JSON 导出为新值 ──
+
+    def test_edit_widget_value_then_export_ui_json(self) -> None:
+        """修改节点组件值后，UI JSON 导出新值，不是旧来源。"""
+        workflow_id = self._create_workflow("编辑组件值")
+        self._import_ui_json(workflow_id)
+        # 修改节点1的 widgets_values
+        response = self.client.put(
+            f"/api/workflows/{workflow_id}/draft/nodes/1",
+            json={"widgets_values": ["new_model.safetensors"]},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        # 导出 UI JSON
+        result = self._export(workflow_id, "ui_json")
+        self.assertTrue(result["is_dirty"])
+        # 找到节点1，检查 widgets_values
+        node1 = next(n for n in result["data"]["nodes"] if n["id"] == 1)
+        self.assertIn("new_model.safetensors", node1["widgets_values"])
+        self.assertNotIn("old_model.safetensors", node1["widgets_values"])
+
+    # ── 3. 修改节点组件值后，API JSON 导出为新值 ──
+
+    def test_edit_widget_value_then_export_api_json(self) -> None:
+        """修改节点组件值后，API JSON 导出新值。"""
+        workflow_id = self._create_workflow("编辑组件值API")
+        self._import_api_json(workflow_id)
+        # 修改节点1的 widgets_values
+        response = self.client.put(
+            f"/api/workflows/{workflow_id}/draft/nodes/1",
+            json={"widgets_values": ["new_model.safetensors"]},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        # 导出 API JSON
+        result = self._export(workflow_id, "api_json")
+        self.assertTrue(result["is_dirty"])
+        self.assertEqual(result["data"]["1"]["inputs"]["ckpt_name"], "new_model.safetensors")
+
+    # ── 4. 新增节点后，导出包含新节点 ──
+
+    def test_add_node_then_export_contains_new_node(self) -> None:
+        """新增节点后，导出包含新节点。"""
+        workflow_id = self._create_workflow("新增节点")
+        self._import_ui_json(workflow_id)
+        # 播种节点定义
+        self._seed_node_definitions(["CLIPTextEncode"])
+        # 新增节点
+        response = self.client.post(
+            f"/api/workflows/{workflow_id}/draft/nodes",
+            json={"node_class": "CLIPTextEncode", "position_x": 100, "position_y": 200},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        new_node_id = response.json()["node"]["id"]
+        # 导出
+        result = self._export(workflow_id, "ui_json")
+        self.assertTrue(result["is_dirty"])
+        node_ids = [n["id"] for n in result["data"]["nodes"]]
+        self.assertIn(int(new_node_id), [int(nid) for nid in node_ids])
+
+    # ── 5. 删除节点后，导出不再包含该节点 ──
+
+    def test_delete_node_then_export_excludes_node(self) -> None:
+        """删除节点后，导出不再包含该节点。"""
+        workflow_id = self._create_workflow("删除节点")
+        self._import_ui_json(workflow_id)
+        # 删除节点2
+        response = self.client.delete(f"/api/workflows/{workflow_id}/draft/nodes/2")
+        self.assertEqual(response.status_code, 200, response.text)
+        # 导出
+        result = self._export(workflow_id, "ui_json")
+        self.assertTrue(result["is_dirty"])
+        node_ids = [int(n["id"]) for n in result["data"]["nodes"]]
+        self.assertNotIn(2, node_ids)
+        self.assertIn(1, node_ids)
+
+    # ── 6. 新增、替换和删除连线后，导出反映当前连线 ──
+
+    def test_link_operations_reflected_in_export(self) -> None:
+        """新增、替换和删除连线后，导出反映当前连线。"""
+        workflow_id = self._create_workflow("连线操作")
+        self._import_ui_json(workflow_id)
+        # 删除现有连线 1
+        response = self.client.delete(f"/api/workflows/{workflow_id}/draft/links/1")
+        self.assertEqual(response.status_code, 200, response.text)
+        # 导出检查连线已删除
+        result = self._export(workflow_id, "ui_json")
+        self.assertTrue(result["is_dirty"])
+        self.assertEqual(len(result["data"]["links"]), 0)
+        # 重新创建连线
+        response = self.client.post(
+            f"/api/workflows/{workflow_id}/draft/links",
+            json={"source_node": "1", "source_slot": 0, "target_node": "2", "target_slot": 0},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        # 导出检查连线已重建
+        result = self._export(workflow_id, "ui_json")
+        self.assertEqual(len(result["data"]["links"]), 1)
+
+    # ── 7. 分组和布局调整后，UI JSON 反映当前结构 ──
+
+    def test_group_and_layout_reflected_in_export(self) -> None:
+        """分组和布局调整后，UI JSON 反映当前结构。"""
+        workflow_id = self._create_workflow("分组布局")
+        self._import_ui_json(workflow_id)
+        # 创建分组
+        response = self.client.post(
+            f"/api/workflows/{workflow_id}/draft/groups",
+            json={"title": "测试分组", "color": "#3f789e", "members": ["1", "2"]},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        # 计算布局
+        response = self.client.post(f"/api/workflows/{workflow_id}/draft/layout/compute")
+        self.assertEqual(response.status_code, 200, response.text)
+        # 导出 UI JSON
+        result = self._export(workflow_id, "ui_json")
+        self.assertTrue(result["is_dirty"])
+        # 导出的节点位置应该有值（布局已应用）
+        for node in result["data"]["nodes"]:
+            self.assertIsInstance(node["pos"], list)
+            self.assertEqual(len(node["pos"]), 2)
+
+    # ── 8. 未知顶层字段在编辑后仍保留 ──
+
+    def test_unknown_top_level_fields_preserved_after_edit(self) -> None:
+        """未知顶层字段在编辑后仍保留。"""
+        workflow_id = self._create_workflow("未知字段保留")
+        raw = _make_simple_ui_json()
+        raw["custom_top_field"] = "保留我"
+        raw["another_unknown"] = {"nested": True}
+        self._import_ui_json(workflow_id, raw)
+        # 编辑节点
+        response = self.client.put(
+            f"/api/workflows/{workflow_id}/draft/nodes/1",
+            json={"widgets_values": ["new_model.safetensors"]},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        # 导出
+        result = self._export(workflow_id, "ui_json")
+        self.assertTrue(result["is_dirty"])
+        # 未知顶层字段应保留
+        self.assertEqual(result["data"]["custom_top_field"], "保留我")
+        self.assertEqual(result["data"]["another_unknown"]["nested"], True)
+
+    # ── 9. 未知节点原始字段在允许的编辑范围内不丢失 ──
+
+    def test_unknown_node_raw_fields_preserved(self) -> None:
+        """未知节点的原始字段在编辑范围内不丢失。"""
+        workflow_id = self._create_workflow("未知节点保留")
+        raw = _make_simple_ui_json()
+        # 添加一个带未知字段的节点
+        raw["nodes"].append({
+            "id": 99,
+            "type": "UnknownCustomNode",
+            "title": "未知节点",
+            "pos": [500, 0],
+            "size": {"0": 200, "1": 100},
+            "flags": {},
+            "order": 2,
+            "mode": 0,
+            "inputs": [],
+            "outputs": [],
+            "widgets_values": ["custom_value"],
+            "properties": {"custom_prop": "保留"},
+            "unknown_field": "should_be_preserved",
+        })
+        raw["last_node_id"] = 99
+        self._import_ui_json(workflow_id, raw)
+        # 编辑另一个节点（不编辑未知节点）
+        response = self.client.put(
+            f"/api/workflows/{workflow_id}/draft/nodes/1",
+            json={"widgets_values": ["new_model.safetensors"]},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        # 导出
+        result = self._export(workflow_id, "ui_json")
+        self.assertTrue(result["is_dirty"])
+        # 未知节点应保留
+        node99 = next((n for n in result["data"]["nodes"] if int(n["id"]) == 99), None)
+        self.assertIsNotNone(node99)
+        self.assertEqual(node99["type"], "UnknownCustomNode")
+
+    # ── 10. 发布版本保存当前草稿，而不是来源旧 JSON ──
+
+    def test_publish_saves_current_draft_not_source_json(self) -> None:
+        """发布版本保存当前草稿，而不是来源旧 JSON。"""
+        workflow_id = self._create_workflow("发布版本")
+        self._import_ui_json(workflow_id)
+        # 编辑节点
+        response = self.client.put(
+            f"/api/workflows/{workflow_id}/draft/nodes/1",
+            json={"widgets_values": ["published_model.safetensors"]},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        # 发布版本
+        response = self.client.post(
+            f"/api/workflows/{workflow_id}/publish",
+            json={"label": "v1.0", "normalized_graph": ""},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        version = response.json()["version"]
+        # 获取版本详情
+        response = self.client.get(f"/api/workflow-versions/{version['id']}")
+        self.assertEqual(response.status_code, 200, response.text)
+        version_detail = response.json()["version"]
+        # 版本的 normalized_graph 应包含新值
+        normalized_data = json.loads(version_detail["normalized_graph"])
+        node1 = next(n for n in normalized_data["nodes"] if str(n["id"]) == "1")
+        self.assertIn("published_model.safetensors", node1["widgets_values"])
+        # 已编辑时，raw_ui_json 应为空（不发布来源旧 JSON）
+        self.assertFalse(version_detail.get("raw_ui_json"))
+
+    # ── 11. 编辑后导出并重新导入，节点、连线和组件值一致 ──
+
+    def test_edit_then_export_and_reimport_consistent(self) -> None:
+        """编辑后导出并重新导入，节点、连线和组件值一致。"""
+        workflow_id = self._create_workflow("往返一致性")
+        self._import_ui_json(workflow_id)
+        # 编辑节点1的组件值
+        self.client.put(
+            f"/api/workflows/{workflow_id}/draft/nodes/1",
+            json={"widgets_values": ["reimported_model.safetensors"]},
+        )
+        # 导出 UI JSON
+        export_result = self._export(workflow_id, "ui_json")
+        self.assertTrue(export_result["is_dirty"])
+        exported_data = export_result["data"]
+        # 创建新工作流并导入导出的 JSON
+        workflow_id2 = self._create_workflow("往返目标")
+        response = self.client.post(
+            f"/api/workflows/{workflow_id2}/import",
+            json={"raw_json": exported_data, "source_format": "ui_json"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        # 导出新工作流
+        result2 = self._export(workflow_id2, "ui_json")
+        reimported_data = result2["data"]
+        # 节点数一致
+        self.assertEqual(len(exported_data["nodes"]), len(reimported_data["nodes"]))
+        # 连线数一致
+        self.assertEqual(len(exported_data["links"]), len(reimported_data["links"]))
+        # 节点1的组件值一致
+        node1_exported = next(n for n in exported_data["nodes"] if int(n["id"]) == 1)
+        node1_reimported = next(n for n in reimported_data["nodes"] if int(n["id"]) == 1)
+        self.assertEqual(
+            node1_exported["widgets_values"],
+            node1_reimported["widgets_values"],
+        )
+
+    # ── 额外：并发控制测试 ──
+
+    def test_expected_revision_mismatch_returns_409(self) -> None:
+        """草稿修订号不匹配时返回 409。"""
+        workflow_id = self._create_workflow("并发控制")
+        self._import_ui_json(workflow_id)
+        # 获取当前修订号
+        draft = self.client.get(f"/api/workflows/{workflow_id}/draft").json()["draft"]
+        current_revision = int(draft["draft_revision"])
+        # 使用错误的 expected_revision
+        response = self.client.put(
+            f"/api/workflows/{workflow_id}/draft",
+            json={
+                "normalized_graph": draft["normalized_graph"],
+                "node_count": draft["node_count"],
+                "expected_revision": current_revision + 999,
+            },
+        )
+        self.assertEqual(response.status_code, 409)
+
+    def test_expected_revision_match_succeeds(self) -> None:
+        """草稿修订号匹配时保存成功。"""
+        workflow_id = self._create_workflow("并发控制成功")
+        self._import_ui_json(workflow_id)
+        draft = self.client.get(f"/api/workflows/{workflow_id}/draft").json()["draft"]
+        current_revision = int(draft["draft_revision"])
+        response = self.client.put(
+            f"/api/workflows/{workflow_id}/draft",
+            json={
+                "normalized_graph": draft["normalized_graph"],
+                "node_count": draft["node_count"],
+                "expected_revision": current_revision,
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+
+    def test_edit_increments_draft_revision(self) -> None:
+        """编辑操作递增 draft_revision。"""
+        workflow_id = self._create_workflow("修订号递增")
+        self._import_ui_json(workflow_id)
+        # 导入后修订号为 0
+        draft = self.client.get(f"/api/workflows/{workflow_id}/draft").json()["draft"]
+        self.assertEqual(int(draft["draft_revision"]), 0)
+        self.assertFalse(draft["is_dirty"])
+        # 编辑节点
+        self.client.put(
+            f"/api/workflows/{workflow_id}/draft/nodes/1",
+            json={"widgets_values": ["new_value"]},
+        )
+        draft = self.client.get(f"/api/workflows/{workflow_id}/draft").json()["draft"]
+        self.assertEqual(int(draft["draft_revision"]), 1)
+        self.assertTrue(draft["is_dirty"])
+        # 再次编辑
+        self.client.put(
+            f"/api/workflows/{workflow_id}/draft/nodes/1",
+            json={"widgets_values": ["newer_value"]},
+        )
+        draft = self.client.get(f"/api/workflows/{workflow_id}/draft").json()["draft"]
+        self.assertEqual(int(draft["draft_revision"]), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

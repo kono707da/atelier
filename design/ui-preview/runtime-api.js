@@ -1,18 +1,9 @@
 (function () {
-  const environmentNames = {
-    production: "生产数据库",
-    test: "测试数据库",
-  };
-
   // API 路径常量：新代码应使用 API.* 而非硬编码字符串，避免 URL 分散。
   // 现有调用逐步迁移，不强制一次性全部替换。
   const API = {
     health: "/api/health",
     developerProgress: "/api/developer/progress",
-    databases: {
-      settings: "/api/settings/databases",
-      verifyIsolation: "/api/settings/databases/verify-isolation",
-    },
     projects: "/api/projects",
     project: (id) => `/api/projects/${id}`,
     projectArchive: (id) => `/api/projects/${id}/archive`,
@@ -43,6 +34,8 @@
     scenePageMapping: (pageId, materialType) => `/api/small-scene-pages/${pageId}/mappings/${materialType}`,
     branches: (parentType, parentId) => `/api/${parentType}/${parentId}/branches`,
     branch: (id) => `/api/branches/${id}`,
+    branchOverrides: (branchId) => `/api/branches/${branchId}/overrides`,
+    branchOverride: (id) => `/api/branch-overrides/${id}`,
     materials: "/api/materials",
     materialTrash: "/api/materials/trash",
     material: (id) => `/api/materials/${id}`,
@@ -94,6 +87,40 @@
     characterDatabase: {
       status: "/api/character-database/status",
     },
+    comfyuiInstances: "/api/comfyui/instances",
+    comfyuiInstance: (id) => `/api/comfyui/instances/${id}`,
+    comfyuiInstanceActivate: (id) => `/api/comfyui/instances/${id}/activate`,
+    comfyuiInstanceTest: (id) => `/api/comfyui/instances/${id}/test`,
+    comfyuiInstanceSync: (id) => `/api/comfyui/instances/${id}/sync`,
+    comfyuiDiscover: "/api/comfyui/discover",
+    comfyuiSettings: "/api/settings/comfyui",
+    comfyuiTestConnection: "/api/comfyui/test-connection",
+    comfyuiObjectInfo: "/api/comfyui/node-definitions",
+    workflows: "/api/workflows",
+    workflow: (id) => `/api/workflows/${id}`,
+    workflowDraft: (id) => `/api/workflows/${id}/draft`,
+    workflowPublish: (id) => `/api/workflows/${id}/publish`,
+    workflowExport: (id) => `/api/workflows/${id}/export`,
+    workflowPrecheck: (id) => `/api/workflows/${id}/precheck`,
+    workflowArchive: (id) => `/api/workflows/${id}/archive`,
+    workflowRestore: (id) => `/api/workflows/${id}/restore`,
+    workflowCopy: (id) => `/api/workflows/${id}/copy`,
+    workflowVersions: (id) => `/api/workflows/${id}/versions`,
+    workflowSlots: (id) => `/api/workflows/${id}/semantic-slots`,
+    workflowSlot: (workflowId, slotName) => `/api/workflows/${workflowId}/semantic-slots/${slotName}`,
+    workflowDraftNodes: (id) => `/api/workflows/${id}/draft/nodes`,
+    workflowDraftNode: (id, nodeId) => `/api/workflows/${id}/draft/nodes/${nodeId}`,
+    workflowDraftLinks: (id) => `/api/workflows/${id}/draft/links`,
+    workflowDraftLink: (id, linkId) => `/api/workflows/${id}/draft/links/${linkId}`,
+    projectDefaultWorkflow: (projectId) => `/api/projects/${projectId}/default-workflow`,
+    projectPrecheck: (projectId) => `/api/projects/${projectId}/precheck`,
+    projectSnapshots: (projectId) => `/api/projects/${projectId}/snapshots`,
+    projectSnapshot: (id) => `/api/story-snapshots/${id}`,
+    projectSnapshotRestore: (id) => `/api/story-snapshots/${id}/restore`,
+    projectOperations: (projectId) => `/api/projects/${projectId}/operations`,
+    operationUndo: (id) => `/api/operations/${id}/undo`,
+    operationRedo: (id) => `/api/operations/${id}/redo`,
+    storyTreeBranches: (parentType, parentId) => `/api/${parentType}/${parentId}/branches`,
   };
 
   const emptyStateCopy = {
@@ -523,6 +550,1066 @@
     bindProjectsToolbar();
     await loadProjectsList(false);
   }
+
+  // 工作流库列表状态：与 projectsListState 保持一致的防竞态与分页结构。
+  const workflowsListState = {
+    q: "",
+    status: "all",
+    sort: "updated",
+    limit: 24,
+    offset: 0,
+    total: 0,
+    items: [],
+    hasMore: false,
+    loading: false,
+    requestId: 0,
+    searchTimer: null,
+  };
+
+  function workflowStatusLabel(workflow) {
+    if (workflow.archived_at || workflow.status === "archived") {
+      return { text: "已归档", color: "orange" };
+    }
+    if (workflow.status === "draft") return { text: "草稿", color: "purple" };
+    if (workflow.status === "published") return { text: "已发布", color: "green" };
+    return { text: "新建", color: "blue" };
+  }
+
+  function workflowSourceTypeLabel(workflow) {
+    const sourceType = workflow.source_type || "manual";
+    const map = {
+      manual: { text: "手动创建", code: "MN" },
+      api: { text: "API 导入", code: "API" },
+      image: { text: "图片提取", code: "IMG" },
+      comfyui: { text: "ComfyUI 读取", code: "CF" },
+      template: { text: "全局模板", code: "TM" },
+    };
+    return map[sourceType] || { text: sourceType, code: "?" };
+  }
+
+  function workflowSkeletonCard() {
+    return `
+      <article class="project-card real-project-card-skeleton" aria-hidden="true">
+        <div style="height:60px;background:#eef0f4;border-radius:8px;margin-bottom:10px"></div>
+        <div style="height:16px;width:70%;background:#eef0f4;border-radius:8px;margin-bottom:8px"></div>
+        <div style="height:10px;width:90%;background:#f1f3f7;border-radius:6px;margin-bottom:6px"></div>
+        <div style="height:10px;width:60%;background:#f1f3f7;border-radius:6px"></div>
+      </article>
+    `;
+  }
+
+  function workflowsToolbar(state) {
+    const statusOptions = [
+      { value: "all", label: "全部" },
+      { value: "draft", label: "草稿" },
+      { value: "published", label: "已发布" },
+      { value: "archived", label: "已归档" },
+    ];
+    const sortOptions = [
+      { value: "updated", label: "更新时间" },
+      { value: "name", label: "名称" },
+      { value: "created", label: "创建时间" },
+    ];
+    return `
+      <section class="panel projects-toolbar" aria-label="工作流筛选">
+        <div class="panel-body" style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
+          <div class="search wide" style="flex:1;min-width:240px;max-width:380px;display:flex;align-items:center;gap:6px">
+            <span>⌕</span>
+            <input id="workflows-search-input" type="search" value="${escapeHtml(state.q)}" placeholder="搜索工作流名称或节点" style="border:0;outline:0;background:transparent;flex:1;font-size:11px;color:#4d576b" />
+          </div>
+          <label class="projects-filter-label" style="display:flex;align-items:center;gap:6px;color:#7d8698;font-size:10px">
+            <span>类型</span>
+            <select id="workflows-status-select" class="modal-input" style="height:34px;padding:0 8px;font-size:11px">
+              ${statusOptions.map((o) => `<option value="${o.value}" ${state.status === o.value ? "selected" : ""}>${o.label}</option>`).join("")}
+            </select>
+          </label>
+          <label class="projects-filter-label" style="display:flex;align-items:center;gap:6px;color:#7d8698;font-size:10px">
+            <span>排序</span>
+            <select id="workflows-sort-select" class="modal-input" style="height:34px;padding:0 8px;font-size:11px">
+              ${sortOptions.map((o) => `<option value="${o.value}" ${state.sort === o.value ? "selected" : ""}>${o.label}</option>`).join("")}
+            </select>
+          </label>
+          <span style="flex:1"></span>
+          <span id="workflows-connection-status" class="status orange"><i class="dot"></i>ComfyUI 未检测</span>
+        </div>
+      </section>
+    `;
+  }
+
+  function workflowsSummaryLine(state) {
+    const detail = state.total
+      ? `${state.total} 个工作流 · 已加载 ${state.items.length} 个`
+      : "暂无工作流";
+    return `
+      <div class="section-line real-project-heading">
+        <h3>工作流库</h3>
+        <span>${detail}</span>
+      </div>
+    `;
+  }
+
+  function workflowsLoadMoreWrap() {
+    return `
+      <div id="workflows-load-more-wrap" style="display:flex;justify-content:center;margin-top:18px" hidden>
+        <button class="btn soft" type="button" data-api-action="load-more-workflows">加载更多</button>
+      </div>
+    `;
+  }
+
+  function workflowsEmptyState() {
+    return `
+      <section class="production-empty-state" style="grid-column:1/-1">
+        <span class="production-empty-icon">WF</span>
+        <h2>还没有工作流</h2>
+        <p>准备第一次跑图时，再从 ComfyUI 读取或创建工作流。</p>
+        <button class="btn primary" type="button" data-api-action="create-workflow">新建工作流</button>
+        <small>当前使用生产数据库 · 未加载任何演示数据</small>
+      </section>
+    `;
+  }
+
+  function workflowsErrorState(message) {
+    return `
+      <section class="production-empty-state" style="grid-column:1/-1">
+        <span class="production-empty-icon">!</span>
+        <h2>工作流列表加载失败</h2>
+        <p>${escapeHtml(message)}</p>
+        <button class="btn soft" type="button" data-api-action="retry-workflows">重试</button>
+      </section>
+    `;
+  }
+
+  function workflowCard(workflow) {
+    const status = workflowStatusLabel(workflow);
+    const source = workflowSourceTypeLabel(workflow);
+    const updated = formatProjectDate(workflow.updated_at || workflow.created_at);
+    const versionLabel = workflow.current_version ? `v${workflow.current_version}` : "未发布";
+    const nodeCount = Number(workflow.node_count) || 0;
+    const slotCount = Number(workflow.slot_count) || 0;
+    const name = escapeHtml(workflow.name || "未命名工作流");
+    const isArchived = Boolean(workflow.archived_at || workflow.status === "archived");
+    return `
+      <article class="project-card real-project-card real-workflow-card" data-workflow-id="${escapeHtml(workflow.id)}" role="button" tabindex="0" aria-label="打开工作流 ${name}">
+        <div class="real-project-cover" style="min-height:60px;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#eef2ff,#f3dae9)">
+          <span style="font-size:20px;font-weight:700;color:#7d8698">${escapeHtml(source.code)}</span>
+        </div>
+        <div>
+          <div style="display:flex;align-items:center;gap:7px;justify-content:space-between">
+            <span class="status ${status.color}"><i class="dot"></i>${status.text}</span>
+            <span class="chip blue">${escapeHtml(versionLabel)}</span>
+          </div>
+          <div class="project-title">${name}</div>
+          <div class="project-meta">${nodeCount} 节点 · ${slotCount} 个语义插槽<br>来源：${escapeHtml(source.text)}<br>更新于 ${escapeHtml(updated)}</div>
+          <div class="project-card-actions" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:10px">
+            <button class="btn small" type="button" data-api-action="open-workflow" data-workflow-id="${escapeHtml(workflow.id)}">编辑</button>
+            <button class="btn small" type="button" data-api-action="copy-workflow" data-workflow-id="${escapeHtml(workflow.id)}" data-workflow-name="${name}">复制</button>
+            ${isArchived
+              ? `<button class="btn small soft" type="button" data-api-action="restore-workflow" data-workflow-id="${escapeHtml(workflow.id)}" data-workflow-name="${name}">恢复</button>`
+              : `<button class="btn small soft" type="button" data-api-action="archive-workflow" data-workflow-id="${escapeHtml(workflow.id)}" data-workflow-name="${name}">归档</button>`}
+            <button class="btn small danger-soft" type="button" data-api-action="delete-workflow" data-workflow-id="${escapeHtml(workflow.id)}" data-workflow-name="${name}">删除</button>
+          </div>
+        </div>
+      </article>
+    `;
+  }
+
+  function bindWorkflowsToolbar() {
+    const searchInput = document.getElementById("workflows-search-input");
+    if (searchInput) {
+      searchInput.addEventListener("input", (event) => {
+        window.clearTimeout(workflowsListState.searchTimer);
+        workflowsListState.searchTimer = window.setTimeout(() => {
+          workflowsListState.q = event.target.value.trim();
+          loadWorkflowsList(false);
+        }, 280);
+      });
+    }
+    const statusSelect = document.getElementById("workflows-status-select");
+    if (statusSelect) {
+      statusSelect.addEventListener("change", (event) => {
+        workflowsListState.status = event.target.value;
+        loadWorkflowsList(false);
+      });
+    }
+    const sortSelect = document.getElementById("workflows-sort-select");
+    if (sortSelect) {
+      sortSelect.addEventListener("change", (event) => {
+        workflowsListState.sort = event.target.value;
+        loadWorkflowsList(false);
+      });
+    }
+  }
+
+  async function loadWorkflowsList(append = false) {
+    const page = document.querySelector(".page-scroll");
+    if (!page) return;
+    if (append && workflowsListState.loading) return;
+    workflowsListState.loading = true;
+    const requestId = workflowsListState.requestId + 1;
+    workflowsListState.requestId = requestId;
+
+    const grid = page.querySelector(".real-workflow-grid");
+    const summary = page.querySelector(".real-project-heading span");
+    const loadMoreWrap = document.getElementById("workflows-load-more-wrap");
+
+    if (!append) {
+      workflowsListState.offset = 0;
+      workflowsListState.items = [];
+      if (grid) grid.innerHTML = workflowSkeletonCard().repeat(4);
+      if (loadMoreWrap) loadMoreWrap.hidden = true;
+    } else if (loadMoreWrap) {
+      const btn = loadMoreWrap.querySelector("button");
+      if (btn) {
+        btn.disabled = true;
+        btn.textContent = "正在加载…";
+      }
+    }
+
+    const params = new URLSearchParams();
+    if (workflowsListState.q) params.set("q", workflowsListState.q);
+    if (workflowsListState.status && workflowsListState.status !== "all") {
+      params.set("status", workflowsListState.status);
+    }
+    params.set("sort", workflowsListState.sort);
+    params.set("limit", String(workflowsListState.limit));
+    params.set("offset", String(append ? workflowsListState.items.length : 0));
+
+    try {
+      const payload = await request(`${API.workflows}?${params.toString()}`);
+      if (requestId !== workflowsListState.requestId) return;
+      const incoming = Array.isArray(payload.items) ? payload.items : [];
+      workflowsListState.items = append
+        ? workflowsListState.items.concat(incoming)
+        : incoming;
+      workflowsListState.total = Number(payload.total || 0);
+      workflowsListState.hasMore = Boolean(payload.has_more);
+
+      if (grid) {
+        if (workflowsListState.items.length) {
+          grid.innerHTML = workflowsListState.items
+            .map((w) => workflowCard(w))
+            .join("");
+        } else {
+          grid.innerHTML = `<div style="grid-column:1/-1">${workflowsEmptyState()}</div>`;
+        }
+      }
+      if (summary) {
+        summary.textContent = workflowsListState.total
+          ? `${workflowsListState.total} 个工作流 · 已加载 ${workflowsListState.items.length} 个`
+          : "暂无工作流";
+      }
+      if (loadMoreWrap) {
+        loadMoreWrap.hidden = !workflowsListState.hasMore;
+        const btn = loadMoreWrap.querySelector("button");
+        if (btn) {
+          btn.disabled = false;
+          btn.textContent = "加载更多";
+        }
+      }
+    } catch (error) {
+      if (requestId !== workflowsListState.requestId) return;
+      if (grid) grid.innerHTML = workflowsErrorState(error.message);
+      if (summary) summary.textContent = "";
+      if (loadMoreWrap) loadMoreWrap.hidden = true;
+    } finally {
+      if (requestId === workflowsListState.requestId) {
+        workflowsListState.loading = false;
+      }
+    }
+  }
+
+  async function renderProductionWorkflows() {
+    const page = document.querySelector(".page-scroll");
+    if (!page) return;
+    const header = page.querySelector(".page-header");
+    [...page.children].forEach((child) => {
+      if (child !== header) child.remove();
+    });
+    const title = header?.querySelector(".page-title");
+    const subtitle = header?.querySelector(".page-subtitle");
+    const actions = header?.querySelector(".header-actions");
+    if (title) title.textContent = "工作流库";
+    if (subtitle) subtitle.textContent = "管理 ComfyUI 工作流、版本和语义插槽。";
+    if (actions) {
+      actions.innerHTML = '<button class="btn" type="button" data-api-action="import-workflow-json">导入 JSON</button><button class="btn primary" type="button" data-api-action="create-workflow">新建工作流</button>';
+    }
+
+    page.insertAdjacentHTML("beforeend", workflowsToolbar(workflowsListState));
+    page.insertAdjacentHTML("beforeend", workflowsSummaryLine(workflowsListState));
+    page.insertAdjacentHTML(
+      "beforeend",
+      `<div class="grid cols-3 real-workflow-grid">${workflowSkeletonCard().repeat(4)}</div>`
+    );
+    page.insertAdjacentHTML("beforeend", workflowsLoadMoreWrap());
+
+    bindWorkflowsToolbar();
+    await loadWorkflowsList(false);
+    // 渲染工作流页时同步刷新顶部 ComfyUI 状态指示器。
+    updateComfyuiStatusIndicator();
+  }
+
+  // 新建工作流弹窗：仅采集名称，提交后 POST 到工作流集合接口。
+  function ensureWorkflowCreateModal() {
+    let modal = document.getElementById("workflow-create-modal");
+    if (modal) return modal;
+    modal = document.createElement("div");
+    modal.id = "workflow-create-modal";
+    modal.className = "atelier-modal-backdrop";
+    modal.hidden = true;
+    modal.innerHTML = `
+      <section class="atelier-modal" role="dialog" aria-modal="true" aria-labelledby="workflow-create-title">
+        <div class="atelier-modal-icon">WF</div>
+        <h2 id="workflow-create-title">新建工作流</h2>
+        <p>输入工作流名称，创建后可在画布中编辑节点。</p>
+        <form id="workflow-create-form">
+          <label class="label" for="workflow-create-name">工作流名称</label>
+          <input id="workflow-create-name" class="modal-input" name="name" maxlength="120" autocomplete="off" placeholder="例如：角色替换工作流" required />
+          <div class="modal-error" id="workflow-create-error" role="alert"></div>
+          <div class="modal-actions">
+            <button class="btn" type="button" data-api-action="close-workflow-modal">取消</button>
+            <button class="btn primary" type="submit">创建工作流</button>
+          </div>
+        </form>
+      </section>
+    `;
+    document.body.appendChild(modal);
+    modal.addEventListener("click", (event) => {
+      if (event.target === modal) closeWorkflowCreateModal();
+    });
+    modal.querySelector("form").addEventListener("submit", submitWorkflowCreate);
+    return modal;
+  }
+
+  function openWorkflowCreateModal() {
+    const modal = ensureWorkflowCreateModal();
+    const error = modal.querySelector(".modal-error");
+    const nameInput = modal.querySelector('input[name="name"]');
+    error.textContent = "";
+    nameInput.value = "";
+    modal.hidden = false;
+    requestAnimationFrame(() => {
+      modal.classList.add("show");
+      nameInput.focus();
+    });
+  }
+
+  function closeWorkflowCreateModal() {
+    const modal = document.getElementById("workflow-create-modal");
+    if (!modal) return;
+    modal.classList.remove("show");
+    window.setTimeout(() => {
+      modal.hidden = true;
+    }, 150);
+  }
+
+  async function submitWorkflowCreate(event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const nameInput = form.querySelector('input[name="name"]');
+    const submit = form.querySelector('button[type="submit"]');
+    const error = form.querySelector(".modal-error");
+    const name = nameInput.value.trim().replace(/\s+/g, " ");
+    if (!name) {
+      error.textContent = "请输入工作流名称。";
+      nameInput.focus();
+      return;
+    }
+    submit.disabled = true;
+    submit.textContent = "正在创建…";
+    error.textContent = "";
+    try {
+      await request(API.workflows, {
+        method: "POST",
+        body: JSON.stringify({ name, source_type: "manual" }),
+      });
+      closeWorkflowCreateModal();
+      await loadWorkflowsList(false);
+      if (typeof showToast === "function") showToast(`工作流「${name}」已创建`);
+    } catch (requestError) {
+      error.textContent = requestError.message;
+      nameInput.focus();
+    } finally {
+      submit.disabled = false;
+      submit.textContent = "创建工作流";
+    }
+  }
+
+  // 导入 JSON 弹窗：采集 JSON 文本与来源格式（UI/API），提交后 POST。
+  function ensureWorkflowImportModal() {
+    let modal = document.getElementById("workflow-import-modal");
+    if (modal) return modal;
+    modal = document.createElement("div");
+    modal.id = "workflow-import-modal";
+    modal.className = "atelier-modal-backdrop";
+    modal.hidden = true;
+    modal.innerHTML = `
+      <section class="atelier-modal" role="dialog" aria-modal="true" aria-labelledby="workflow-import-title">
+        <div class="atelier-modal-icon">WF</div>
+        <h2 id="workflow-import-title">导入工作流 JSON</h2>
+        <p>粘贴 ComfyUI 导出的工作流 JSON，选择来源格式后导入。</p>
+        <form id="workflow-import-form">
+          <label class="label" for="workflow-import-name">工作流名称</label>
+          <input id="workflow-import-name" class="modal-input" name="name" maxlength="120" autocomplete="off" placeholder="给工作流命名" required />
+          <label class="label" for="workflow-import-format">来源格式</label>
+          <select id="workflow-import-format" class="modal-input" name="format" style="height:36px">
+            <option value="api">API 格式（prompt 链路）</option>
+            <option value="ui">UI 格式（画布节点）</option>
+          </select>
+          <label class="label" for="workflow-import-json">工作流 JSON</label>
+          <textarea id="workflow-import-json" class="modal-input" name="json" rows="8" placeholder="在此粘贴 JSON 内容" style="resize:vertical;min-height:140px;font-family:monospace;font-size:11px" required></textarea>
+          <div class="modal-error" id="workflow-import-error" role="alert"></div>
+          <div class="modal-actions">
+            <button class="btn" type="button" data-api-action="close-workflow-import-modal">取消</button>
+            <button class="btn primary" type="submit">导入工作流</button>
+          </div>
+        </form>
+      </section>
+    `;
+    document.body.appendChild(modal);
+    modal.addEventListener("click", (event) => {
+      if (event.target === modal) closeWorkflowImportModal();
+    });
+    modal.querySelector("form").addEventListener("submit", submitWorkflowImport);
+    return modal;
+  }
+
+  function openWorkflowImportModal() {
+    const modal = ensureWorkflowImportModal();
+    const error = modal.querySelector(".modal-error");
+    error.textContent = "";
+    modal.querySelector('input[name="name"]').value = "";
+    modal.querySelector('textarea[name="json"]').value = "";
+    modal.querySelector('select[name="format"]').value = "api";
+    modal.hidden = false;
+    requestAnimationFrame(() => {
+      modal.classList.add("show");
+      modal.querySelector('input[name="name"]').focus();
+    });
+  }
+
+  function closeWorkflowImportModal() {
+    const modal = document.getElementById("workflow-import-modal");
+    if (!modal) return;
+    modal.classList.remove("show");
+    window.setTimeout(() => {
+      modal.hidden = true;
+    }, 150);
+  }
+
+  async function submitWorkflowImport(event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const nameInput = form.querySelector('input[name="name"]');
+    const jsonInput = form.querySelector('textarea[name="json"]');
+    const formatSelect = form.querySelector('select[name="format"]');
+    const submit = form.querySelector('button[type="submit"]');
+    const error = form.querySelector(".modal-error");
+    const name = nameInput.value.trim().replace(/\s+/g, " ");
+    const rawJson = jsonInput.value.trim();
+    if (!name) {
+      error.textContent = "请输入工作流名称。";
+      nameInput.focus();
+      return;
+    }
+    if (!rawJson) {
+      error.textContent = "请粘贴工作流 JSON 内容。";
+      jsonInput.focus();
+      return;
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(rawJson);
+    } catch (parseError) {
+      error.textContent = "JSON 格式错误，无法解析。";
+      jsonInput.focus();
+      return;
+    }
+    submit.disabled = true;
+    submit.textContent = "正在导入…";
+    error.textContent = "";
+    try {
+      await request(API.workflows, {
+        method: "POST",
+        body: JSON.stringify({
+          name,
+          source_type: "api",
+          source_format: formatSelect.value,
+          graph: parsed,
+        }),
+      });
+      closeWorkflowImportModal();
+      await loadWorkflowsList(false);
+      if (typeof showToast === "function") showToast(`工作流「${name}」已导入`);
+    } catch (requestError) {
+      error.textContent = requestError.message;
+      nameInput.focus();
+    } finally {
+      submit.disabled = false;
+      submit.textContent = "导入工作流";
+    }
+  }
+
+  // 从图片提取工作流：选择本地图片文件后上传。
+  function openWorkflowImagePicker() {
+    let input = document.getElementById("workflow-image-file-input");
+    if (!input) {
+      input = document.createElement("input");
+      input.type = "file";
+      input.id = "workflow-image-file-input";
+      input.accept = "image/png,image/jpeg,image/webp";
+      input.style.display = "none";
+      document.body.appendChild(input);
+    }
+    input.value = "";
+    input.onchange = async () => {
+      const file = input.files && input.files[0];
+      if (!file) return;
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("name", file.name.replace(/\.[^.]+$/, "").slice(0, 120) || "从图片提取的工作流");
+      formData.append("source_type", "image");
+      if (typeof showToast === "function") showToast("正在从图片提取工作流…");
+      try {
+        await request(API.workflows, {
+          method: "POST",
+          body: formData,
+        });
+        await loadWorkflowsList(false);
+        if (typeof showToast === "function") showToast("工作流已从图片提取");
+      } catch (requestError) {
+        if (typeof showToast === "function") showToast(requestError.message);
+      }
+    };
+    input.click();
+  }
+
+  async function archiveWorkflow(workflowId, name) {
+    if (!await confirmDialog({
+      title: `归档工作流「${name}」`,
+      message: "归档后工作流会从活跃列表移除，可随时恢复。",
+      confirmText: "归档",
+      danger: false,
+    })) {
+      return;
+    }
+    try {
+      await request(API.workflowArchive(workflowId), { method: "POST" });
+      await loadWorkflowsList(false);
+      if (typeof showToast === "function") showToast(`工作流「${name}」已归档`);
+    } catch (requestError) {
+      if (typeof showToast === "function") showToast(requestError.message);
+    }
+  }
+
+  async function restoreWorkflow(workflowId, name) {
+    try {
+      await request(API.workflowRestore(workflowId), { method: "POST" });
+      await loadWorkflowsList(false);
+      if (typeof showToast === "function") showToast(`工作流「${name}」已恢复`);
+    } catch (requestError) {
+      if (typeof showToast === "function") showToast(requestError.message);
+    }
+  }
+
+  async function copyWorkflow(workflowId, name) {
+    try {
+      await request(API.workflowCopy(workflowId), { method: "POST" });
+      await loadWorkflowsList(false);
+      if (typeof showToast === "function") showToast(`工作流「${name}」已复制`);
+    } catch (requestError) {
+      if (typeof showToast === "function") showToast(requestError.message);
+    }
+  }
+
+  async function deleteWorkflow(workflowId, name) {
+    if (!await confirmDialog({
+      title: `删除工作流「${name}」`,
+      message: "工作流将移入回收站，可恢复。继续删除？",
+      confirmText: "移入回收站",
+      danger: true,
+    })) {
+      return;
+    }
+    try {
+      await request(API.workflow(workflowId), { method: "DELETE" });
+      await loadWorkflowsList(false);
+      if (typeof showToast === "function") showToast(`工作流「${name}」已移入回收站`);
+    } catch (requestError) {
+      if (typeof showToast === "function") showToast(requestError.message);
+    }
+  }
+
+  // ComfyUI 实例状态：缓存当前实例列表，供设置页和顶部指示器共用。
+  const comfyuiState = {
+    instances: [],
+    loading: false,
+    requestId: 0,
+  };
+
+  function comfyuiInstanceStatusLabel(instance) {
+    if (instance.is_active && instance.connection_status === "connected") {
+      return { text: "已连接", color: "green" };
+    }
+    if (instance.connection_status === "failed" || instance.connection_status === "error") {
+      return { text: "连接失败", color: "red" };
+    }
+    if (instance.connection_status === "connected") {
+      return { text: "已连接", color: "green" };
+    }
+    return { text: "未检测", color: "orange" };
+  }
+
+  function comfyuiInstanceCard(instance) {
+    const status = comfyuiInstanceStatusLabel(instance);
+    const name = escapeHtml(instance.name || "未命名实例");
+    const httpUrl = escapeHtml(instance.http_url || instance.base_url || "—");
+    const wsUrl = instance.ws_url ? escapeHtml(instance.ws_url) : "";
+    const version = instance.version ? escapeHtml(instance.version) : "连接后读取";
+    const device = instance.device ? escapeHtml(instance.device) : "连接后读取";
+    const nodeCount = Number(instance.node_count) || 0;
+    const latency = instance.latency != null ? `${instance.latency} ms` : "连接后读取";
+    const isActive = Boolean(instance.is_active);
+    return `
+      <article class="setting-card real-comfyui-card" data-instance-id="${escapeHtml(instance.id)}">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <span class="status ${status.color}"><i class="dot"></i>${status.text}</span>
+          <div style="display:flex;gap:6px;align-items:center">
+            ${isActive ? '<span class="chip blue">活动实例</span>' : '<span class="chip">备用</span>'}
+          </div>
+        </div>
+        <div class="setting-title" style="margin-top:12px">${name}</div>
+        <div class="setting-desc">运行生成任务并提供节点定义。</div>
+        <div class="setting-value">${httpUrl}</div>
+        ${wsUrl ? `<div class="kv"><span>WebSocket</span><strong>${wsUrl}</strong></div>` : ""}
+        <div class="kv"><span>延迟</span><strong>${escapeHtml(latency)}</strong></div>
+        <div class="kv"><span>版本</span><strong>${escapeHtml(version)}</strong></div>
+        <div class="kv"><span>GPU</span><strong>${escapeHtml(device)}</strong></div>
+        <div class="kv"><span>节点</span><strong>${nodeCount}</strong></div>
+        <div class="project-card-actions" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:10px">
+          ${isActive ? "" : `<button class="btn small primary" type="button" data-api-action="activate-comfyui-instance" data-instance-id="${escapeHtml(instance.id)}" data-instance-name="${name}">激活</button>`}
+          <button class="btn small" type="button" data-api-action="test-comfyui-instance" data-instance-id="${escapeHtml(instance.id)}" data-instance-name="${name}">测试连接</button>
+          <button class="btn small soft" type="button" data-api-action="sync-comfyui-instance" data-instance-id="${escapeHtml(instance.id)}" data-instance-name="${name}">同步节点</button>
+          <button class="btn small" type="button" data-api-action="edit-comfyui-instance" data-instance-id="${escapeHtml(instance.id)}" data-instance-name="${name}">编辑</button>
+          <button class="btn small danger-soft" type="button" data-api-action="delete-comfyui-instance" data-instance-id="${escapeHtml(instance.id)}" data-instance-name="${name}">删除</button>
+        </div>
+      </article>
+    `;
+  }
+
+  function comfyuiInstancesSkeleton() {
+    return `
+      <article class="setting-card real-comfyui-card-skeleton" aria-hidden="true">
+        <div style="height:14px;width:50%;background:#eef0f4;border-radius:7px;margin-bottom:10px"></div>
+        <div style="height:18px;width:70%;background:#eef0f4;border-radius:9px;margin-bottom:8px"></div>
+        <div style="height:10px;width:90%;background:#f1f3f7;border-radius:6px;margin-bottom:6px"></div>
+        <div style="height:10px;width:80%;background:#f1f3f7;border-radius:6px"></div>
+      </article>
+    `;
+  }
+
+  function comfyuiInstancesEmptyState() {
+    return `
+      <section class="production-empty-state">
+        <span class="production-empty-icon">CF</span>
+        <h2>还没有 ComfyUI 实例</h2>
+        <p>添加一个 ComfyUI 实例后，工作流和生成任务才能运行。</p>
+        <button class="btn primary" type="button" data-api-action="add-comfyui-instance">添加实例</button>
+        <button class="btn soft" type="button" data-api-action="discover-comfyui-instances">发现局域网实例</button>
+        <small>当前使用生产数据库 · 未加载任何演示数据</small>
+      </section>
+    `;
+  }
+
+  function comfyuiInstancesErrorState(message) {
+    return `
+      <section class="production-empty-state">
+        <span class="production-empty-icon">!</span>
+        <h2>ComfyUI 实例列表加载失败</h2>
+        <p>${escapeHtml(message)}</p>
+        <button class="btn soft" type="button" data-api-action="retry-comfyui-instances">重试</button>
+      </section>
+    `;
+  }
+
+  function comfyuiInstancesHeader() {
+    return `
+      <div class="section-line real-project-heading" style="display:flex;align-items:center;gap:10px">
+        <h3>ComfyUI 实例</h3>
+        <span id="comfyui-instances-summary">正在加载…</span>
+        <span style="flex:1"></span>
+        <button class="btn soft" type="button" data-api-action="discover-comfyui-instances">发现实例</button>
+        <button class="btn primary" type="button" data-api-action="add-comfyui-instance">添加实例</button>
+      </div>
+    `;
+  }
+
+  async function loadComfyuiInstances() {
+    const wrap = document.getElementById("comfyui-instances-panel");
+    if (!wrap) return;
+    comfyuiState.loading = true;
+    const requestId = comfyuiState.requestId + 1;
+    comfyuiState.requestId = requestId;
+    const summary = document.getElementById("comfyui-instances-summary");
+    if (summary) summary.textContent = "正在加载…";
+    try {
+      const payload = await request(API.comfyuiInstances);
+      if (requestId !== comfyuiState.requestId) return;
+      const items = Array.isArray(payload.items) ? payload.items : (Array.isArray(payload) ? payload : []);
+      comfyuiState.instances = items;
+      renderComfyuiInstancesList();
+    } catch (error) {
+      if (requestId !== comfyuiState.requestId) return;
+      wrap.innerHTML = comfyuiInstancesErrorState(error.message);
+    } finally {
+      if (requestId === comfyuiState.requestId) {
+        comfyuiState.loading = false;
+      }
+    }
+  }
+
+  function renderComfyuiInstancesList() {
+    const wrap = document.getElementById("comfyui-instances-panel");
+    if (!wrap) return;
+    const summary = document.getElementById("comfyui-instances-summary");
+    if (comfyuiState.instances.length) {
+      const activeCount = comfyuiState.instances.filter((i) => i.is_active).length;
+      wrap.innerHTML = `<div class="grid cols-2 real-comfyui-grid">${comfyuiState.instances.map((i) => comfyuiInstanceCard(i)).join("")}</div>`;
+      if (summary) summary.textContent = `${comfyuiState.instances.length} 个实例 · ${activeCount} 个活动`;
+    } else {
+      wrap.innerHTML = comfyuiInstancesEmptyState();
+      if (summary) summary.textContent = "暂无实例";
+    }
+    // 列表加载后同步刷新顶部状态指示器。
+    updateComfyuiStatusIndicator();
+  }
+
+  async function renderProductionSettings() {
+    const page = document.querySelector(".page-scroll");
+    if (!page) return;
+    const header = page.querySelector(".page-header");
+    [...page.children].forEach((child) => {
+      if (child !== header) child.remove();
+    });
+    const title = header?.querySelector(".page-title");
+    const subtitle = header?.querySelector(".page-subtitle");
+    const actions = header?.querySelector(".header-actions");
+    if (title) title.textContent = "设置";
+    if (subtitle) subtitle.textContent = "管理 ComfyUI 连接和应用配置。";
+    if (actions) {
+      actions.innerHTML = '<button class="btn primary" type="button" data-api-action="add-comfyui-instance">添加实例</button>';
+    }
+
+    page.insertAdjacentHTML("beforeend", comfyuiInstancesHeader());
+    page.insertAdjacentHTML(
+      "beforeend",
+      `<div id="comfyui-instances-panel"><div class="grid cols-2 real-comfyui-grid">${comfyuiInstancesSkeleton().repeat(2)}</div></div>`
+    );
+    page.insertAdjacentHTML(
+      "beforeend",
+      `<section class="panel" style="margin-top:14px"><div class="panel-header"><div><div class="panel-title">应用配置</div><div class="panel-sub">单端口启动与性能索引。</div></div></div><div class="panel-body"><div class="kv"><span>前端与 API</span><strong>同一端口</strong></div><div class="kv"><span>健康接口</span><strong>/api/health</strong></div><div class="kv"><span>启动脚本</span><strong>start.bat</strong></div><div class="kv"><span>列表分页</span><strong>游标 · 每批 100</strong></div><div class="kv"><span>提示词搜索</span><strong>SQLite FTS5</strong></div><div class="kv"><span>重复检测</span><strong>SHA-256 + pHash</strong></div></div></section>`
+    );
+
+    await loadComfyuiInstances();
+    updateComfyuiStatusIndicator();
+  }
+
+  // 添加/编辑实例弹窗：采集名称、HTTP 地址、WebSocket 地址（可选）、超时时间。
+  function ensureComfyuiInstanceModal() {
+    let modal = document.getElementById("comfyui-instance-modal");
+    if (modal) return modal;
+    modal = document.createElement("div");
+    modal.id = "comfyui-instance-modal";
+    modal.className = "atelier-modal-backdrop";
+    modal.hidden = true;
+    modal.innerHTML = `
+      <section class="atelier-modal" role="dialog" aria-modal="true" aria-labelledby="comfyui-instance-title">
+        <div class="atelier-modal-icon">CF</div>
+        <h2 id="comfyui-instance-title">添加 ComfyUI 实例</h2>
+        <p id="comfyui-instance-context">填写 ComfyUI 实例的连接信息。</p>
+        <form id="comfyui-instance-form">
+          <label class="label" for="comfyui-instance-name">实例名称</label>
+          <input id="comfyui-instance-name" class="modal-input" name="name" maxlength="80" autocomplete="off" placeholder="例如：本地 ComfyUI" required />
+          <label class="label" for="comfyui-instance-http">HTTP 地址</label>
+          <input id="comfyui-instance-http" class="modal-input" name="http_url" maxlength="200" autocomplete="off" placeholder="http://127.0.0.1:8188" required />
+          <label class="label" for="comfyui-instance-ws">WebSocket 地址（可选）</label>
+          <input id="comfyui-instance-ws" class="modal-input" name="ws_url" maxlength="200" autocomplete="off" placeholder="ws://127.0.0.1:8188/ws" />
+          <label class="label" for="comfyui-instance-timeout">超时时间（秒）</label>
+          <input id="comfyui-instance-timeout" class="modal-input" name="timeout_seconds" type="number" min="5" max="300" value="30" />
+          <div class="modal-error" id="comfyui-instance-error" role="alert"></div>
+          <div class="modal-actions">
+            <button class="btn" type="button" data-api-action="close-comfyui-instance-modal">取消</button>
+            <button class="btn primary" type="submit">保存实例</button>
+          </div>
+        </form>
+      </section>
+    `;
+    document.body.appendChild(modal);
+    modal.addEventListener("click", (event) => {
+      if (event.target === modal) closeComfyuiInstanceModal();
+    });
+    modal.querySelector("form").addEventListener("submit", submitComfyuiInstance);
+    return modal;
+  }
+
+  function openComfyuiInstanceAddModal() {
+    const modal = ensureComfyuiInstanceModal();
+    modal.dataset.mode = "create";
+    delete modal.dataset.instanceId;
+    modal.querySelector("h2").textContent = "添加 ComfyUI 实例";
+    modal.querySelector("#comfyui-instance-context").textContent = "填写 ComfyUI 实例的连接信息。";
+    modal.querySelector('button[type="submit"]').textContent = "保存实例";
+    modal.querySelector(".modal-error").textContent = "";
+    modal.querySelector('input[name="name"]').value = "";
+    modal.querySelector('input[name="http_url"]').value = "";
+    modal.querySelector('input[name="ws_url"]').value = "";
+    modal.querySelector('input[name="timeout_seconds"]').value = "30";
+    modal.hidden = false;
+    requestAnimationFrame(() => {
+      modal.classList.add("show");
+      modal.querySelector('input[name="name"]').focus();
+    });
+  }
+
+  function openComfyuiInstanceEditModal(instanceId, name) {
+    const instance = comfyuiState.instances.find((i) => String(i.id) === String(instanceId));
+    const modal = ensureComfyuiInstanceModal();
+    modal.dataset.mode = "edit";
+    modal.dataset.instanceId = instanceId;
+    modal.querySelector("h2").textContent = "编辑 ComfyUI 实例";
+    modal.querySelector("#comfyui-instance-context").textContent = `修改实例「${name}」的连接信息。`;
+    modal.querySelector('button[type="submit"]').textContent = "保存修改";
+    modal.querySelector(".modal-error").textContent = "";
+    modal.querySelector('input[name="name"]').value = instance?.name || name || "";
+    modal.querySelector('input[name="http_url"]').value = instance?.http_url || instance?.base_url || "";
+    modal.querySelector('input[name="ws_url"]').value = instance?.ws_url || "";
+    modal.querySelector('input[name="timeout_seconds"]').value = String(instance?.timeout_seconds || 30);
+    modal.hidden = false;
+    requestAnimationFrame(() => {
+      modal.classList.add("show");
+      modal.querySelector('input[name="name"]').focus();
+      modal.querySelector('input[name="name"]').select();
+    });
+  }
+
+  function closeComfyuiInstanceModal() {
+    const modal = document.getElementById("comfyui-instance-modal");
+    if (!modal) return;
+    modal.classList.remove("show");
+    window.setTimeout(() => {
+      modal.hidden = true;
+    }, 150);
+  }
+
+  async function submitComfyuiInstance(event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const modal = form.closest(".atelier-modal-backdrop");
+    const nameInput = form.querySelector('input[name="name"]');
+    const httpInput = form.querySelector('input[name="http_url"]');
+    const wsInput = form.querySelector('input[name="ws_url"]');
+    const timeoutInput = form.querySelector('input[name="timeout_seconds"]');
+    const submit = form.querySelector('button[type="submit"]');
+    const error = form.querySelector(".modal-error");
+    const name = nameInput.value.trim().replace(/\s+/g, " ");
+    const httpUrl = httpInput.value.trim();
+    const wsUrl = wsInput.value.trim();
+    const timeoutSeconds = Number(timeoutInput.value) || 30;
+    if (!name) {
+      error.textContent = "请输入实例名称。";
+      nameInput.focus();
+      return;
+    }
+    if (!httpUrl) {
+      error.textContent = "请输入 HTTP 地址。";
+      httpInput.focus();
+      return;
+    }
+    const body = { name, http_url: httpUrl, timeout_seconds: timeoutSeconds };
+    if (wsUrl) body.ws_url = wsUrl;
+    const isEdit = modal.dataset.mode === "edit";
+    const instanceId = modal.dataset.instanceId;
+    submit.disabled = true;
+    submit.textContent = isEdit ? "正在保存…" : "正在添加…";
+    error.textContent = "";
+    try {
+      if (isEdit && instanceId) {
+        await request(API.comfyuiInstance(instanceId), {
+          method: "PATCH",
+          body: JSON.stringify(body),
+        });
+        closeComfyuiInstanceModal();
+        await loadComfyuiInstances();
+        if (typeof showToast === "function") showToast(`实例「${name}」已更新`);
+      } else {
+        await request(API.comfyuiInstances, {
+          method: "POST",
+          body: JSON.stringify(body),
+        });
+        closeComfyuiInstanceModal();
+        await loadComfyuiInstances();
+        if (typeof showToast === "function") showToast(`实例「${name}」已添加`);
+      }
+    } catch (requestError) {
+      error.textContent = requestError.message;
+      nameInput.focus();
+    } finally {
+      submit.disabled = false;
+      submit.textContent = isEdit ? "保存修改" : "保存实例";
+    }
+  }
+
+  async function deleteComfyuiInstance(instanceId, name) {
+    if (!await confirmDialog({
+      title: `删除实例「${name}」`,
+      message: "删除后实例配置将清除，无法恢复。继续删除？",
+      confirmText: "删除实例",
+      danger: true,
+    })) {
+      return;
+    }
+    try {
+      await request(API.comfyuiInstance(instanceId), { method: "DELETE" });
+      await loadComfyuiInstances();
+      if (typeof showToast === "function") showToast(`实例「${name}」已删除`);
+    } catch (requestError) {
+      if (typeof showToast === "function") showToast(requestError.message);
+    }
+  }
+
+  async function activateComfyuiInstance(instanceId, name) {
+    try {
+      await request(API.comfyuiInstanceActivate(instanceId), { method: "POST" });
+      await loadComfyuiInstances();
+      if (typeof showToast === "function") showToast(`实例「${name}」已激活`);
+    } catch (requestError) {
+      if (typeof showToast === "function") showToast(requestError.message);
+    }
+  }
+
+  async function testComfyuiInstance(instanceId, name) {
+    if (typeof showToast === "function") showToast(`正在测试「${name}」连接…`);
+    try {
+      const payload = await request(API.comfyuiInstanceTest(instanceId), { method: "POST" });
+      const ok = payload && (payload.ok || payload.success || payload.connected);
+      const latency = payload && payload.latency != null ? ` · 延迟 ${payload.latency} ms` : "";
+      if (ok) {
+        if (typeof showToast === "function") showToast(`「${name}」连接成功${latency}`);
+      } else {
+        const reason = (payload && (payload.message || payload.reason)) || "连接失败";
+        if (typeof showToast === "function") showToast(`「${name}」${reason}`);
+      }
+      await loadComfyuiInstances();
+    } catch (requestError) {
+      if (typeof showToast === "function") showToast(`「${name}」测试失败：${requestError.message}`);
+    }
+  }
+
+  async function syncComfyuiInstance(instanceId, name) {
+    if (typeof showToast === "function") showToast(`正在同步「${name}」节点定义…`);
+    try {
+      const payload = await request(API.comfyuiInstanceSync(instanceId), { method: "POST" });
+      const count = payload && (payload.node_count || payload.synced_count || 0);
+      if (typeof showToast === "function") showToast(`「${name}」已同步 ${count} 个节点`);
+      await loadComfyuiInstances();
+    } catch (requestError) {
+      if (typeof showToast === "function") showToast(`「${name}」同步失败：${requestError.message}`);
+    }
+  }
+
+  async function discoverComfyuiInstances() {
+    if (typeof showToast === "function") showToast("正在搜索局域网 ComfyUI 实例…");
+    try {
+      const payload = await request(API.comfyuiDiscover, { method: "POST" });
+      const candidates = Array.isArray(payload.items) ? payload.items : (Array.isArray(payload) ? payload : []);
+      if (!candidates.length) {
+        if (typeof showToast === "function") showToast("未发现局域网 ComfyUI 实例");
+        return;
+      }
+      // 把候选列表渲染到实例面板顶部，便于用户一键添加。
+      const wrap = document.getElementById("comfyui-instances-panel");
+      if (wrap) {
+        const list = candidates.map((c) => {
+          const url = escapeHtml(c.http_url || c.url || "");
+          const label = escapeHtml(c.name || url || "未知实例");
+          return `<div class="kv" style="gap:8px"><span>${label}</span><strong>${url}</strong><button class="btn small soft" type="button" data-api-action="add-discovered-comfyui" data-url="${url}" data-name="${label}">添加</button></div>`;
+        }).join("");
+        wrap.insertAdjacentHTML("afterbegin", `<section class="panel" style="margin-bottom:12px"><div class="panel-header"><div><div class="panel-title">发现的实例</div><div class="panel-sub">点击添加把候选实例加入配置。</div></div></div><div class="panel-body">${list}</div></section>`);
+      }
+      if (typeof showToast === "function") showToast(`发现 ${candidates.length} 个候选实例`);
+    } catch (requestError) {
+      if (typeof showToast === "function") showToast(`发现失败：${requestError.message}`);
+    }
+  }
+
+  // 顶部与侧边栏 ComfyUI 状态指示器：读取活动实例连接状态并刷新两类指示器。
+  // 状态映射：绿点=已连接 / 橙点=未检测 / 红点=连接失败。
+  let comfyuiStatusTimer = null;
+  let comfyuiStatusRequestId = 0;
+
+  function applyComfyuiStatusIndicator(state) {
+    // state: { color: "green"|"orange"|"red", text: string }
+    const colorClass = state.color || "orange";
+    const text = state.text || "ComfyUI 未检测";
+    // 顶部按钮指示器
+    const btn = document.getElementById("comfyui-status-indicator");
+    if (btn) {
+      btn.classList.remove("green", "orange", "red", "pending");
+      btn.classList.add(colorClass);
+      const textEl = btn.querySelector(".comfyui-status-text");
+      if (textEl) textEl.textContent = text;
+    }
+    // 侧边栏健康指示器
+    const sidebar = document.getElementById("comfyui-sidebar-health");
+    if (sidebar) {
+      sidebar.classList.remove("green", "orange", "red", "pending");
+      sidebar.classList.add(colorClass);
+      const span = sidebar.querySelector("span:not(.health-dot)");
+      if (span) span.textContent = text;
+    }
+    // 工作流工具栏连接状态
+    const wfStatus = document.getElementById("workflows-connection-status");
+    if (wfStatus) {
+      wfStatus.classList.remove("green", "orange", "red");
+      wfStatus.classList.add(colorClass);
+      wfStatus.innerHTML = `<i class="dot"></i>${text}`;
+    }
+  }
+
+  async function updateComfyuiStatusIndicator() {
+    const requestId = comfyuiStatusRequestId + 1;
+    comfyuiStatusRequestId = requestId;
+    try {
+      const payload = await request(API.comfyuiInstances);
+      if (requestId !== comfyuiStatusRequestId) return;
+      const items = Array.isArray(payload.items) ? payload.items : (Array.isArray(payload) ? payload : []);
+      const active = items.find((i) => i.is_active) || items[0];
+      if (!active) {
+        applyComfyuiStatusIndicator({ color: "orange", text: "ComfyUI 未配置" });
+        return;
+      }
+      const connStatus = active.connection_status;
+      if (connStatus === "connected") {
+        applyComfyuiStatusIndicator({ color: "green", text: `ComfyUI 已连接 · ${active.name || ""}`.trim() });
+      } else if (connStatus === "failed" || connStatus === "error") {
+        applyComfyuiStatusIndicator({ color: "red", text: `ComfyUI 连接失败 · ${active.name || ""}`.trim() });
+      } else {
+        applyComfyuiStatusIndicator({ color: "orange", text: `ComfyUI 未检测 · ${active.name || ""}`.trim() });
+      }
+    } catch (error) {
+      if (requestId !== comfyuiStatusRequestId) return;
+      applyComfyuiStatusIndicator({ color: "orange", text: "ComfyUI 后端未连接" });
+    }
+  }
+
+  function startComfyuiStatusPolling() {
+    if (comfyuiStatusTimer) return;
+    // 每 30 秒刷新一次顶部连接状态指示器。
+    comfyuiStatusTimer = window.setInterval(updateComfyuiStatusIndicator, 30000);
+  }
+
+  // 页面加载后立即读取一次状态，并启动定时轮询。
+  updateComfyuiStatusIndicator();
+  startComfyuiStatusPolling();
 
   async function resolveCurrentProject() {
     const projects = await request("/api/projects");
@@ -1588,6 +2675,9 @@
           <span class="tool active">项目结构</span>
           <span class="story-toolbar-count">${chapters.length} 个章节 · ${largeSceneTotal} 个大场景 · ${smallSceneTotal} 个小场景</span>
           <span class="spacer"></span>
+          <button class="tool" type="button" data-api-action="manage-branches" data-project-id="${escapeHtml(project.id)}" title="分支管理">分支管理</button>
+          <button class="tool" type="button" data-api-action="undo-operation" data-project-id="${escapeHtml(project.id)}" title="撤销上一步操作">撤销</button>
+          <button class="tool" type="button" data-api-action="redo-operation" data-project-id="${escapeHtml(project.id)}" title="重做已撤销操作">重做</button>
           <button class="tool" type="button" data-story-canvas-action="zoom-out" title="缩小画布">−</button>
           <button class="tool story-zoom-label" type="button" data-story-canvas-action="zoom-reset" id="story-canvas-zoom-label">100%</button>
           <button class="tool" type="button" data-story-canvas-action="zoom-in" title="放大画布">＋</button>
@@ -2175,7 +3265,11 @@
     if (title) title.textContent = "剧本画布";
     if (subtitle) subtitle.textContent = `项目：${project.name}`;
     if (actions) {
-      actions.innerHTML = '<button class="btn primary" data-api-action="open-chapter-modal">新建章节</button>';
+      actions.innerHTML = `
+        <button class="btn" data-api-action="show-snapshots" data-project-id="${escapeHtml(project.id)}">版本历史</button>
+        <button class="btn" data-api-action="run-precheck" data-project-id="${escapeHtml(project.id)}">预检查</button>
+        <button class="btn primary" data-api-action="open-chapter-modal">新建章节</button>
+      `;
     }
     const hierarchy = await loadStoryHierarchy(project.id);
     storyWorkspaceState.tree = hierarchy.chapters;
@@ -2185,6 +3279,791 @@
       storyWorkspaceShell(project, hierarchy.chapters, hierarchy.backendAvailable)
     );
     bindStoryHierarchy(project.id);
+  }
+
+  // ==================== 剧本分支管理 ====================
+
+  // 收集项目中所有大场景和小场景，用于分支父级选择
+  function collectProjectScenes() {
+    const chapters = storyWorkspaceState.tree || [];
+    const largeScenes = [];
+    const smallScenes = [];
+    chapters.forEach((chapter) => {
+      (chapter.large_scenes || []).forEach((scene) => {
+        largeScenes.push({ id: scene.id, name: scene.name, chapter_name: chapter.name });
+        (scene.small_scenes || []).forEach((small) => {
+          smallScenes.push({ id: small.id, name: small.name, large_scene_name: scene.name });
+        });
+      });
+    });
+    return { largeScenes, smallScenes };
+  }
+
+  function ensureBranchModal() {
+    let modal = document.getElementById("branch-manage-modal");
+    if (modal) return modal;
+    modal = document.createElement("div");
+    modal.id = "branch-manage-modal";
+    modal.className = "atelier-modal-backdrop";
+    modal.hidden = true;
+    modal.innerHTML = `
+      <section class="atelier-modal size-lg" role="dialog" aria-modal="true" aria-labelledby="branch-manage-title">
+        <header class="atelier-modal-head">
+          <div>
+            <h2 id="branch-manage-title">分支管理</h2>
+            <p class="atelier-modal-sub">管理剧本分支及其覆盖项，按大场景和小场景分组。</p>
+          </div>
+          <button class="btn small" type="button" data-api-action="close-branch-modal">关闭</button>
+        </header>
+        <div class="atelier-modal-body" id="branch-modal-body">
+          <div class="branch-modal-loading">正在加载分支…</div>
+        </div>
+      </section>
+    `;
+    document.body.appendChild(modal);
+    modal.addEventListener("click", (event) => {
+      if (event.target === modal) closeBranchModal();
+    });
+    return modal;
+  }
+
+  async function openBranchModal(projectId) {
+    const modal = ensureBranchModal();
+    modal.dataset.projectId = projectId;
+    modal.hidden = false;
+    requestAnimationFrame(() => modal.classList.add("show"));
+    await refreshBranchList(projectId);
+  }
+
+  function closeBranchModal() {
+    const modal = document.getElementById("branch-manage-modal");
+    if (!modal) return;
+    modal.classList.remove("show");
+    window.setTimeout(() => {
+      modal.hidden = true;
+    }, 150);
+  }
+
+  async function refreshBranchList(projectId) {
+    const body = document.getElementById("branch-modal-body");
+    if (!body) return;
+    body.innerHTML = '<div class="branch-modal-loading">正在加载分支…</div>';
+    try {
+      const scenes = collectProjectScenes();
+      const largeSceneBranchResults = await Promise.all(
+        scenes.largeScenes.map(async (scene) => {
+          try {
+            const payload = await request(API.branches("large-scenes", scene.id));
+            return { parentType: "large-scenes", parent: scene, branches: payload.items || [] };
+          } catch (error) {
+            return { parentType: "large-scenes", parent: scene, branches: [], error: error.message };
+          }
+        })
+      );
+      const smallSceneBranchResults = await Promise.all(
+        scenes.smallScenes.map(async (scene) => {
+          try {
+            const payload = await request(API.branches("small-scenes", scene.id));
+            return { parentType: "small-scenes", parent: scene, branches: payload.items || [] };
+          } catch (error) {
+            return { parentType: "small-scenes", parent: scene, branches: [], error: error.message };
+          }
+        })
+      );
+      body.innerHTML = renderBranchModalContent(scenes, largeSceneBranchResults, smallSceneBranchResults);
+    } catch (error) {
+      body.innerHTML = `<div class="branch-modal-error">分支加载失败：${escapeHtml(error.message)}</div>`;
+    }
+  }
+
+  function renderBranchModalContent(scenes, largeSceneGroups, smallSceneGroups) {
+    const allSceneOptions = [
+      ...scenes.largeScenes.map((s) => ({
+        value: `large-scenes:${s.id}`,
+        label: `大场景 · ${s.name}（${s.chapter_name}）`,
+      })),
+      ...scenes.smallScenes.map((s) => ({
+        value: `small-scenes:${s.id}`,
+        label: `小场景 · ${s.name}（${s.large_scene_name}）`,
+      })),
+    ];
+    const totalBranches = [...largeSceneGroups, ...smallSceneGroups].reduce(
+      (sum, g) => sum + g.branches.length, 0
+    );
+    return `
+      <div class="branch-modal-section">
+        <h3>新建分支</h3>
+        <form id="create-branch-form" class="branch-create-form">
+          <label class="label">父级场景</label>
+          <select name="parent" class="modal-input" required>
+            ${allSceneOptions.map((s) => `<option value="${escapeHtml(s.value)}">${escapeHtml(s.label)}</option>`).join("")}
+          </select>
+          <label class="label">分支名称</label>
+          <input name="name" class="modal-input" maxlength="80" autocomplete="off" placeholder="例如：分支A" required />
+          <label class="label">条件（可选）</label>
+          <input name="condition" class="modal-input" maxlength="200" autocomplete="off" placeholder="分支触发条件描述" />
+          <div class="modal-error" id="create-branch-error" role="alert"></div>
+          <button class="btn small primary" type="button" data-api-action="create-branch">创建分支</button>
+        </form>
+      </div>
+      <div class="branch-modal-section">
+        <h3>已有分支（${totalBranches}）</h3>
+        ${totalBranches === 0 ? '<p class="branch-empty">还没有分支。在上方创建第一个分支。</p>' : ""}
+        ${largeSceneGroups.filter((g) => g.branches.length).map(renderBranchGroup).join("")}
+        ${smallSceneGroups.filter((g) => g.branches.length).map(renderBranchGroup).join("")}
+      </div>
+    `;
+  }
+
+  function renderBranchGroup(group) {
+    return `
+      <div class="branch-group">
+        <div class="branch-group-head">
+          <span class="branch-group-type">${group.parentType === "large-scenes" ? "大场景" : "小场景"}</span>
+          <span class="branch-group-name">${escapeHtml(group.parent.name)}</span>
+          <span class="branch-group-count">${group.branches.length} 个分支</span>
+        </div>
+        <div class="branch-group-list">
+          ${group.branches.map((branch) => renderBranchCard(branch)).join("")}
+        </div>
+      </div>
+    `;
+  }
+
+  function renderBranchCard(branch) {
+    const isActive = branch.is_active !== false && branch.is_active !== 0;
+    return `
+      <div class="branch-card" data-branch-id="${escapeHtml(branch.id)}">
+        <div class="branch-card-head">
+          <strong>${escapeHtml(branch.name)}</strong>
+          <span class="branch-card-status ${isActive ? "active" : "inactive"}">${isActive ? "启用" : "禁用"}</span>
+        </div>
+        <div class="branch-card-meta">
+          ${branch.condition ? `<span>条件：${escapeHtml(branch.condition)}</span>` : '<span class="muted">无条件</span>'}
+        </div>
+        <div class="branch-card-actions">
+          <button class="btn small" type="button" data-api-action="edit-branch" data-branch-id="${escapeHtml(branch.id)}" data-branch-name="${escapeHtml(branch.name)}" data-branch-condition="${escapeHtml(branch.condition || "")}" data-branch-active="${isActive ? "1" : "0"}">编辑</button>
+          <button class="btn small soft" type="button" data-api-action="toggle-branch-active" data-branch-id="${escapeHtml(branch.id)}" data-branch-active="${isActive ? "1" : "0"}" data-branch-name="${escapeHtml(branch.name)}">${isActive ? "禁用" : "启用"}</button>
+          <button class="btn small soft" type="button" data-api-action="add-branch-override" data-branch-id="${escapeHtml(branch.id)}" data-branch-name="${escapeHtml(branch.name)}">覆盖项</button>
+          <button class="btn small danger-soft" type="button" data-api-action="delete-branch" data-branch-id="${escapeHtml(branch.id)}" data-branch-name="${escapeHtml(branch.name)}">删除</button>
+        </div>
+        <div class="branch-overrides-section" data-branch-overrides="${escapeHtml(branch.id)}"></div>
+      </div>
+    `;
+  }
+
+  async function submitCreateBranch(button) {
+    const form = button.closest("form");
+    if (!form) return;
+    const error = form.querySelector(".modal-error");
+    const submitBtn = button;
+    const parentValue = form.querySelector('[name="parent"]').value;
+    const name = form.querySelector('[name="name"]').value.trim().replace(/\s+/g, " ");
+    const condition = form.querySelector('[name="condition"]').value.trim();
+    if (!name) {
+      if (error) error.textContent = "请输入分支名称。";
+      form.querySelector('[name="name"]').focus();
+      return;
+    }
+    const [parentType, parentId] = parentValue.split(":");
+    if (!parentType || !parentId) {
+      if (error) error.textContent = "请选择父级场景。";
+      return;
+    }
+    submitBtn.disabled = true;
+    submitBtn.textContent = "正在创建…";
+    if (error) error.textContent = "";
+    try {
+      await request(API.branches(parentType, parentId), {
+        method: "POST",
+        body: JSON.stringify({ name, condition: condition || undefined }),
+      });
+      if (typeof showToast === "function") showToast(`分支「${name}」已创建`);
+      const modal = document.getElementById("branch-manage-modal");
+      const projectId = modal?.dataset.projectId;
+      if (projectId) await refreshBranchList(projectId);
+    } catch (requestError) {
+      if (error) error.textContent = requestError.message;
+    } finally {
+      submitBtn.disabled = false;
+      submitBtn.textContent = "创建分支";
+    }
+  }
+
+  function startEditBranch(button) {
+    const card = button.closest(".branch-card");
+    if (!card) return;
+    const branchId = button.dataset.branchId;
+    const name = button.dataset.branchName || "";
+    const condition = button.dataset.branchCondition || "";
+    const isActive = button.dataset.branchActive === "1";
+    card.innerHTML = `
+      <form class="branch-edit-form" data-branch-id="${escapeHtml(branchId)}">
+        <label class="label">分支名称</label>
+        <input name="name" class="modal-input" maxlength="80" value="${escapeHtml(name)}" required />
+        <label class="label">条件</label>
+        <input name="condition" class="modal-input" maxlength="200" value="${escapeHtml(condition)}" />
+        <label class="label">启用状态</label>
+        <select name="is_active" class="modal-input">
+          <option value="1" ${isActive ? "selected" : ""}>启用</option>
+          <option value="0" ${!isActive ? "selected" : ""}>禁用</option>
+        </select>
+        <div class="modal-error" role="alert"></div>
+        <div class="branch-edit-actions">
+          <button class="btn small primary" type="button" data-api-action="edit-branch" data-branch-id="${escapeHtml(branchId)}" data-mode="save">保存</button>
+          <button class="btn small" type="button" data-api-action="close-branch-modal" data-mode="cancel-edit">取消</button>
+        </div>
+      </form>
+    `;
+  }
+
+  async function submitEditBranch(button) {
+    const form = button.closest("form");
+    if (!form) return;
+    const branchId = button.dataset.branchId;
+    const error = form.querySelector(".modal-error");
+    const name = form.querySelector('[name="name"]').value.trim().replace(/\s+/g, " ");
+    const condition = form.querySelector('[name="condition"]').value.trim();
+    const isActive = form.querySelector('[name="is_active"]').value === "1";
+    if (!name) {
+      if (error) error.textContent = "请输入分支名称。";
+      return;
+    }
+    button.disabled = true;
+    button.textContent = "正在保存…";
+    try {
+      await request(API.branch(branchId), {
+        method: "PATCH",
+        body: JSON.stringify({ name, condition: condition || undefined, is_active: isActive }),
+      });
+      if (typeof showToast === "function") showToast(`分支「${name}」已更新`);
+      const modal = document.getElementById("branch-manage-modal");
+      const projectId = modal?.dataset.projectId;
+      if (projectId) await refreshBranchList(projectId);
+    } catch (requestError) {
+      if (error) error.textContent = requestError.message;
+    } finally {
+      button.disabled = false;
+      button.textContent = "保存";
+    }
+  }
+
+  async function deleteBranch(branchId, name) {
+    const confirmed = await confirmDialog({
+      title: "删除分支",
+      message: `确定要删除分支「${name}」吗？该分支下的所有覆盖项也会被删除。`,
+      confirmText: "删除",
+      danger: true,
+    });
+    if (!confirmed) return;
+    try {
+      await request(API.branch(branchId), { method: "DELETE" });
+      if (typeof showToast === "function") showToast(`分支「${name}」已删除`);
+      const modal = document.getElementById("branch-manage-modal");
+      const projectId = modal?.dataset.projectId;
+      if (projectId) await refreshBranchList(projectId);
+    } catch (requestError) {
+      if (typeof showToast === "function") showToast(requestError.message);
+    }
+  }
+
+  async function toggleBranchActive(branchId, currentActive, name) {
+    try {
+      await request(API.branch(branchId), {
+        method: "PATCH",
+        body: JSON.stringify({ is_active: !currentActive }),
+      });
+      if (typeof showToast === "function") showToast(`分支「${name}」已${currentActive ? "禁用" : "启用"}`);
+      const modal = document.getElementById("branch-manage-modal");
+      const projectId = modal?.dataset.projectId;
+      if (projectId) await refreshBranchList(projectId);
+    } catch (requestError) {
+      if (typeof showToast === "function") showToast(requestError.message);
+    }
+  }
+
+  async function showBranchOverrides(branchId, branchName) {
+    const section = document.querySelector(`[data-branch-overrides="${CSS.escape(branchId)}"]`);
+    if (!section) return;
+    if (section.innerHTML.trim()) {
+      section.innerHTML = "";
+      return;
+    }
+    section.innerHTML = '<div class="branch-overrides-loading">正在加载覆盖项…</div>';
+    try {
+      const payload = await request(API.branchOverrides(branchId));
+      const overrides = payload.items || [];
+      section.innerHTML = `
+        <div class="branch-overrides-list">
+          ${overrides.length === 0 ? '<p class="muted">暂无覆盖项</p>' : ""}
+          ${overrides.map((override) => renderBranchOverrideItem(override)).join("")}
+        </div>
+        <form class="branch-override-form" data-branch-id="${escapeHtml(branchId)}">
+          <label class="label">覆盖类型</label>
+          <select name="override_type" class="modal-input">
+            <option value="character">人物</option>
+            <option value="material">素材</option>
+            <option value="parameter">参数</option>
+          </select>
+          <label class="label">目标ID</label>
+          <input name="target_id" class="modal-input" maxlength="100" placeholder="被覆盖对象的ID" required />
+          <label class="label">覆盖值</label>
+          <textarea name="override_value" class="modal-input" rows="2" placeholder="覆盖后的值（JSON或文本）"></textarea>
+          <div class="modal-error" role="alert"></div>
+          <button class="btn small primary" type="button" data-api-action="add-branch-override" data-branch-id="${escapeHtml(branchId)}" data-mode="save">添加覆盖</button>
+        </form>
+      `;
+    } catch (error) {
+      section.innerHTML = `<div class="branch-modal-error">覆盖项加载失败：${escapeHtml(error.message)}</div>`;
+    }
+  }
+
+  function renderBranchOverrideItem(override) {
+    const typeLabels = { character: "人物", material: "素材", parameter: "参数" };
+    const typeLabel = typeLabels[override.override_type] || override.override_type || "未知";
+    return `
+      <div class="branch-override-item">
+        <span class="branch-override-type">${escapeHtml(typeLabel)}</span>
+        <span class="branch-override-target">${escapeHtml(override.target_id || "")}</span>
+        <span class="branch-override-value">${escapeHtml(override.override_value || "")}</span>
+        <button class="btn small danger-soft" type="button" data-api-action="delete-branch-override" data-override-id="${escapeHtml(override.id)}">删除</button>
+      </div>
+    `;
+  }
+
+  async function submitAddBranchOverride(button) {
+    const form = button.closest("form");
+    if (!form) return;
+    const branchId = button.dataset.branchId;
+    const error = form.querySelector(".modal-error");
+    const overrideType = form.querySelector('[name="override_type"]').value;
+    const targetId = form.querySelector('[name="target_id"]').value.trim();
+    const overrideValue = form.querySelector('[name="override_value"]').value.trim();
+    if (!targetId) {
+      if (error) error.textContent = "请输入目标ID。";
+      return;
+    }
+    button.disabled = true;
+    button.textContent = "正在添加…";
+    try {
+      await request(API.branchOverrides(branchId), {
+        method: "POST",
+        body: JSON.stringify({
+          override_type: overrideType,
+          target_id: targetId,
+          override_value: overrideValue || undefined,
+        }),
+      });
+      if (typeof showToast === "function") showToast("覆盖项已添加");
+      await showBranchOverrides(branchId, "");
+    } catch (requestError) {
+      if (error) error.textContent = requestError.message;
+    } finally {
+      button.disabled = false;
+      button.textContent = "添加覆盖";
+    }
+  }
+
+  async function deleteBranchOverride(overrideId) {
+    const confirmed = await confirmDialog({
+      title: "删除覆盖项",
+      message: "确定要删除此覆盖项吗？",
+      confirmText: "删除",
+      danger: true,
+    });
+    if (!confirmed) return;
+    try {
+      await request(API.branchOverride(overrideId), { method: "DELETE" });
+      if (typeof showToast === "function") showToast("覆盖项已删除");
+      const section = document.querySelector(".branch-overrides-section:not(:empty)");
+      if (section) {
+        const branchId = section.dataset.branchOverrides;
+        if (branchId) await showBranchOverrides(branchId, "");
+      }
+    } catch (requestError) {
+      if (typeof showToast === "function") showToast(requestError.message);
+    }
+  }
+
+  // ==================== 剧本快照 ====================
+
+  function ensureSnapshotModal() {
+    let modal = document.getElementById("snapshot-modal");
+    if (modal) return modal;
+    modal = document.createElement("div");
+    modal.id = "snapshot-modal";
+    modal.className = "atelier-modal-backdrop";
+    modal.hidden = true;
+    modal.innerHTML = `
+      <section class="atelier-modal size-lg" role="dialog" aria-modal="true" aria-labelledby="snapshot-modal-title">
+        <header class="atelier-modal-head">
+          <div>
+            <h2 id="snapshot-modal-title">版本历史</h2>
+            <p class="atelier-modal-sub">创建剧本快照并可在需要时恢复。</p>
+          </div>
+          <button class="btn small" type="button" data-api-action="close-snapshot-modal">关闭</button>
+        </header>
+        <div class="atelier-modal-body" id="snapshot-modal-body">
+          <div class="snapshot-modal-loading">正在加载快照…</div>
+        </div>
+      </section>
+    `;
+    document.body.appendChild(modal);
+    modal.addEventListener("click", (event) => {
+      if (event.target === modal) closeSnapshotModal();
+    });
+    return modal;
+  }
+
+  async function openSnapshotModal(projectId) {
+    const modal = ensureSnapshotModal();
+    modal.dataset.projectId = projectId;
+    modal.hidden = false;
+    requestAnimationFrame(() => modal.classList.add("show"));
+    await refreshSnapshotList(projectId);
+  }
+
+  function closeSnapshotModal() {
+    const modal = document.getElementById("snapshot-modal");
+    if (!modal) return;
+    modal.classList.remove("show");
+    window.setTimeout(() => {
+      modal.hidden = true;
+    }, 150);
+  }
+
+  async function refreshSnapshotList(projectId) {
+    const body = document.getElementById("snapshot-modal-body");
+    if (!body) return;
+    body.innerHTML = '<div class="snapshot-modal-loading">正在加载快照…</div>';
+    try {
+      const payload = await request(API.projectSnapshots(projectId));
+      const snapshots = payload.items || [];
+      body.innerHTML = `
+        <div class="snapshot-modal-section">
+          <h3>创建快照</h3>
+          <form id="create-snapshot-form" class="snapshot-create-form">
+            <label class="label">标签</label>
+            <input name="label" class="modal-input" maxlength="80" autocomplete="off" placeholder="例如：v1.0 初稿" required />
+            <label class="label">描述（可选）</label>
+            <textarea name="description" class="modal-input" rows="2" maxlength="500" placeholder="快照内容描述"></textarea>
+            <div class="modal-error" id="create-snapshot-error" role="alert"></div>
+            <button class="btn small primary" type="button" data-api-action="create-snapshot" data-project-id="${escapeHtml(projectId)}">创建快照</button>
+          </form>
+        </div>
+        <div class="snapshot-modal-section">
+          <h3>历史快照（${snapshots.length}）</h3>
+          ${snapshots.length === 0
+            ? '<p class="snapshot-empty">还没有快照。在上方创建第一个快照。</p>'
+            : `<div class="snapshot-list">${snapshots.map(renderSnapshotCard).join("")}</div>`
+          }
+        </div>
+      `;
+    } catch (error) {
+      body.innerHTML = `<div class="snapshot-modal-error">快照加载失败：${escapeHtml(error.message)}</div>`;
+    }
+  }
+
+  function renderSnapshotCard(snapshot) {
+    const created = snapshot.created_at
+      ? new Date(snapshot.created_at).toLocaleString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })
+      : "未知时间";
+    const pageCount = snapshot.page_count != null ? snapshot.page_count : "—";
+    return `
+      <div class="snapshot-card">
+        <div class="snapshot-card-head">
+          <strong>${escapeHtml(snapshot.label || "未命名")}</strong>
+          <span class="snapshot-card-time">${escapeHtml(created)}</span>
+        </div>
+        ${snapshot.description ? `<p class="snapshot-card-desc">${escapeHtml(snapshot.description)}</p>` : ""}
+        <div class="snapshot-card-meta">
+          <span>页数：${escapeHtml(String(pageCount))}</span>
+        </div>
+        <div class="snapshot-card-actions">
+          <button class="btn small soft" type="button" data-api-action="restore-snapshot" data-snapshot-id="${escapeHtml(snapshot.id)}" data-snapshot-label="${escapeHtml(snapshot.label || "未命名")}">恢复此快照</button>
+        </div>
+      </div>
+    `;
+  }
+
+  async function submitCreateSnapshot(button) {
+    const form = button.closest("form");
+    if (!form) return;
+    const projectId = button.dataset.projectId;
+    const error = form.querySelector(".modal-error");
+    const label = form.querySelector('[name="label"]').value.trim().replace(/\s+/g, " ");
+    const description = form.querySelector('[name="description"]').value.trim();
+    if (!label) {
+      if (error) error.textContent = "请输入快照标签。";
+      return;
+    }
+    button.disabled = true;
+    button.textContent = "正在创建…";
+    if (error) error.textContent = "";
+    try {
+      await request(API.projectSnapshots(projectId), {
+        method: "POST",
+        body: JSON.stringify({ label, description: description || undefined }),
+      });
+      if (typeof showToast === "function") showToast(`快照「${label}」已创建`);
+      await refreshSnapshotList(projectId);
+    } catch (requestError) {
+      if (error) error.textContent = requestError.message;
+    } finally {
+      button.disabled = false;
+      button.textContent = "创建快照";
+    }
+  }
+
+  async function restoreSnapshot(snapshotId, label) {
+    const confirmed = await confirmDialog({
+      title: "恢复快照",
+      message: `确定要将剧本恢复到快照「${label}」吗？当前未保存的更改将丢失。`,
+      confirmText: "恢复",
+      danger: true,
+    });
+    if (!confirmed) return;
+    try {
+      await request(API.projectSnapshotRestore(snapshotId), { method: "POST" });
+      if (typeof showToast === "function") showToast(`已恢复到快照「${label}」`);
+      closeSnapshotModal();
+      const project = await resolveCurrentProject();
+      if (project) await renderProductionStoryCanvasV3(project);
+    } catch (requestError) {
+      if (typeof showToast === "function") showToast(requestError.message);
+    }
+  }
+
+  // ==================== 撤销重做 ====================
+
+  async function undoLastOperation(projectId) {
+    try {
+      const payload = await request(API.projectOperations(projectId));
+      const operations = payload.items || [];
+      const undoable = operations.find((op) => op.can_undo !== false && op.undone !== true);
+      if (!undoable) {
+        if (typeof showToast === "function") showToast("没有可撤销的操作");
+        return;
+      }
+      await request(API.operationUndo(undoable.id), { method: "POST" });
+      if (typeof showToast === "function") showToast("操作已撤销");
+      const project = await resolveCurrentProject();
+      if (project) await renderProductionStoryCanvasV3(project);
+    } catch (requestError) {
+      if (typeof showToast === "function") showToast(requestError.message);
+    }
+  }
+
+  async function redoLastOperation(projectId) {
+    try {
+      const payload = await request(API.projectOperations(projectId));
+      const operations = payload.items || [];
+      const redoable = operations.find((op) => op.can_redo !== false && op.undone === true);
+      if (!redoable) {
+        if (typeof showToast === "function") showToast("没有可重做的操作");
+        return;
+      }
+      await request(API.operationRedo(redoable.id), { method: "POST" });
+      if (typeof showToast === "function") showToast("操作已重做");
+      const project = await resolveCurrentProject();
+      if (project) await renderProductionStoryCanvasV3(project);
+    } catch (requestError) {
+      if (typeof showToast === "function") showToast(requestError.message);
+    }
+  }
+
+  // ==================== 编译预检查 ====================
+
+  function ensurePrecheckModal() {
+    let modal = document.getElementById("precheck-modal");
+    if (modal) return modal;
+    modal = document.createElement("div");
+    modal.id = "precheck-modal";
+    modal.className = "atelier-modal-backdrop";
+    modal.hidden = true;
+    modal.innerHTML = `
+      <section class="atelier-modal size-lg" role="dialog" aria-modal="true" aria-labelledby="precheck-modal-title">
+        <header class="atelier-modal-head">
+          <div>
+            <h2 id="precheck-modal-title">编译预检查</h2>
+            <p class="atelier-modal-sub">在正式编译前检查项目完整性。</p>
+          </div>
+          <button class="btn small" type="button" data-api-action="close-precheck-modal">关闭</button>
+        </header>
+        <div class="atelier-modal-body" id="precheck-modal-body">
+        </div>
+      </section>
+    `;
+    document.body.appendChild(modal);
+    modal.addEventListener("click", (event) => {
+      if (event.target === modal) closePrecheckModal();
+    });
+    return modal;
+  }
+
+  function openPrecheckModal(projectId) {
+    const modal = ensurePrecheckModal();
+    modal.dataset.projectId = projectId;
+    const scenes = collectProjectScenes();
+    const body = document.getElementById("precheck-modal-body");
+    if (body) {
+      body.innerHTML = `
+        <div class="precheck-modal-section">
+          <h3>检查范围</h3>
+          <form id="precheck-form" class="precheck-form">
+            <label class="label">范围</label>
+            <select name="scope" class="modal-input" id="precheck-scope">
+              <option value="project">整个项目</option>
+              <option value="chapter">指定章节</option>
+              <option value="large-scene">指定大场景</option>
+              <option value="small-scene">指定小场景</option>
+            </select>
+            <div id="precheck-target-wrap" hidden>
+              <label class="label">目标</label>
+              <select name="target_id" class="modal-input" id="precheck-target"></select>
+            </div>
+            <div class="modal-error" id="precheck-error" role="alert"></div>
+            <button class="btn small primary" type="button" data-api-action="execute-precheck" data-project-id="${escapeHtml(projectId)}">运行预检查</button>
+          </form>
+        </div>
+        <div class="precheck-modal-section" id="precheck-results" hidden>
+          <h3>检查结果</h3>
+          <div id="precheck-results-body"></div>
+        </div>
+      `;
+      const scopeSelect = body.querySelector("#precheck-scope");
+      const targetWrap = body.querySelector("#precheck-target-wrap");
+      const targetSelect = body.querySelector("#precheck-target");
+      scopeSelect.addEventListener("change", () => {
+        const scope = scopeSelect.value;
+        if (scope === "project") {
+          targetWrap.hidden = true;
+          return;
+        }
+        targetWrap.hidden = false;
+        const chapters = storyWorkspaceState.tree || [];
+        let options = [];
+        if (scope === "chapter") {
+          options = chapters.map((ch) => ({ value: ch.id, label: ch.name }));
+        } else if (scope === "large-scene") {
+          chapters.forEach((ch) => {
+            (ch.large_scenes || []).forEach((ls) => {
+              options.push({ value: ls.id, label: `${ls.name}（${ch.name}）` });
+            });
+          });
+        } else if (scope === "small-scene") {
+          chapters.forEach((ch) => {
+            (ch.large_scenes || []).forEach((ls) => {
+              (ls.small_scenes || []).forEach((ss) => {
+                options.push({ value: ss.id, label: `${ss.name}（${ls.name}）` });
+              });
+            });
+          });
+        }
+        targetSelect.innerHTML = options.length
+          ? options.map((o) => `<option value="${escapeHtml(o.value)}">${escapeHtml(o.label)}</option>`).join("")
+          : '<option value="">无可用选项</option>';
+      });
+    }
+    modal.hidden = false;
+    requestAnimationFrame(() => modal.classList.add("show"));
+  }
+
+  function closePrecheckModal() {
+    const modal = document.getElementById("precheck-modal");
+    if (!modal) return;
+    modal.classList.remove("show");
+    window.setTimeout(() => {
+      modal.hidden = true;
+    }, 150);
+  }
+
+  async function executePrecheck(button) {
+    const form = button.closest("form");
+    if (!form) return;
+    const projectId = button.dataset.projectId;
+    const error = form.querySelector(".modal-error");
+    const scope = form.querySelector('[name="scope"]').value;
+    const targetWrap = form.querySelector("#precheck-target-wrap");
+    const targetId = targetWrap && !targetWrap.hidden
+      ? form.querySelector('[name="target_id"]').value
+      : null;
+    if (scope !== "project" && !targetId) {
+      if (error) error.textContent = "请选择预检查目标。";
+      return;
+    }
+    const body = {};
+    body.scope = scope;
+    if (targetId) {
+      if (scope === "chapter") body.chapter_id = targetId;
+      else if (scope === "large-scene") body.large_scene_id = targetId;
+      else if (scope === "small-scene") body.small_scene_id = targetId;
+    }
+    button.disabled = true;
+    button.textContent = "正在检查…";
+    if (error) error.textContent = "";
+    const resultsSection = document.getElementById("precheck-results");
+    const resultsBody = document.getElementById("precheck-results-body");
+    if (resultsBody) resultsBody.innerHTML = '<div class="precheck-loading">正在执行预检查…</div>';
+    if (resultsSection) resultsSection.hidden = false;
+    try {
+      const payload = await request(API.projectPrecheck(projectId), {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      if (resultsBody) resultsBody.innerHTML = renderPrecheckResults(payload);
+      if (typeof showToast === "function") showToast("预检查完成");
+    } catch (requestError) {
+      if (resultsBody) resultsBody.innerHTML = `<div class="precheck-error">预检查失败：${escapeHtml(requestError.message)}</div>`;
+    } finally {
+      button.disabled = false;
+      button.textContent = "运行预检查";
+    }
+  }
+
+  function renderPrecheckResults(payload) {
+    const errors = payload.errors || payload.blockers || [];
+    const warnings = payload.warnings || [];
+    const passed = payload.passed || payload.successes || [];
+    return `
+      <div class="precheck-summary">
+        <span class="precheck-stat danger">${errors.length} 个阻塞错误</span>
+        <span class="precheck-stat warning">${warnings.length} 个警告</span>
+        <span class="precheck-stat success">${passed.length} 项通过</span>
+      </div>
+      ${errors.length ? `
+        <div class="precheck-group precheck-errors">
+          <h4>阻塞错误</h4>
+          ${errors.map((item) => renderPrecheckItem(item, "error")).join("")}
+        </div>
+      ` : ""}
+      ${warnings.length ? `
+        <div class="precheck-group precheck-warnings">
+          <h4>警告</h4>
+          ${warnings.map((item) => renderPrecheckItem(item, "warning")).join("")}
+        </div>
+      ` : ""}
+      ${passed.length ? `
+        <div class="precheck-group precheck-passed">
+          <h4>通过项</h4>
+          ${passed.map((item) => renderPrecheckItem(item, "passed")).join("")}
+        </div>
+      ` : ""}
+      ${!errors.length && !warnings.length && !passed.length ? '<p class="muted">无检查结果</p>' : ""}
+    `;
+  }
+
+  function renderPrecheckItem(item, level) {
+    const type = item.type || item.code || "未知";
+    const description = item.description || item.message || "";
+    const target = item.target || item.target_id || item.related_object || "";
+    return `
+      <div class="precheck-item precheck-item-${level}">
+        <span class="precheck-item-type">${escapeHtml(String(type))}</span>
+        <span class="precheck-item-desc">${escapeHtml(description)}</span>
+        ${target ? `<span class="precheck-item-target">${escapeHtml(String(target))}</span>` : ""}
+      </div>
+    `;
   }
 
   const specTypeLabels = {
@@ -6997,27 +8876,6 @@
 
   initLargeSceneDrag();
 
-  function renderDatabaseCard(database) {
-    const card = document.getElementById(`database-${database.environment}`);
-    if (!card) return;
-    card.classList.toggle("active", database.active);
-    card.querySelector(".database-state").textContent = database.active
-      ? database.locked
-        ? "正在使用 · 已锁定"
-        : "正在使用"
-      : "待机";
-    card.querySelector(".database-state").className = `status database-state ${database.active ? "green" : ""}`;
-    card.querySelector(".database-path").textContent = database.path;
-    card.querySelector(".database-journal").textContent = `SQLite ${database.journal_mode}`;
-    card.querySelector(".database-size").textContent = formatBytes(database.size_bytes);
-    card.querySelector(".database-events").textContent = `${database.event_count} 条`;
-    const action = card.querySelector(".database-action");
-    action.disabled = database.active;
-    action.textContent = database.active
-      ? "当前正在使用"
-      : `切换到${environmentNames[database.environment]}`;
-  }
-
   async function request(path, options) {
     const isFormData = options?.body instanceof FormData;
     const response = await fetch(path, {
@@ -7159,9 +9017,7 @@
 
   async function refreshDatabaseState() {
     try {
-      const payload = await request("/api/settings/databases");
-      payload.databases.forEach(renderDatabaseCard);
-      document.body.dataset.databaseEnvironment = payload.active_environment;
+      document.body.dataset.databaseEnvironment = "production";
       const pageKey = new URLSearchParams(window.location.search).get("page") || "projects";
       if (pageKey === "projects") {
         await renderProductionProjects();
@@ -7175,6 +9031,12 @@
         await renderMaterialDetailPage();
       } else if (pageKey === "developer") {
         // 开发进度由用户点击后按需读取，避免把文档状态写死在页面里。
+      } else if (pageKey === "workflows") {
+        await renderProductionWorkflows();
+      } else if (pageKey === "workflow-canvas") {
+        await renderProductionWorkflowCanvas();
+      } else if (pageKey === "settings") {
+        await renderProductionSettings();
       } else if (pageKey !== "settings") {
         const project = await resolveCurrentProject();
         applyProjectHeader(project, pageKey);
@@ -7183,14 +9045,1118 @@
         else applyProductionEmptyState();
       }
       const safety = document.getElementById("database-safety-status");
-      if (safety) safety.innerHTML = '<span class="status green">物理隔离正常</span>';
+      if (safety) safety.innerHTML = '<span class="status green">数据可用</span>';
       document.body.classList.remove("runtime-pending");
-      return payload;
+      return { active_environment: "production" };
     } catch (error) {
       const safety = document.getElementById("database-safety-status");
       if (safety) safety.innerHTML = '<span class="status orange">后端未连接</span>';
       document.body.classList.remove("runtime-pending");
       return null;
+    }
+  }
+
+  // ==================== 工作流画布 ====================
+
+  // 工作流画布状态：缓存草稿、图数据、插槽和节点定义，避免重复请求。
+  const workflowCanvasState = {
+    workflowId: "",
+    workflowName: "",
+    draftRevision: null,
+    isDirty: false,
+    graph: { nodes: [], links: [], groups: [], metadata: {} },
+    slots: [],
+    objectInfo: null,
+    objectInfoLoaded: false,
+    selectedNodeId: null,
+    pendingLinkFrom: null, // 新增连线时暂存输出端口 {nodeId, slot}
+    loading: false,
+  };
+
+  // 将草稿中的 normalized_graph 字符串解析为图对象，容错空值和非法 JSON。
+  function parseWorkflowGraph(draft) {
+    if (!draft) return { nodes: [], links: [], groups: [], metadata: {} };
+    const raw = draft.normalized_graph;
+    if (!raw) return { nodes: [], links: [], groups: [], metadata: {} };
+    if (typeof raw === "string") {
+      try {
+        const parsed = JSON.parse(raw);
+        return {
+          nodes: Array.isArray(parsed.nodes) ? parsed.nodes : [],
+          links: Array.isArray(parsed.links) ? parsed.links : [],
+          groups: Array.isArray(parsed.groups) ? parsed.groups : [],
+          metadata: parsed.metadata || {},
+        };
+      } catch (error) {
+        return { nodes: [], links: [], groups: [], metadata: {} };
+      }
+    }
+    if (typeof raw === "object") {
+      return {
+        nodes: Array.isArray(raw.nodes) ? raw.nodes : [],
+        links: Array.isArray(raw.links) ? raw.links : [],
+        groups: Array.isArray(raw.groups) ? raw.groups : [],
+        metadata: raw.metadata || {},
+      };
+    }
+    return { nodes: [], links: [], groups: [], metadata: {} };
+  }
+
+  // 解析草稿中的 semantic_slots_json，容错处理。
+  function parseWorkflowSlots(draft) {
+    if (!draft) return [];
+    const raw = draft.semantic_slots_json;
+    if (!raw) return [];
+    if (typeof raw === "string") {
+      try {
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed : [];
+      } catch (error) {
+        return [];
+      }
+    }
+    if (Array.isArray(raw)) return raw;
+    return [];
+  }
+
+  // 根据节点类型返回对应的颜色标识，用于节点头像和端口。
+  function workflowNodeColor(node) {
+    const type = String(node.type || "").toLowerCase();
+    if (type.includes("checkpoint") || type.includes("vae")) return "blue";
+    if (type.includes("lora")) return "purple";
+    if (type.includes("clip") || type.includes("text") || type.includes("save")) return "green";
+    if (type.includes("ksampler") || type.includes("sampler")) return "orange";
+    if (type.includes("latent") || type.includes("empty")) return "cyan";
+    return "blue";
+  }
+
+  // 估算节点高度，用于连线端口定位。头部38px + 内边距18px + 字段数*26px。
+  function workflowNodeHeight(node) {
+    const widgetCount = Array.isArray(node.widgets_values) ? node.widgets_values.length : 0;
+    const inputCount = Array.isArray(node.inputs) ? node.inputs.length : 0;
+    const outputCount = Array.isArray(node.outputs) ? node.outputs.length : 0;
+    const fieldCount = Math.max(widgetCount, inputCount, outputCount, 1);
+    return 38 + 18 + fieldCount * 26;
+  }
+
+  // 计算输入端口在节点上的 Y 坐标（相对节点左上角）。
+  function workflowInputPortY(node, slotIndex) {
+    return 38 + 8 + slotIndex * 26 + 13;
+  }
+
+  // 计算输出端口在节点上的 Y 坐标。
+  function workflowOutputPortY(node, slotIndex) {
+    return 38 + 8 + slotIndex * 26 + 13;
+  }
+
+  // 工作流画布空状态：未传入工作流 ID 时显示。
+  function workflowCanvasEmptyHTML(message) {
+    return `
+      <section class="production-empty-state">
+        <span class="production-empty-icon">WF</span>
+        <h2>未打开工作流</h2>
+        <p>${escapeHtml(message || "请从工作流库选择一个工作流进入画布。")}</p>
+        <button class="btn primary" type="button" onclick="window.location.search='?page=workflows'">返回工作流库</button>
+        <small>当前使用生产数据库 · 未加载任何演示数据</small>
+      </section>
+    `;
+  }
+
+  // 工作流画布错误状态。
+  function workflowCanvasErrorHTML(message) {
+    return `
+      <section class="production-empty-state">
+        <span class="production-empty-icon">!</span>
+        <h2>画布加载失败</h2>
+        <p>${escapeHtml(message)}</p>
+        <button class="btn soft" type="button" data-api-action="retry-workflow-canvas">重试</button>
+      </section>
+    `;
+  }
+
+  // 工作流画布工具栏：包含保存、预检查、发布、导出等操作按钮。
+  function workflowCanvasToolbarHTML(state) {
+    const dirtyBadge = state.isDirty
+      ? '<span class="chip orange">未保存</span>'
+      : '<span class="chip green">已保存</span>';
+    return `
+      <div class="toolbar" id="workflow-canvas-toolbar">
+        <button class="tool" type="button" data-api-action="workflow-undo" title="撤销">撤销</button>
+        <button class="tool" type="button" data-api-action="workflow-redo" title="重做">重做</button>
+        <button class="tool active" type="button" data-api-action="workflow-layout-ltr" title="从左到右布局">从左到右</button>
+        <button class="tool" type="button" data-api-action="workflow-focus-path" title="聚焦主路径">聚焦路径</button>
+        <span class="spacer"></span>
+        <button class="tool" type="button" data-api-action="workflow-zoom-out" title="缩小">−</button>
+        <button class="tool" type="button" data-api-action="workflow-zoom-reset" title="重置缩放">100%</button>
+        <button class="tool" type="button" data-api-action="workflow-zoom-in" title="放大">＋</button>
+        <button class="tool" type="button" data-api-action="workflow-auto-layout" title="自动整理">自动整理</button>
+        <span class="spacer"></span>
+        ${dirtyBadge}
+        <button class="tool" type="button" data-api-action="save-workflow-draft" title="保存草稿">保存</button>
+        <button class="tool" type="button" data-api-action="export-workflow" title="导出 JSON">导出</button>
+        <button class="tool" type="button" data-api-action="precheck-workflow" title="预检查">预检查</button>
+        <button class="btn small primary" type="button" data-api-action="publish-workflow" title="发布新版本">发布</button>
+      </div>
+    `;
+  }
+
+  // 节点库（左栏）：如果已加载 object_info 则按分类列出，否则使用常用节点回退。
+  function workflowCanvasPaletteHTML(objectInfo) {
+    const fallback = [
+      { type: "CheckpointLoaderSimple", name: "模型加载", color: "blue", category: "常用" },
+      { type: "LoraLoader", name: "LoRA 加载", color: "purple", category: "常用" },
+      { type: "CLIPTextEncode", name: "文本编码", color: "green", category: "常用" },
+      { type: "KSampler", name: "KSampler", color: "orange", category: "常用" },
+      { type: "EmptyLatentImage", name: "空潜空间", color: "cyan", category: "常用" },
+      { type: "VAEDecode", name: "VAE 解码", color: "blue", category: "常用" },
+      { type: "SaveImage", name: "保存图片", color: "green", category: "常用" },
+    ];
+    let groups = {};
+    if (objectInfo && typeof objectInfo === "object" && Object.keys(objectInfo).length > 0) {
+      Object.keys(objectInfo).forEach((type) => {
+        const def = objectInfo[type] || {};
+        const category = def.category || "其他";
+        if (!groups[category]) groups[category] = [];
+        groups[category].push({ type, name: def.name || type, color: "blue", category });
+      });
+    }
+    const hasObjectInfo = Object.keys(groups).length > 0;
+    if (!hasObjectInfo) {
+      groups = { 常用: fallback };
+    }
+    const groupHTML = Object.keys(groups).map((category) => {
+      const items = groups[category];
+      return `
+        <div class="palette-title">${escapeHtml(category)}${hasObjectInfo ? ` · ${items.length}` : ""}</div>
+        ${items.map((item) => `
+          <button class="palette-item" type="button" data-api-action="add-workflow-node" data-node-type="${escapeHtml(item.type)}">
+            <span class="palette-swatch ${item.color}"></span>
+            <span style="flex:1;text-align:left">${escapeHtml(item.name)}</span>
+            <span style="color:#aab1bf">＋</span>
+          </button>
+        `).join("")}
+      `;
+    }).join("");
+    return `
+      <div class="panel-body" style="display:flex;flex-direction:column;height:100%;overflow:hidden">
+        <div class="search" style="margin:10px;display:flex;align-items:center;gap:6px">
+          <span>⌕</span>
+          <input id="workflow-palette-search" type="search" placeholder="搜索节点" style="border:0;outline:0;background:transparent;flex:1;font-size:11px;color:#4d576b" />
+        </div>
+        <div class="palette-list" style="overflow-y:auto;flex:1">
+          ${groupHTML}
+        </div>
+      </div>
+    `;
+  }
+
+  // 渲染单个节点卡片，包含端口和字段。
+  function workflowNodeCardHTML(node, isSelected) {
+    const color = workflowNodeColor(node);
+    const title = escapeHtml(node.title || node.type || "未命名节点");
+    const type = escapeHtml(node.type || "unknown");
+    const x = Array.isArray(node.position) ? Number(node.position[0]) || 0 : 0;
+    const y = Array.isArray(node.position) ? Number(node.position[1]) || 0 : 0;
+    const widgets = Array.isArray(node.widgets_values) ? node.widgets_values : [];
+    const inputs = Array.isArray(node.inputs) ? node.inputs : [];
+    const outputs = Array.isArray(node.outputs) ? node.outputs : [];
+    const id = escapeHtml(node.id);
+
+    // 输入端口
+    const inputPorts = inputs.map((input, i) => {
+      const portY = workflowInputPortY(node, i);
+      return `<i class="node-port in" style="top:${portY - 5}px" data-api-action="add-workflow-link-to" data-node-id="${id}" data-slot="${i}" title="${escapeHtml(input.name || "")}:${escapeHtml(input.type || "")}"></i>`;
+    }).join("");
+    // 输出端口
+    const outputPorts = outputs.map((output, i) => {
+      const portY = workflowOutputPortY(node, i);
+      return `<i class="node-port out" style="top:${portY - 5}px" data-api-action="add-workflow-link-from" data-node-id="${id}" data-slot="${i}" title="${escapeHtml(output.name || "")}:${escapeHtml(output.type || "")}"></i>`;
+    }).join("");
+
+    // 字段：显示 widgets_values
+    const fields = widgets.map((w, i) => {
+      const value = w === null || w === undefined ? "" : String(w);
+      const display = value.length > 24 ? `${value.slice(0, 24)}…` : value;
+      return `<div class="node-field"><span class="node-field-name">参数${i}</span><span class="node-value">${escapeHtml(display)}</span></div>`;
+    }).join("");
+
+    return `
+      <div class="node-card ${isSelected ? "selected" : ""}" style="left:${x}px;top:${y}px" data-api-action="select-workflow-node" data-node-id="${id}">
+        <div class="node-head"><i class="node-type ${color}"></i>${title}</div>
+        <div class="node-body">${fields || `<div class="node-field"><span class="node-field-name">类型</span><span class="node-value">${type}</span></div>`}</div>
+        ${inputPorts}${outputPorts}
+      </div>
+    `;
+  }
+
+  // 渲染 SVG 连线：每条连线包含可见路径和不可见点击区域。
+  function workflowLinksSVG(graph) {
+    const nodeMap = {};
+    (graph.nodes || []).forEach((n) => {
+      nodeMap[String(n.id)] = n;
+    });
+    const links = graph.links || [];
+    const paths = links.map((link) => {
+      if (!Array.isArray(link) || link.length < 6) return "";
+      const linkId = link[0];
+      const fromId = String(link[1]);
+      const fromSlot = Number(link[2]) || 0;
+      const toId = String(link[3]);
+      const toSlot = Number(link[4]) || 0;
+      const type = link[5] || "";
+      const fromNode = nodeMap[fromId];
+      const toNode = nodeMap[toId];
+      if (!fromNode || !toNode) return "";
+      const fromX = (Array.isArray(fromNode.position) ? Number(fromNode.position[0]) || 0 : 0) + 184;
+      const fromY = (Array.isArray(fromNode.position) ? Number(fromNode.position[1]) || 0 : 0) + workflowOutputPortY(fromNode, fromSlot);
+      const toX = Array.isArray(toNode.position) ? Number(toNode.position[0]) || 0 : 0;
+      const toY = (Array.isArray(toNode.position) ? Number(toNode.position[1]) || 0 : 0) + workflowInputPortY(toNode, toSlot);
+      const dx = Math.max(30, Math.abs(toX - fromX) * 0.4);
+      const d = `M ${fromX} ${fromY} C ${fromX + dx} ${fromY}, ${toX - dx} ${toY}, ${toX} ${toY}`;
+      const colorClass = type === "CONDITIONING" ? "green" : type === "LATENT" ? "orange" : "";
+      return `
+        <path d="${d}" class="${colorClass}" data-link-id="${escapeHtml(linkId)}" pointer-events="none"></path>
+        <path d="${d}" fill="none" stroke="transparent" stroke-width="14" style="cursor:pointer;pointer-events:stroke" data-api-action="delete-workflow-link" data-link-id="${escapeHtml(linkId)}" title="点击删除连线"></path>
+      `;
+    }).join("");
+    return `<svg class="wf-connections" xmlns="http://www.w3.org/2000/svg">${paths}</svg>`;
+  }
+
+  // 画布（中栏）：可滚动画布区域，包含节点卡片和 SVG 连线。
+  function workflowCanvasStageHTML(graph, selectedNodeId) {
+    const nodes = graph.nodes || [];
+    if (!nodes.length) {
+      return `
+        <div class="canvas" style="overflow:auto">
+          <div class="production-empty-state" style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center">
+            <span class="production-empty-icon">WC</span>
+            <h2>画布为空</h2>
+            <p>从左侧节点库选择节点添加到画布。</p>
+          </div>
+        </div>
+      `;
+    }
+    // 计算画布尺寸：取所有节点最远位置加边距。
+    let maxWidth = 0;
+    let maxHeight = 0;
+    nodes.forEach((n) => {
+      const x = Array.isArray(n.position) ? Number(n.position[0]) || 0 : 0;
+      const y = Array.isArray(n.position) ? Number(n.position[1]) || 0 : 0;
+      const h = workflowNodeHeight(n);
+      maxWidth = Math.max(maxWidth, x + 240);
+      maxHeight = Math.max(maxHeight, y + h + 40);
+    });
+    const stageWidth = Math.max(maxWidth, 800);
+    const stageHeight = Math.max(maxHeight, 500);
+    const nodesHTML = nodes.map((n) => workflowNodeCardHTML(n, String(n.id) === String(selectedNodeId))).join("");
+    const linksHTML = workflowLinksSVG(graph);
+    return `
+      <div class="canvas" id="workflow-canvas-area" style="overflow:auto">
+        <div class="workflow-stage" style="position:relative;width:${stageWidth}px;height:${stageHeight}px;inset:auto;transform:none">
+          ${linksHTML}
+          ${nodesHTML}
+        </div>
+      </div>
+    `;
+  }
+
+  // 检查器（右栏）：显示选中节点的属性和已绑定插槽。
+  function workflowCanvasInspectorHTML(node, slots) {
+    if (!node) {
+      return `
+        <div class="panel-header"><div><div class="panel-title">检查器</div><div class="panel-sub">未选中节点</div></div></div>
+        <div class="inspector-section">
+          <div class="empty-note">点击画布中的节点查看属性，或从左侧添加节点。</div>
+        </div>
+      `;
+    }
+    const title = node.title || node.type || "未命名节点";
+    const type = node.type || "unknown";
+    const mode = Number(node.mode) || 0;
+    const widgets = Array.isArray(node.widgets_values) ? node.widgets_values : [];
+    const inputs = Array.isArray(node.inputs) ? node.inputs : [];
+    const outputs = Array.isArray(node.outputs) ? node.outputs : [];
+    const nodeId = escapeHtml(node.id);
+    // 当前节点绑定的插槽
+    const boundSlots = slots.filter((s) => String(s.node_id) === String(node.id));
+
+    const widgetsHTML = widgets.map((w, i) => {
+      const value = w === null || w === undefined ? "" : String(w);
+      const isNumber = value !== "" && !isNaN(Number(value)) && value.length < 12;
+      return `
+        <div style="margin-bottom:8px">
+          <label class="label">参数 ${i}</label>
+          <input class="modal-input" type="${isNumber ? "number" : "text"}" value="${escapeHtml(value)}" data-widget-index="${i}" style="width:100%;height:32px;font-size:11px" />
+        </div>
+      `;
+    }).join("");
+
+    const inputsHTML = inputs.map((input, i) => `
+      <div class="mini-list-item">
+        <span class="mini-list-icon">${i}</span>
+        <div class="mini-list-text">${escapeHtml(input.name || "输入")}<div class="mini-list-sub">${escapeHtml(input.type || "")}</div></div>
+      </div>
+    `).join("") || '<div class="empty-note">无输入端口</div>';
+
+    const outputsHTML = outputs.map((output, i) => `
+      <div class="mini-list-item">
+        <span class="mini-list-icon">${i}</span>
+        <div class="mini-list-text">${escapeHtml(output.name || "输出")}<div class="mini-list-sub">${escapeHtml(output.type || "")}</div></div>
+      </div>
+    `).join("") || '<div class="empty-note">无输出端口</div>';
+
+    const slotsHTML = boundSlots.length
+      ? boundSlots.map((slot) => `
+        <div class="mini-list-item">
+          <span class="mini-list-icon">◇</span>
+          <div class="mini-list-text">${escapeHtml(slot.slot_type || "插槽")}<div class="mini-list-sub">${escapeHtml(slot.slot_key || slot.display_name || "")}</div></div>
+          <button class="btn small danger-soft" type="button" data-api-action="delete-workflow-slot" data-slot-id="${escapeHtml(slot.id)}" data-slot-name="${escapeHtml(slot.slot_key || slot.display_name || "")}">删除</button>
+        </div>
+      `).join("")
+      : '<div class="empty-note">该节点尚未绑定语义插槽</div>';
+
+    return `
+      <div class="panel-header">
+        <div>
+          <div class="panel-title">${escapeHtml(title)}</div>
+          <div class="panel-sub">${escapeHtml(type)} · 节点 ${nodeId}</div>
+        </div>
+        <span class="status green"><i class="dot"></i>有效</span>
+      </div>
+      <div class="inspector-section">
+        <label class="label">节点标题</label>
+        <input class="modal-input" id="workflow-inspector-title" type="text" value="${escapeHtml(title)}" style="width:100%;height:32px;font-size:11px" />
+        <div style="height:8px"></div>
+        <label class="label">节点模式</label>
+        <select class="modal-input" id="workflow-inspector-mode" style="width:100%;height:32px;font-size:11px">
+          <option value="0" ${mode === 0 ? "selected" : ""}>激活</option>
+          <option value="2" ${mode === 2 ? "selected" : ""}>跳过</option>
+          <option value="4" ${mode === 4 ? "selected" : ""}>禁用</option>
+        </select>
+      </div>
+      <div class="inspector-section">
+        <label class="label">组件值 (widgets_values)</label>
+        ${widgetsHTML || '<div class="empty-note">无组件值</div>'}
+      </div>
+      <div class="inspector-section">
+        <label class="label">输入端口</label>
+        ${inputsHTML}
+      </div>
+      <div class="inspector-section">
+        <label class="label">输出端口</label>
+        ${outputsHTML}
+      </div>
+      <div class="inspector-section">
+        <label class="label">语义插槽</label>
+        ${slotsHTML}
+        <div style="margin-top:10px">
+          <button class="btn small soft" type="button" data-api-action="add-workflow-slot" data-node-id="${nodeId}">绑定插槽</button>
+        </div>
+      </div>
+      <div class="inspector-section" style="display:flex;gap:7px;flex-wrap:wrap">
+        <button class="btn small danger-soft" type="button" data-api-action="delete-workflow-node" data-node-id="${nodeId}">删除节点</button>
+      </div>
+    `;
+  }
+
+  // 主渲染函数：从 URL 读取工作流 ID，加载草稿并渲染三栏布局。
+  async function renderProductionWorkflowCanvas() {
+    const page = document.querySelector(".page-scroll");
+    if (!page) return;
+    const header = page.querySelector(".page-header");
+    [...page.children].forEach((child) => {
+      if (child !== header) child.remove();
+    });
+
+    const params = new URLSearchParams(window.location.search);
+    const workflowId = params.get("workflow");
+    if (!workflowId) {
+      page.insertAdjacentHTML("beforeend", workflowCanvasEmptyHTML("请从工作流库选择一个工作流进入画布。"));
+      return;
+    }
+
+    // 占位骨架
+    page.insertAdjacentHTML("beforeend", `
+      <div class="three-pane" id="workflow-canvas-root" style="grid-template-columns:206px minmax(0,1fr) 274px;height:calc(100% - 79px)">
+        <section class="panel" style="overflow:hidden"><div class="panel-header"><div><div class="panel-title">节点库</div></div></div></section>
+        <section class="panel" style="overflow:hidden"><div class="panel-header"><div><div class="panel-title">画布加载中…</div></div></div></section>
+        <section class="panel inspector" style="overflow:hidden"><div class="panel-header"><div><div class="panel-title">检查器</div></div></div></section>
+      </div>
+    `);
+
+    workflowCanvasState.workflowId = workflowId;
+    workflowCanvasState.loading = true;
+
+    // 异步加载节点定义（不阻塞画布渲染）
+    if (!workflowCanvasState.objectInfoLoaded) {
+      request(API.comfyuiObjectInfo).then((payload) => {
+        workflowCanvasState.objectInfo = payload || null;
+        workflowCanvasState.objectInfoLoaded = true;
+        renderWorkflowCanvasPalette();
+      }).catch(() => {
+        workflowCanvasState.objectInfoLoaded = true;
+        renderWorkflowCanvasPalette();
+      });
+    }
+
+    try {
+      await loadWorkflowCanvasData(workflowId);
+      // 更新 header
+      const title = header?.querySelector(".page-title");
+      const subtitle = header?.querySelector(".page-subtitle");
+      const actions = header?.querySelector(".header-actions");
+      if (title) title.textContent = workflowCanvasState.workflowName || "工作流画布";
+      const nodeCount = (workflowCanvasState.graph.nodes || []).length;
+      const revision = workflowCanvasState.draftRevision != null ? `r${workflowCanvasState.draftRevision}` : "草稿";
+      if (subtitle) subtitle.textContent = `${revision} · ${nodeCount} 节点 · ${workflowCanvasState.slots.length} 个语义插槽${workflowCanvasState.isDirty ? " · 有未保存修改" : ""}`;
+      if (actions) actions.innerHTML = '<button class="btn primary" type="button" data-api-action="save-workflow-draft">保存草稿</button>';
+      renderWorkflowCanvasContent();
+    } catch (error) {
+      const root = document.getElementById("workflow-canvas-root");
+      if (root) root.remove();
+      page.insertAdjacentHTML("beforeend", workflowCanvasErrorHTML(error.message));
+    } finally {
+      workflowCanvasState.loading = false;
+    }
+  }
+
+  // 加载工作流草稿数据并更新本地状态。
+  async function loadWorkflowCanvasData(workflowId) {
+    const draft = await request(API.workflowDraft(workflowId));
+    workflowCanvasState.workflowName = draft.workflow_name || draft.name || "工作流画布";
+    workflowCanvasState.draftRevision = draft.draft_revision != null ? draft.draft_revision : null;
+    workflowCanvasState.isDirty = Boolean(draft.is_dirty);
+    workflowCanvasState.graph = parseWorkflowGraph(draft);
+    workflowCanvasState.slots = parseWorkflowSlots(draft);
+    if (!workflowCanvasState.selectedNodeId) {
+      const first = (workflowCanvasState.graph.nodes || [])[0];
+      if (first) workflowCanvasState.selectedNodeId = first.id;
+    }
+  }
+
+  // 渲染画布全部内容（三栏），保留已选中节点。
+  function renderWorkflowCanvasContent() {
+    const root = document.getElementById("workflow-canvas-root");
+    if (!root) return;
+    const state = workflowCanvasState;
+    const selectedNode = (state.graph.nodes || []).find((n) => String(n.id) === String(state.selectedNodeId)) || null;
+    root.innerHTML = `
+      <section class="panel" id="workflow-palette-panel" style="overflow:hidden;display:flex;flex-direction:column">
+        <div class="panel-header"><div><div class="panel-title">节点库</div><div class="panel-sub">点击添加节点到画布</div></div></div>
+        ${workflowCanvasPaletteHTML(state.objectInfo)}
+      </section>
+      <section class="panel" id="workflow-canvas-panel" style="overflow:hidden;display:flex;flex-direction:column">
+        ${workflowCanvasToolbarHTML(state)}
+        ${workflowCanvasStageHTML(state.graph, state.selectedNodeId)}
+      </section>
+      <section class="panel inspector" id="workflow-inspector" style="overflow-y:auto">
+        ${workflowCanvasInspectorHTML(selectedNode, state.slots)}
+      </section>
+    `;
+    bindWorkflowInspectorEvents();
+    bindWorkflowPaletteSearch();
+  }
+
+  // 仅刷新节点库面板（object_info 加载完成后调用）。
+  function renderWorkflowCanvasPalette() {
+    const panel = document.getElementById("workflow-palette-panel");
+    if (!panel) return;
+    const header = panel.querySelector(".panel-header");
+    if (header) {
+      [...panel.children].forEach((c) => { if (c !== header) c.remove(); });
+      panel.insertAdjacentHTML("beforeend", workflowCanvasPaletteHTML(workflowCanvasState.objectInfo));
+    }
+    bindWorkflowPaletteSearch();
+  }
+
+  // 刷新画布的中栏和右栏（用于选中节点或局部更新后）。
+  function refreshWorkflowCanvasAndInspector() {
+    const canvasPanel = document.getElementById("workflow-canvas-panel");
+    if (canvasPanel) {
+      const state = workflowCanvasState;
+      canvasPanel.innerHTML = `${workflowCanvasToolbarHTML(state)}${workflowCanvasStageHTML(state.graph, state.selectedNodeId)}`;
+    }
+    const inspector = document.getElementById("workflow-inspector");
+    if (inspector) {
+      const state = workflowCanvasState;
+      const selectedNode = (state.graph.nodes || []).find((n) => String(n.id) === String(state.selectedNodeId)) || null;
+      inspector.innerHTML = workflowCanvasInspectorHTML(selectedNode, state.slots);
+      bindWorkflowInspectorEvents();
+    }
+  }
+
+  // 绑定检查器内联编辑事件：标题、模式、组件值在失焦时自动 PATCH。
+  function bindWorkflowInspectorEvents() {
+    const inspector = document.getElementById("workflow-inspector");
+    if (!inspector) return;
+    const titleInput = inspector.querySelector("#workflow-inspector-title");
+    if (titleInput) {
+      titleInput.addEventListener("blur", async () => {
+        const val = titleInput.value.trim();
+        const node = (workflowCanvasState.graph.nodes || []).find((n) => String(n.id) === String(workflowCanvasState.selectedNodeId));
+        if (!node) return;
+        if ((node.title || "") === val) return;
+        await patchWorkflowNode(node.id, { title: val });
+      });
+    }
+    const modeSelect = inspector.querySelector("#workflow-inspector-mode");
+    if (modeSelect) {
+      modeSelect.addEventListener("change", async () => {
+        const val = Number(modeSelect.value) || 0;
+        const node = (workflowCanvasState.graph.nodes || []).find((n) => String(n.id) === String(workflowCanvasState.selectedNodeId));
+        if (!node) return;
+        if ((Number(node.mode) || 0) === val) return;
+        await patchWorkflowNode(node.id, { mode: val });
+      });
+    }
+    const widgetInputs = inspector.querySelectorAll("[data-widget-index]");
+    widgetInputs.forEach((input) => {
+      input.addEventListener("blur", async () => {
+        const node = (workflowCanvasState.graph.nodes || []).find((n) => String(n.id) === String(workflowCanvasState.selectedNodeId));
+        if (!node) return;
+        const widgets = Array.isArray(node.widgets_values) ? [...node.widgets_values] : [];
+        const idx = Number(input.dataset.widgetIndex);
+        const raw = input.value;
+        // 数字字段尝试转为数字
+        let val = raw;
+        if (raw !== "" && !isNaN(Number(raw)) && raw.length < 12) val = Number(raw);
+        if (widgets[idx] === val) return;
+        widgets[idx] = val;
+        await patchWorkflowNode(node.id, { widgets_values: widgets });
+      });
+    });
+  }
+
+  // 绑定节点库搜索过滤。
+  function bindWorkflowPaletteSearch() {
+    const search = document.getElementById("workflow-palette-search");
+    if (!search) return;
+    search.addEventListener("input", () => {
+      const q = search.value.trim().toLowerCase();
+      const panel = document.getElementById("workflow-palette-panel");
+      if (!panel) return;
+      const items = panel.querySelectorAll(".palette-item");
+      items.forEach((item) => {
+        const text = item.textContent.toLowerCase();
+        item.style.display = q && !text.includes(q) ? "none" : "";
+      });
+    });
+  }
+
+  // 选中节点并刷新检查器和高亮（不重新加载后端数据）。
+  function selectWorkflowNode(nodeId) {
+    workflowCanvasState.selectedNodeId = nodeId;
+    // 仅更新节点卡片选中状态和检查器，避免完整重渲染
+    const cards = document.querySelectorAll("#workflow-canvas-area .node-card");
+    cards.forEach((card) => {
+      card.classList.toggle("selected", card.dataset.nodeId === String(nodeId));
+    });
+    const inspector = document.getElementById("workflow-inspector");
+    if (inspector) {
+      const node = (workflowCanvasState.graph.nodes || []).find((n) => String(n.id) === String(nodeId)) || null;
+      inspector.innerHTML = workflowCanvasInspectorHTML(node, workflowCanvasState.slots);
+      bindWorkflowInspectorEvents();
+    }
+  }
+
+  // PATCH 节点字段并刷新本地状态和画布。
+  async function patchWorkflowNode(nodeId, patch) {
+    try {
+      const updated = await request(API.workflowDraftNode(workflowCanvasState.workflowId, nodeId), {
+        method: "PATCH",
+        body: JSON.stringify(patch),
+      });
+      // 更新本地节点数据：优先使用后端返回值，回退到本地 patch
+      const nodes = workflowCanvasState.graph.nodes || [];
+      const idx = nodes.findIndex((n) => String(n.id) === String(nodeId));
+      if (idx >= 0) {
+        const merged = { ...nodes[idx], ...(updated || {}) };
+        if (patch.title != null) merged.title = patch.title;
+        if (patch.mode != null) merged.mode = patch.mode;
+        if (patch.widgets_values != null) merged.widgets_values = patch.widgets_values;
+        nodes[idx] = merged;
+      }
+      workflowCanvasState.isDirty = true;
+      // 刷新画布节点卡片和工具栏的未保存标记（保持检查器不动以保留焦点）
+      const canvasPanel = document.getElementById("workflow-canvas-panel");
+      if (canvasPanel) {
+        canvasPanel.innerHTML = `${workflowCanvasToolbarHTML(workflowCanvasState)}${workflowCanvasStageHTML(workflowCanvasState.graph, workflowCanvasState.selectedNodeId)}`;
+      }
+      if (typeof showToast === "function") showToast("节点已更新");
+    } catch (error) {
+      if (typeof showToast === "function") showToast(error.message);
+    }
+  }
+
+  // 保存草稿：PUT 整个 normalized_graph 到后端。
+  async function saveWorkflowDraft() {
+    if (!workflowCanvasState.workflowId) return;
+    const btn = document.querySelector('[data-api-action="save-workflow-draft"]');
+    if (btn) { btn.disabled = true; btn.textContent = "保存中…"; }
+    try {
+      await request(API.workflowDraft(workflowCanvasState.workflowId), {
+        method: "PUT",
+        body: JSON.stringify({
+          normalized_graph: JSON.stringify(workflowCanvasState.graph),
+        }),
+      });
+      workflowCanvasState.isDirty = false;
+      await loadWorkflowCanvasData(workflowCanvasState.workflowId);
+      refreshWorkflowCanvasAndInspector();
+      if (typeof showToast === "function") showToast("草稿已保存");
+    } catch (error) {
+      if (typeof showToast === "function") showToast(error.message);
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = "保存"; }
+    }
+  }
+
+  // 预检查：POST precheck 端点，弹窗显示结果。
+  async function precheckWorkflow() {
+    if (!workflowCanvasState.workflowId) return;
+    const btn = document.querySelector('[data-api-action="precheck-workflow"]');
+    if (btn) { btn.disabled = true; btn.textContent = "检查中…"; }
+    try {
+      const result = await request(API.workflowPrecheck(workflowCanvasState.workflowId), { method: "POST" });
+      const warnings = Array.isArray(result.warnings) ? result.warnings : [];
+      const errors = Array.isArray(result.errors) ? result.errors : [];
+      const ok = errors.length === 0;
+      const summary = ok
+        ? `预检查通过${warnings.length ? `，${warnings.length} 条警告` : ""}`
+        : `预检查失败：${errors.length} 条错误`;
+      if (typeof showToast === "function") showToast(summary);
+      const detail = [
+        ...errors.map((e) => `✗ ${typeof e === "string" ? e : JSON.stringify(e)}`),
+        ...warnings.map((w) => `⚠ ${typeof w === "string" ? w : JSON.stringify(w)}`),
+      ].join("\n");
+      if (detail) {
+        await confirmDialog({ title: "预检查结果", message: detail, confirmText: "知道了", cancelText: "关闭", danger: !ok });
+      }
+    } catch (error) {
+      if (typeof showToast === "function") showToast(error.message);
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = "预检查"; }
+    }
+  }
+
+  // 新增节点：POST 到草稿节点集合。
+  async function addWorkflowNode(nodeType) {
+    if (!workflowCanvasState.workflowId) return;
+    try {
+      const node = await request(API.workflowDraftNodes(workflowCanvasState.workflowId), {
+        method: "POST",
+        body: JSON.stringify({ type: nodeType }),
+      });
+      if (node && node.id) {
+        (workflowCanvasState.graph.nodes = workflowCanvasState.graph.nodes || []).push(node);
+        workflowCanvasState.selectedNodeId = node.id;
+        workflowCanvasState.isDirty = true;
+        refreshWorkflowCanvasAndInspector();
+        if (typeof showToast === "function") showToast(`节点「${nodeType}」已添加`);
+      }
+    } catch (error) {
+      if (typeof showToast === "function") showToast(error.message);
+    }
+  }
+
+  // 删除节点：确认后 DELETE，并清理本地连线和选中状态。
+  async function deleteWorkflowNode(nodeId) {
+    if (!workflowCanvasState.workflowId) return;
+    const node = (workflowCanvasState.graph.nodes || []).find((n) => String(n.id) === String(nodeId));
+    const name = node ? (node.title || node.type || "该节点") : "该节点";
+    const ok = await confirmDialog({
+      title: "删除节点",
+      message: `确定删除「${name}」吗？关联的连线也会被移除。`,
+      confirmText: "删除",
+      cancelText: "取消",
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await request(API.workflowDraftNode(workflowCanvasState.workflowId, nodeId), { method: "DELETE" });
+      workflowCanvasState.graph.nodes = (workflowCanvasState.graph.nodes || []).filter((n) => String(n.id) !== String(nodeId));
+      workflowCanvasState.graph.links = (workflowCanvasState.graph.links || []).filter((l) => {
+        return String(l[1]) !== String(nodeId) && String(l[3]) !== String(nodeId);
+      });
+      if (String(workflowCanvasState.selectedNodeId) === String(nodeId)) {
+        workflowCanvasState.selectedNodeId = (workflowCanvasState.graph.nodes[0] || {}).id || null;
+      }
+      workflowCanvasState.isDirty = true;
+      refreshWorkflowCanvasAndInspector();
+      if (typeof showToast === "function") showToast("节点已删除");
+    } catch (error) {
+      if (typeof showToast === "function") showToast(error.message);
+    }
+  }
+
+  // 新增连线：POST 到草稿连线集合，类型从源节点输出定义获取。
+  async function addWorkflowLink(fromNodeId, fromSlot, toNodeId, toSlot) {
+    if (!workflowCanvasState.workflowId) return;
+    const fromNode = (workflowCanvasState.graph.nodes || []).find((n) => String(n.id) === String(fromNodeId));
+    const outputs = fromNode && Array.isArray(fromNode.outputs) ? fromNode.outputs : [];
+    const type = (outputs[fromSlot] || {}).type || "*";
+    try {
+      const link = await request(API.workflowDraftLinks(workflowCanvasState.workflowId), {
+        method: "POST",
+        body: JSON.stringify({ from_node_id: fromNodeId, from_slot: fromSlot, to_node_id: toNodeId, to_slot: toSlot, type }),
+      });
+      if (link && Array.isArray(link) && link.length >= 6) {
+        (workflowCanvasState.graph.links = workflowCanvasState.graph.links || []).push(link);
+        workflowCanvasState.isDirty = true;
+        refreshWorkflowCanvasAndInspector();
+        if (typeof showToast === "function") showToast("连线已创建");
+      } else {
+        // 后端可能返回完整图而非单条 link，刷新数据
+        await loadWorkflowCanvasData(workflowCanvasState.workflowId);
+        refreshWorkflowCanvasAndInspector();
+        if (typeof showToast === "function") showToast("连线已创建");
+      }
+    } catch (error) {
+      if (typeof showToast === "function") showToast(error.message);
+    }
+  }
+
+  // 删除连线：确认后 DELETE。
+  async function deleteWorkflowLink(linkId) {
+    if (!workflowCanvasState.workflowId) return;
+    const ok = await confirmDialog({
+      title: "删除连线",
+      message: "确定删除这条连线吗？",
+      confirmText: "删除",
+      cancelText: "取消",
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await request(API.workflowDraftLink(workflowCanvasState.workflowId, linkId), { method: "DELETE" });
+      workflowCanvasState.graph.links = (workflowCanvasState.graph.links || []).filter((l) => String(l[0]) !== String(linkId));
+      workflowCanvasState.isDirty = true;
+      refreshWorkflowCanvasAndInspector();
+      if (typeof showToast === "function") showToast("连线已删除");
+    } catch (error) {
+      if (typeof showToast === "function") showToast(error.message);
+    }
+  }
+
+  // 新增语义插槽：PUT 到工作流插槽集合。
+  async function addWorkflowSlot(payload) {
+    if (!workflowCanvasState.workflowId) return;
+    try {
+      await request(API.workflowSlots(workflowCanvasState.workflowId), {
+        method: "PUT",
+        body: JSON.stringify(payload),
+      });
+      await loadWorkflowCanvasData(workflowCanvasState.workflowId);
+      refreshWorkflowCanvasAndInspector();
+      closeWorkflowSlotModal();
+      if (typeof showToast === "function") showToast("插槽已绑定");
+    } catch (error) {
+      if (typeof showToast === "function") showToast(error.message);
+    }
+  }
+
+  // 删除语义插槽：确认后 DELETE（后端按 slot_name 删除）。
+  async function deleteWorkflowSlot(slotId, slotName) {
+    if (!workflowCanvasState.workflowId) return;
+    const ok = await confirmDialog({
+      title: "删除插槽",
+      message: `确定删除插槽「${slotName || ""}」吗？`,
+      confirmText: "删除",
+      cancelText: "取消",
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await request(API.workflowSlot(workflowCanvasState.workflowId, slotName), { method: "DELETE" });
+      workflowCanvasState.slots = workflowCanvasState.slots.filter((s) => String(s.id) !== String(slotId));
+      refreshWorkflowCanvasAndInspector();
+      if (typeof showToast === "function") showToast("插槽已删除");
+    } catch (error) {
+      if (typeof showToast === "function") showToast(error.message);
+    }
+  }
+
+  // ==================== 发布弹窗 ====================
+  function ensureWorkflowPublishModal() {
+    let modal = document.getElementById("workflow-publish-modal");
+    if (modal) return modal;
+    modal = document.createElement("div");
+    modal.id = "workflow-publish-modal";
+    modal.className = "atelier-modal-backdrop";
+    modal.hidden = true;
+    modal.innerHTML = `
+      <section class="atelier-modal size-sm" role="dialog" aria-modal="true" aria-labelledby="workflow-publish-title">
+        <div class="atelier-modal-icon">PB</div>
+        <h2 id="workflow-publish-title">发布工作流版本</h2>
+        <p>输入版本标签，发布后可在批量跑图中使用。</p>
+        <form id="workflow-publish-form">
+          <label class="label" for="workflow-publish-label">版本标签</label>
+          <input id="workflow-publish-label" class="modal-input" name="label" maxlength="60" autocomplete="off" placeholder="例如 v1.0" required />
+          <div class="modal-error" id="workflow-publish-error" role="alert"></div>
+          <div class="modal-actions">
+            <button class="btn" type="button" data-api-action="close-workflow-publish-modal">取消</button>
+            <button class="btn primary" type="submit">发布</button>
+          </div>
+        </form>
+      </section>
+    `;
+    document.body.appendChild(modal);
+    modal.addEventListener("click", (event) => {
+      if (event.target === modal) closeWorkflowPublishModal();
+    });
+    modal.querySelector("form").addEventListener("submit", submitWorkflowPublish);
+    return modal;
+  }
+
+  function openWorkflowPublishModal() {
+    const modal = ensureWorkflowPublishModal();
+    modal.querySelector(".modal-error").textContent = "";
+    modal.querySelector('input[name="label"]').value = "";
+    modal.hidden = false;
+    requestAnimationFrame(() => {
+      modal.classList.add("show");
+      modal.querySelector('input[name="label"]').focus();
+    });
+  }
+
+  function closeWorkflowPublishModal() {
+    const modal = document.getElementById("workflow-publish-modal");
+    if (!modal) return;
+    modal.classList.remove("show");
+    window.setTimeout(() => { modal.hidden = true; }, 150);
+  }
+
+  async function submitWorkflowPublish(event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const input = form.querySelector('input[name="label"]');
+    const submit = form.querySelector('button[type="submit"]');
+    const error = form.querySelector(".modal-error");
+    const label = input.value.trim().replace(/\s+/g, " ");
+    if (!label) {
+      error.textContent = "请输入版本标签。";
+      input.focus();
+      return;
+    }
+    submit.disabled = true;
+    submit.textContent = "发布中…";
+    error.textContent = "";
+    try {
+      await request(API.workflowPublish(workflowCanvasState.workflowId), {
+        method: "POST",
+        body: JSON.stringify({ label }),
+      });
+      workflowCanvasState.isDirty = false;
+      closeWorkflowPublishModal();
+      await loadWorkflowCanvasData(workflowCanvasState.workflowId);
+      refreshWorkflowCanvasAndInspector();
+      if (typeof showToast === "function") showToast(`版本「${label}」已发布`);
+    } catch (requestError) {
+      error.textContent = requestError.message;
+      input.focus();
+    } finally {
+      submit.disabled = false;
+      submit.textContent = "发布";
+    }
+  }
+
+  // ==================== 导出弹窗 ====================
+  function ensureWorkflowExportModal() {
+    let modal = document.getElementById("workflow-export-modal");
+    if (modal) return modal;
+    modal = document.createElement("div");
+    modal.id = "workflow-export-modal";
+    modal.className = "atelier-modal-backdrop";
+    modal.hidden = true;
+    modal.innerHTML = `
+      <section class="atelier-modal size-sm" role="dialog" aria-modal="true" aria-labelledby="workflow-export-title">
+        <div class="atelier-modal-icon">EX</div>
+        <h2 id="workflow-export-title">导出工作流</h2>
+        <p>选择导出格式，下载工作流 JSON 文件。</p>
+        <form id="workflow-export-form">
+          <label class="label" for="workflow-export-format">导出格式</label>
+          <select id="workflow-export-format" class="modal-input" name="format" style="height:36px">
+            <option value="api_json">API 格式（prompt 链路）</option>
+            <option value="ui_json">UI 格式（画布节点）</option>
+          </select>
+          <div class="modal-error" id="workflow-export-error" role="alert"></div>
+          <div class="modal-actions">
+            <button class="btn" type="button" data-api-action="close-workflow-export-modal">取消</button>
+            <button class="btn primary" type="submit">导出</button>
+          </div>
+        </form>
+      </section>
+    `;
+    document.body.appendChild(modal);
+    modal.addEventListener("click", (event) => {
+      if (event.target === modal) closeWorkflowExportModal();
+    });
+    modal.querySelector("form").addEventListener("submit", submitWorkflowExport);
+    return modal;
+  }
+
+  function openWorkflowExportModal() {
+    const modal = ensureWorkflowExportModal();
+    modal.querySelector(".modal-error").textContent = "";
+    modal.querySelector('select[name="format"]').value = "api_json";
+    modal.hidden = false;
+    requestAnimationFrame(() => {
+      modal.classList.add("show");
+    });
+  }
+
+  function closeWorkflowExportModal() {
+    const modal = document.getElementById("workflow-export-modal");
+    if (!modal) return;
+    modal.classList.remove("show");
+    window.setTimeout(() => { modal.hidden = true; }, 150);
+  }
+
+  async function submitWorkflowExport(event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const format = form.querySelector('select[name="format"]').value;
+    const submit = form.querySelector('button[type="submit"]');
+    const error = form.querySelector(".modal-error");
+    submit.disabled = true;
+    submit.textContent = "导出中…";
+    error.textContent = "";
+    try {
+      const data = await request(API.workflowExport(workflowCanvasState.workflowId), {
+        method: "POST",
+        body: JSON.stringify({ format }),
+      });
+      const json = JSON.stringify(data, null, 2);
+      const blob = new Blob([json], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      const safeName = (workflowCanvasState.workflowName || "workflow").replace(/[^\w\u4e00-\u9fa5-]/g, "_");
+      a.download = `${safeName}_${format}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      closeWorkflowExportModal();
+      if (typeof showToast === "function") showToast("工作流已导出");
+    } catch (requestError) {
+      error.textContent = requestError.message;
+    } finally {
+      submit.disabled = false;
+      submit.textContent = "导出";
+    }
+  }
+
+  // ==================== 插槽绑定弹窗 ====================
+  function ensureWorkflowSlotModal() {
+    let modal = document.getElementById("workflow-slot-modal");
+    if (modal) return modal;
+    modal = document.createElement("div");
+    modal.id = "workflow-slot-modal";
+    modal.className = "atelier-modal-backdrop";
+    modal.hidden = true;
+    modal.innerHTML = `
+      <section class="atelier-modal" role="dialog" aria-modal="true" aria-labelledby="workflow-slot-title">
+        <div class="atelier-modal-icon">SL</div>
+        <h2 id="workflow-slot-title">绑定语义插槽</h2>
+        <p>选择插槽类型和绑定的节点输入。</p>
+        <form id="workflow-slot-form">
+          <label class="label" for="workflow-slot-type">插槽类型</label>
+          <select id="workflow-slot-type" class="modal-input" name="slot_type" style="height:36px">
+            <option value="positive_prompt">正向提示词</option>
+            <option value="negative_prompt">负向提示词</option>
+            <option value="character_prompt">人物提示词</option>
+            <option value="lora_name">LoRA 名称</option>
+            <option value="lora_weight">LoRA 权重</option>
+            <option value="checkpoint">Checkpoint</option>
+            <option value="vae">VAE</option>
+            <option value="seed">Seed</option>
+            <option value="width">Width</option>
+            <option value="height">Height</option>
+            <option value="batch_size">Batch Size</option>
+            <option value="output_prefix">输出文件前缀</option>
+            <option value="custom">自定义</option>
+          </select>
+          <div style="height:8px"></div>
+          <label class="label" for="workflow-slot-key">插槽键名</label>
+          <input id="workflow-slot-key" class="modal-input" name="slot_key" maxlength="80" autocomplete="off" placeholder="例如 character_a_lora" required />
+          <div style="height:8px"></div>
+          <label class="label" for="workflow-slot-input">绑定输入端口（可选）</label>
+          <select id="workflow-slot-input" class="modal-input" name="input_name" style="height:36px">
+            <option value="">不绑定具体输入</option>
+          </select>
+          <div class="modal-error" id="workflow-slot-error" role="alert"></div>
+          <div class="modal-actions">
+            <button class="btn" type="button" data-api-action="close-workflow-slot-modal">取消</button>
+            <button class="btn primary" type="submit">绑定</button>
+          </div>
+        </form>
+      </section>
+    `;
+    document.body.appendChild(modal);
+    modal.addEventListener("click", (event) => {
+      if (event.target === modal) closeWorkflowSlotModal();
+    });
+    modal.querySelector("form").addEventListener("submit", submitWorkflowSlot);
+    return modal;
+  }
+
+  function openWorkflowSlotModal(nodeId) {
+    const modal = ensureWorkflowSlotModal();
+    const error = modal.querySelector(".modal-error");
+    error.textContent = "";
+    modal.querySelector('input[name="slot_key"]').value = "";
+    modal.querySelector('select[name="slot_type"]').value = "positive_prompt";
+    // 填充当前节点的输入端口选项
+    const inputSelect = modal.querySelector('select[name="input_name"]');
+    const node = (workflowCanvasState.graph.nodes || []).find((n) => String(n.id) === String(nodeId));
+    const inputOpts = node && Array.isArray(node.inputs) ? node.inputs : [];
+    inputSelect.innerHTML = '<option value="">不绑定具体输入</option>' + inputOpts.map((inp, i) => `<option value="${escapeHtml(inp.name || "")}">${i}: ${escapeHtml(inp.name || "")} (${escapeHtml(inp.type || "")})</option>`).join("");
+    modal.dataset.nodeId = nodeId;
+    modal.hidden = false;
+    requestAnimationFrame(() => {
+      modal.classList.add("show");
+      modal.querySelector('input[name="slot_key"]').focus();
+    });
+  }
+
+  function closeWorkflowSlotModal() {
+    const modal = document.getElementById("workflow-slot-modal");
+    if (!modal) return;
+    modal.classList.remove("show");
+    window.setTimeout(() => { modal.hidden = true; }, 150);
+  }
+
+  async function submitWorkflowSlot(event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const modal = document.getElementById("workflow-slot-modal");
+    const nodeId = modal?.dataset.nodeId;
+    const slotType = form.querySelector('select[name="slot_type"]').value;
+    const slotKey = form.querySelector('input[name="slot_key"]').value.trim().replace(/\s+/g, "_");
+    const inputName = form.querySelector('select[name="input_name"]').value;
+    const submit = form.querySelector('button[type="submit"]');
+    const error = form.querySelector(".modal-error");
+    if (!slotKey) {
+      error.textContent = "请输入插槽键名。";
+      return;
+    }
+    submit.disabled = true;
+    submit.textContent = "绑定中…";
+    error.textContent = "";
+    try {
+      await addWorkflowSlot({
+        node_id: nodeId,
+        slot_type: slotType,
+        slot_key: slotKey,
+        input_name: inputName || null,
+        display_name: slotKey,
+      });
+    } catch (requestError) {
+      error.textContent = requestError.message;
+    } finally {
+      submit.disabled = false;
+      submit.textContent = "绑定";
     }
   }
 
@@ -7769,35 +10735,357 @@
       return;
     }
 
+    // 工作流库相关操作
+    if (button.dataset.apiAction === "create-workflow") {
+      openWorkflowCreateModal();
+      return;
+    }
+
+    if (button.dataset.apiAction === "close-workflow-modal") {
+      closeWorkflowCreateModal();
+      return;
+    }
+
+    if (button.dataset.apiAction === "import-workflow-json") {
+      openWorkflowImportModal();
+      return;
+    }
+
+    if (button.dataset.apiAction === "close-workflow-import-modal") {
+      closeWorkflowImportModal();
+      return;
+    }
+
+    if (button.dataset.apiAction === "extract-workflow-from-image") {
+      openWorkflowImagePicker();
+      return;
+    }
+
+    if (button.dataset.apiAction === "open-workflow") {
+      const wfId = button.dataset.workflowId;
+      if (wfId) {
+        const params = new URLSearchParams();
+        params.set("page", "workflow-canvas");
+        params.set("workflow", wfId);
+        window.location.search = `?${params.toString()}`;
+      }
+      return;
+    }
+
+    if (button.dataset.apiAction === "archive-workflow") {
+      await archiveWorkflow(button.dataset.workflowId, button.dataset.workflowName);
+      return;
+    }
+
+    if (button.dataset.apiAction === "restore-workflow") {
+      await restoreWorkflow(button.dataset.workflowId, button.dataset.workflowName);
+      return;
+    }
+
+    if (button.dataset.apiAction === "copy-workflow") {
+      await copyWorkflow(button.dataset.workflowId, button.dataset.workflowName);
+      return;
+    }
+
+    if (button.dataset.apiAction === "delete-workflow") {
+      await deleteWorkflow(button.dataset.workflowId, button.dataset.workflowName);
+      return;
+    }
+
+    if (button.dataset.apiAction === "retry-workflows") {
+      await loadWorkflowsList(false);
+      return;
+    }
+
+    if (button.dataset.apiAction === "load-more-workflows") {
+      await loadWorkflowsList(true);
+      return;
+    }
+
+    // ==================== 工作流画布操作 ====================
+    if (button.dataset.apiAction === "retry-workflow-canvas") {
+      await renderProductionWorkflowCanvas();
+      return;
+    }
+
+    if (button.dataset.apiAction === "save-workflow-draft") {
+      await saveWorkflowDraft();
+      return;
+    }
+
+    if (button.dataset.apiAction === "precheck-workflow") {
+      await precheckWorkflow();
+      return;
+    }
+
+    if (button.dataset.apiAction === "publish-workflow") {
+      openWorkflowPublishModal();
+      return;
+    }
+
+    if (button.dataset.apiAction === "close-workflow-publish-modal") {
+      closeWorkflowPublishModal();
+      return;
+    }
+
+    if (button.dataset.apiAction === "export-workflow") {
+      openWorkflowExportModal();
+      return;
+    }
+
+    if (button.dataset.apiAction === "close-workflow-export-modal") {
+      closeWorkflowExportModal();
+      return;
+    }
+
+    if (button.dataset.apiAction === "add-workflow-node") {
+      await addWorkflowNode(button.dataset.nodeType);
+      return;
+    }
+
+    if (button.dataset.apiAction === "delete-workflow-node") {
+      await deleteWorkflowNode(button.dataset.nodeId);
+      return;
+    }
+
+    if (button.dataset.apiAction === "select-workflow-node") {
+      selectWorkflowNode(button.dataset.nodeId);
+      return;
+    }
+
+    // 点击输出端口：暂存为连线起点
+    if (button.dataset.apiAction === "add-workflow-link-from") {
+      workflowCanvasState.pendingLinkFrom = {
+        nodeId: button.dataset.nodeId,
+        slot: Number(button.dataset.slot) || 0,
+      };
+      if (typeof showToast === "function") showToast("已选择输出端口，点击输入端口完成连线");
+      return;
+    }
+
+    // 点击输入端口：若已有起点则创建连线
+    if (button.dataset.apiAction === "add-workflow-link-to") {
+      if (!workflowCanvasState.pendingLinkFrom) {
+        if (typeof showToast === "function") showToast("请先点击一个输出端口");
+        return;
+      }
+      const from = workflowCanvasState.pendingLinkFrom;
+      workflowCanvasState.pendingLinkFrom = null;
+      await addWorkflowLink(from.nodeId, from.slot, button.dataset.nodeId, Number(button.dataset.slot) || 0);
+      return;
+    }
+
+    if (button.dataset.apiAction === "delete-workflow-link") {
+      await deleteWorkflowLink(button.dataset.linkId);
+      return;
+    }
+
+    if (button.dataset.apiAction === "add-workflow-slot") {
+      openWorkflowSlotModal(button.dataset.nodeId);
+      return;
+    }
+
+    if (button.dataset.apiAction === "delete-workflow-slot") {
+      await deleteWorkflowSlot(button.dataset.slotId, button.dataset.slotName);
+      return;
+    }
+
+    if (button.dataset.apiAction === "close-workflow-slot-modal") {
+      closeWorkflowSlotModal();
+      return;
+    }
+
+    // 工具栏 UI-only 操作（暂未对接后端）
+    if (
+      button.dataset.apiAction === "workflow-undo" ||
+      button.dataset.apiAction === "workflow-redo" ||
+      button.dataset.apiAction === "workflow-layout-ltr" ||
+      button.dataset.apiAction === "workflow-focus-path" ||
+      button.dataset.apiAction === "workflow-zoom-in" ||
+      button.dataset.apiAction === "workflow-zoom-out" ||
+      button.dataset.apiAction === "workflow-zoom-reset" ||
+      button.dataset.apiAction === "workflow-auto-layout"
+    ) {
+      if (typeof showToast === "function") showToast("该操作暂未开放");
+      return;
+    }
+
+    // ComfyUI 实例管理相关操作
+    if (button.dataset.apiAction === "add-comfyui-instance") {
+      openComfyuiInstanceAddModal();
+      return;
+    }
+
+    if (button.dataset.apiAction === "close-comfyui-instance-modal") {
+      closeComfyuiInstanceModal();
+      return;
+    }
+
+    if (button.dataset.apiAction === "edit-comfyui-instance") {
+      openComfyuiInstanceEditModal(button.dataset.instanceId, button.dataset.instanceName);
+      return;
+    }
+
+    if (button.dataset.apiAction === "delete-comfyui-instance") {
+      await deleteComfyuiInstance(button.dataset.instanceId, button.dataset.instanceName);
+      return;
+    }
+
+    if (button.dataset.apiAction === "activate-comfyui-instance") {
+      await activateComfyuiInstance(button.dataset.instanceId, button.dataset.instanceName);
+      return;
+    }
+
+    if (button.dataset.apiAction === "test-comfyui-instance") {
+      await testComfyuiInstance(button.dataset.instanceId, button.dataset.instanceName);
+      return;
+    }
+
+    if (button.dataset.apiAction === "sync-comfyui-instance") {
+      await syncComfyuiInstance(button.dataset.instanceId, button.dataset.instanceName);
+      return;
+    }
+
+    if (button.dataset.apiAction === "discover-comfyui-instances") {
+      await discoverComfyuiInstances();
+      return;
+    }
+
+    if (button.dataset.apiAction === "retry-comfyui-instances") {
+      await loadComfyuiInstances();
+      return;
+    }
+
+    if (button.dataset.apiAction === "add-discovered-comfyui") {
+      // 把发现的实例预填到添加弹窗中。
+      openComfyuiInstanceAddModal();
+      const modal = document.getElementById("comfyui-instance-modal");
+      if (modal) {
+        if (button.dataset.url) modal.querySelector('input[name="http_url"]').value = button.dataset.url;
+        if (button.dataset.name) modal.querySelector('input[name="name"]').value = button.dataset.name;
+      }
+      return;
+    }
+
+    if (button.dataset.apiAction === "open-settings-from-status") {
+      // 顶部状态指示器点击跳转到设置页。
+      const params = new URLSearchParams(window.location.search);
+      params.set("page", "settings");
+      window.location.search = `?${params.toString()}`;
+      return;
+    }
+
     if (button.dataset.apiAction === "close-rename-modal") {
       closeRenameModal();
       return;
     }
 
-    if (button.dataset.apiAction === "verify-isolation") {
-      button.disabled = true;
-      const originalText = button.textContent;
-      button.textContent = "正在验证…";
-      try {
-        const result = await request("/api/settings/databases/verify-isolation", {
-          method: "POST",
-        });
-        const message = `验证通过：测试库增加 1 条验证记录，生产库保持 ${result.production_rows_after} 条不变。`;
-        const output = document.getElementById("database-result");
-        if (output) {
-          output.textContent = message;
-          output.classList.add("success");
-        }
-        await refreshDatabaseState();
-        if (typeof showToast === "function") showToast("生产库与测试库隔离验证通过");
-      } catch (error) {
-        const output = document.getElementById("database-result");
-        if (output) output.textContent = `验证失败：${error.message}`;
-        if (typeof showToast === "function") showToast(error.message);
-      } finally {
-        button.disabled = false;
-        button.textContent = originalText;
+    // ==================== 分支管理action ====================
+    if (button.dataset.apiAction === "manage-branches") {
+      await openBranchModal(button.dataset.projectId);
+      return;
+    }
+
+    if (button.dataset.apiAction === "close-branch-modal") {
+      if (button.dataset.mode === "cancel-edit") {
+        // 取消编辑：刷新分支列表恢复原卡片
+        const modal = document.getElementById("branch-manage-modal");
+        const projectId = modal?.dataset.projectId;
+        if (projectId) await refreshBranchList(projectId);
+        return;
       }
+      closeBranchModal();
+      return;
+    }
+
+    if (button.dataset.apiAction === "create-branch") {
+      await submitCreateBranch(button);
+      return;
+    }
+
+    if (button.dataset.apiAction === "edit-branch") {
+      if (button.dataset.mode === "save") {
+        await submitEditBranch(button);
+      } else {
+        startEditBranch(button);
+      }
+      return;
+    }
+
+    if (button.dataset.apiAction === "delete-branch") {
+      await deleteBranch(button.dataset.branchId, button.dataset.branchName || "未命名分支");
+      return;
+    }
+
+    if (button.dataset.apiAction === "toggle-branch-active") {
+      await toggleBranchActive(
+        button.dataset.branchId,
+        button.dataset.branchActive === "1",
+        button.dataset.branchName || "未命名分支"
+      );
+      return;
+    }
+
+    if (button.dataset.apiAction === "add-branch-override") {
+      if (button.dataset.mode === "save") {
+        await submitAddBranchOverride(button);
+      } else {
+        await showBranchOverrides(button.dataset.branchId, button.dataset.branchName || "");
+      }
+      return;
+    }
+
+    if (button.dataset.apiAction === "delete-branch-override") {
+      await deleteBranchOverride(button.dataset.overrideId);
+      return;
+    }
+
+    // ==================== 快照action ====================
+    if (button.dataset.apiAction === "show-snapshots") {
+      await openSnapshotModal(button.dataset.projectId);
+      return;
+    }
+
+    if (button.dataset.apiAction === "close-snapshot-modal") {
+      closeSnapshotModal();
+      return;
+    }
+
+    if (button.dataset.apiAction === "create-snapshot") {
+      await submitCreateSnapshot(button);
+      return;
+    }
+
+    if (button.dataset.apiAction === "restore-snapshot") {
+      await restoreSnapshot(button.dataset.snapshotId, button.dataset.snapshotLabel || "未命名");
+      return;
+    }
+
+    // ==================== 撤销重做action ====================
+    if (button.dataset.apiAction === "undo-operation") {
+      await undoLastOperation(button.dataset.projectId);
+      return;
+    }
+
+    if (button.dataset.apiAction === "redo-operation") {
+      await redoLastOperation(button.dataset.projectId);
+      return;
+    }
+
+    // ==================== 预检查action ====================
+    if (button.dataset.apiAction === "run-precheck") {
+      openPrecheckModal(button.dataset.projectId);
+      return;
+    }
+
+    if (button.dataset.apiAction === "close-precheck-modal") {
+      closePrecheckModal();
+      return;
+    }
+
+    if (button.dataset.apiAction === "execute-precheck") {
+      await executePrecheck(button);
+      return;
     }
   });
 
@@ -7807,9 +11095,23 @@
     if (event.target.closest("button, a, input, select, textarea")) return;
     if (card.classList.contains("real-project-trash-card")) return;
     if (card.classList.contains("real-project-card-skeleton")) return;
+    // 工作流卡片由独立处理器接管，避免误跳到项目概览。
+    if (card.classList.contains("real-workflow-card")) return;
     const params = new URLSearchParams();
     params.set("page", "overview");
     params.set("project", card.dataset.projectId);
+    window.location.search = `?${params.toString()}`;
+  });
+
+  // 工作流卡片点击：跳转到工作流画布。
+  document.addEventListener("click", (event) => {
+    const card = event.target.closest(".real-workflow-card");
+    if (!card || event.target.closest("button, a, input, select, textarea")) return;
+    const wfId = card.dataset.workflowId;
+    if (!wfId) return;
+    const params = new URLSearchParams();
+    params.set("page", "workflow-canvas");
+    params.set("workflow", wfId);
     window.location.search = `?${params.toString()}`;
   });
 
@@ -7854,6 +11156,15 @@
       closeMaterialCreateModal();
       closeMaterialCopyModal();
       closeMaterialPageModal();
+      closeWorkflowCreateModal();
+      closeWorkflowImportModal();
+      closeComfyuiInstanceModal();
+      closeWorkflowPublishModal();
+      closeWorkflowExportModal();
+      closeWorkflowSlotModal();
+      closeBranchModal();
+      closeSnapshotModal();
+      closePrecheckModal();
     }
   });
 
