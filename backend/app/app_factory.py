@@ -3871,6 +3871,17 @@ def create_app(
             "project": project,
         }
 
+    @app.get("/api/projects/{project_id}/deletion-impact")
+    def get_project_deletion_impact(project_id: str) -> dict[str, object]:
+        """预览项目删除影响范围,供前端确认弹窗展示受影响的资源计数与告警。"""
+        impact = manager.get_project_deletion_impact(project_id)
+        if impact is None:
+            raise HTTPException(status_code=404, detail="项目不存在。")
+        return {
+            "database_environment": manager.active_environment,
+            "impact": impact,
+        }
+
     @app.delete("/api/projects/{project_id}/permanent")
     def permanent_delete_project(project_id: str) -> dict[str, object]:
         cover_dir = manager.data_root / "projects" / project_id

@@ -549,5 +549,144 @@ class ProjectCoverTests(IsolatedTestCase):
         self.assertFalse(cover_dir.exists())
 
 
+class ProjectDeletionImpactTests(IsolatedTestCase):
+    """项目删除影响预览 API(MOD-01 补齐)的验收测试。"""
+
+    def test_impact_returns_404_for_missing_project(self) -> None:
+        response = self.client.get("/api/projects/does-not-exist/deletion-impact")
+        self.assertEqual(response.status_code, 404)
+
+    def test_impact_for_empty_project(self) -> None:
+        create = self.client.post("/api/projects", json={"name": "空项目"})
+        project_id = create.json()["project"]["id"]
+        response = self.client.get(f"/api/projects/{project_id}/deletion-impact")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["database_environment"], "test")
+        impact = body["impact"]
+        self.assertEqual(impact["project"]["id"], project_id)
+        self.assertEqual(impact["project"]["name"], "空项目")
+        # 空项目所有计数为 0
+        counts = impact["counts"]
+        for field in (
+            "chapters",
+            "large_scenes",
+            "small_scenes",
+            "shot_pages",
+            "linked_materials",
+            "characters",
+            "large_scene_branches",
+            "small_scene_branches",
+            "snapshots",
+            "operations",
+            "batches",
+            "tasks",
+            "image_instances",
+            "files",
+        ):
+            self.assertEqual(counts[field], 0, f"{field} 应为 0")
+        # 总计受影响为 0
+        self.assertEqual(impact["totals"]["affected"], 0)
+        # 空项目应给出"可安全删除"告警
+        self.assertTrue(
+            any("可安全删除" in w for w in impact["warnings"]),
+            f"应包含可安全删除告警,实际: {impact['warnings']}",
+        )
+
+    def test_impact_includes_structure_counts(self) -> None:
+        """包含章节/大场景/小场景/分镜页的项目,影响计数应反映这些结构。"""
+        create = self.client.post("/api/projects", json={"name": "结构项目"})
+        project_id = create.json()["project"]["id"]
+        chapter = self.client.post(
+            f"/api/projects/{project_id}/chapters", json={"name": "第一章"}
+        ).json()["chapter"]
+        large_scene = self.client.post(
+            f"/api/chapters/{chapter['id']}/large-scenes", json={"name": "大场景 A"}
+        ).json()["large_scene"]
+        small_scene = self.client.post(
+            f"/api/large-scenes/{large_scene['id']}/small-scenes",
+            json={"name": "小场景 1"},
+        ).json()["small_scene"]
+        self.client.post(
+            f"/api/small-scenes/{small_scene['id']}/shot-pages",
+            json={"name": "分镜页 1"},
+        )
+
+        response = self.client.get(f"/api/projects/{project_id}/deletion-impact")
+        self.assertEqual(response.status_code, 200)
+        counts = response.json()["impact"]["counts"]
+        self.assertEqual(counts["chapters"], 1)
+        self.assertEqual(counts["large_scenes"], 1)
+        self.assertEqual(counts["small_scenes"], 1)
+        self.assertEqual(counts["shot_pages"], 1)
+        self.assertEqual(response.json()["impact"]["totals"]["structural"], 4)
+
+    def test_impact_includes_asset_links(self) -> None:
+        """项目关联人物后,影响计数应反映关联的资产。"""
+        create = self.client.post("/api/projects", json={"name": "资产项目"})
+        project_id = create.json()["project"]["id"]
+        character = self.client.post(
+            "/api/characters", json={"name": "主角", "source": "original"}
+        ).json()["character"]
+        self.client.post(f"/api/projects/{project_id}/characters/{character['id']}")
+
+        response = self.client.get(f"/api/projects/{project_id}/deletion-impact")
+        counts = response.json()["impact"]["counts"]
+        self.assertEqual(counts["characters"], 1)
+        self.assertEqual(response.json()["impact"]["totals"]["assets"], 1)
+
+    def test_impact_includes_history(self) -> None:
+        """创建剧本快照后,影响计数应包含快照与操作历史。"""
+        create = self.client.post("/api/projects", json={"name": "快照项目"})
+        project_id = create.json()["project"]["id"]
+        self.client.post(
+            f"/api/projects/{project_id}/snapshots", json={"label": "v1"}
+        )
+
+        response = self.client.get(f"/api/projects/{project_id}/deletion-impact")
+        counts = response.json()["impact"]["counts"]
+        self.assertGreaterEqual(counts["snapshots"], 1)
+        self.assertGreaterEqual(response.json()["impact"]["totals"]["history"], 1)
+
+    def test_impact_warnings_for_soft_deleted_project(self) -> None:
+        """已软删除项目再次查询影响时,应提示本次为永久删除。"""
+        create = self.client.post("/api/projects", json={"name": "回收站项目"})
+        project_id = create.json()["project"]["id"]
+        self.client.delete(f"/api/projects/{project_id}")  # 软删除
+
+        response = self.client.get(f"/api/projects/{project_id}/deletion-impact")
+        self.assertEqual(response.status_code, 200)
+        impact = response.json()["impact"]
+        self.assertIsNotNone(impact["project"]["deleted_at"])
+        self.assertTrue(
+            any("永久删除" in w for w in impact["warnings"]),
+            f"应包含永久删除告警,实际: {impact['warnings']}",
+        )
+
+    def test_impact_warnings_when_files_exist(self) -> None:
+        """项目存在文件记录时,应给出文件清理告警。"""
+        create = self.client.post("/api/projects", json={"name": "文件项目"})
+        project_id = create.json()["project"]["id"]
+        # 直接通过 manager 注入一条 file 记录,模拟生成产物
+        with self.manager.connection("test") as conn:
+            from uuid import uuid4
+
+            file_id = str(uuid4())
+            conn.execute(
+                "INSERT INTO files (id, project_id, relative_path, original_filename, "
+                "content_hash, size_bytes, mime_type) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (file_id, project_id, "test.png", "test.png", "abc", 100, "image/png"),
+            )
+
+        response = self.client.get(f"/api/projects/{project_id}/deletion-impact")
+        impact = response.json()["impact"]
+        self.assertEqual(impact["counts"]["files"], 1)
+        self.assertTrue(
+            any("文件" in w for w in impact["warnings"]),
+            f"应包含文件清理告警,实际: {impact['warnings']}",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
