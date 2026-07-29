@@ -4996,6 +4996,219 @@ class DatabaseManager:
                     count += 1
         return count
 
+    def batch_paste_spec_values(
+        self,
+        character_id: str,
+        entries: list[dict[str, object]],
+        *,
+        apply_variant_defaults: bool = False,
+        dry_run: bool = False,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        """Paste spec values by (variant_id, spec_id) coordinates.
+
+        Each entry must contain ``variant_id`` and ``spec_id`` and may carry
+        ``prompt``, ``lora_name``, ``lora_weight``, ``model_override``,
+        ``notes``. When ``apply_variant_defaults`` is true, empty lora/model
+        fields are filled from the variant's default_* columns. When
+        ``dry_run`` is true, no rows are written and a preview is returned.
+        """
+        target_environment = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        preview: list[dict[str, object]] = []
+        applied = 0
+        skipped = 0
+        with self._lock, self.connection(target_environment) as connection:
+            character = connection.execute(
+                "SELECT id FROM characters WHERE id = ?",
+                (character_id,),
+            ).fetchone()
+            if character is None:
+                raise ValueError("人物不存在。")
+            variant_defaults: dict[str, dict[str, object]] = {}
+            for entry in entries:
+                variant_id = entry.get("variant_id")
+                spec_id = entry.get("spec_id")
+                if not variant_id or not spec_id:
+                    skipped += 1
+                    preview.append({
+                        "variant_id": variant_id,
+                        "spec_id": spec_id,
+                        "status": "skipped",
+                        "reason": "missing variant_id or spec_id",
+                    })
+                    continue
+                existing = connection.execute(
+                    "SELECT id, prompt, lora_name, lora_weight, model_override, notes "
+                    "FROM character_spec_values "
+                    "WHERE variant_id = ? AND spec_id = ?",
+                    (variant_id, spec_id),
+                ).fetchone()
+                if existing is None:
+                    skipped += 1
+                    preview.append({
+                        "variant_id": variant_id,
+                        "spec_id": spec_id,
+                        "status": "skipped",
+                        "reason": "spec value row not found",
+                    })
+                    continue
+                if apply_variant_defaults and variant_id not in variant_defaults:
+                    vd = connection.execute(
+                        "SELECT default_prompt, default_lora_name, "
+                        "default_lora_weight, default_model_override "
+                        "FROM character_variants WHERE id = ?",
+                        (variant_id,),
+                    ).fetchone()
+                    variant_defaults[variant_id] = dict(vd) if vd else {}
+                vd = variant_defaults.get(variant_id, {})
+                prompt = entry.get("prompt")
+                if prompt is None and apply_variant_defaults:
+                    prompt = vd.get("default_prompt") or existing["prompt"]
+                lora_name = entry.get("lora_name")
+                if lora_name is None and apply_variant_defaults:
+                    lora_name = vd.get("default_lora_name") or existing["lora_name"]
+                lora_weight = entry.get("lora_weight")
+                if lora_weight is None and apply_variant_defaults:
+                    lw = vd.get("default_lora_weight")
+                    lora_weight = lw if lw is not None else existing["lora_weight"]
+                model_override = entry.get("model_override")
+                if model_override is None and apply_variant_defaults:
+                    model_override = vd.get("default_model_override") or existing["model_override"]
+                notes = entry.get("notes")
+                if lora_weight is not None and (lora_weight < 0 or lora_weight > 2):
+                    raise ValueError("LoRA 权重必须在 0 到 2 之间。")
+                snapshot = {
+                    "spec_value_id": existing["id"],
+                    "variant_id": variant_id,
+                    "spec_id": spec_id,
+                    "prompt": prompt if prompt is not None else existing["prompt"],
+                    "lora_name": lora_name if lora_name is not None else existing["lora_name"],
+                    "lora_weight": lora_weight if lora_weight is not None else existing["lora_weight"],
+                    "model_override": model_override if model_override is not None else existing["model_override"],
+                    "notes": notes if notes is not None else existing["notes"],
+                }
+                if dry_run:
+                    preview.append({"status": "would_update", **snapshot})
+                    applied += 1
+                    continue
+                sets: list[str] = []
+                params: list[object] = []
+                if prompt is not None:
+                    sets.append("prompt = ?")
+                    params.append(prompt)
+                if lora_name is not None:
+                    sets.append("lora_name = ?")
+                    params.append(lora_name)
+                if lora_weight is not None:
+                    sets.append("lora_weight = ?")
+                    params.append(lora_weight)
+                if model_override is not None:
+                    sets.append("model_override = ?")
+                    params.append(model_override)
+                if notes is not None:
+                    sets.append("notes = ?")
+                    params.append(notes)
+                if sets:
+                    sets.append("updated_at = ?")
+                    params.extend([now, existing["id"]])
+                    connection.execute(
+                        f"UPDATE character_spec_values SET {', '.join(sets)} WHERE id = ?",
+                        params,
+                    )
+                preview.append({"status": "updated", **snapshot})
+                applied += 1
+        return {
+            "applied": applied,
+            "skipped": skipped,
+            "dry_run": dry_run,
+            "entries": preview,
+        }
+
+    def check_spec_completeness(
+        self,
+        character_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        """Check required spec completeness and report affected shot pages.
+
+        Returns missing required entries (variant × spec) plus the shot pages
+        that reference the character and would be blocked by each gap.
+        """
+        target_environment = environment or self._active_environment
+        with self.connection(target_environment) as connection:
+            character = connection.execute(
+                "SELECT id, name FROM characters WHERE id = ?",
+                (character_id,),
+            ).fetchone()
+            if character is None:
+                raise ValueError("人物不存在。")
+            spec_rows = connection.execute(
+                "SELECT id, spec_type, custom_label, is_required, default_value, sort_order "
+                "FROM specs ORDER BY sort_order ASC, created_at ASC"
+            ).fetchall()
+            variant_rows = connection.execute(
+                "SELECT id, name FROM character_variants "
+                "WHERE character_id = ? AND archived_at IS NULL "
+                "ORDER BY sort_order ASC",
+                (character_id,),
+            ).fetchall()
+            csv_rows = connection.execute(
+                "SELECT csv.variant_id, csv.spec_id, csv.prompt, csv.lora_name "
+                "FROM character_spec_values csv "
+                "JOIN character_variants cv ON cv.id = csv.variant_id "
+                "WHERE cv.character_id = ? AND cv.archived_at IS NULL",
+                (character_id,),
+            ).fetchall()
+            page_rows = connection.execute(
+                """
+                SELECT spc.variant_id, sp.id AS shot_page_id, sp.title AS shot_page_title,
+                       ss.name AS small_scene_name
+                FROM shot_page_characters spc
+                JOIN shot_pages sp ON sp.id = spc.shot_page_id
+                JOIN small_scenes ss ON ss.id = sp.small_scene_id
+                WHERE spc.character_id = ?
+                ORDER BY sp.title ASC
+                """,
+                (character_id,),
+            ).fetchall()
+        values: dict[str, dict[str, dict[str, object]]] = {
+            vr["id"]: {} for vr in variant_rows
+        }
+        for csv in csv_rows:
+            values.setdefault(csv["variant_id"], {})[csv["spec_id"]] = {
+                "prompt": csv["prompt"],
+                "lora_name": csv["lora_name"],
+            }
+        pages_by_variant: dict[str, list[dict[str, object]]] = {}
+        for pr in page_rows:
+            pages_by_variant.setdefault(pr["variant_id"], []).append({
+                "shot_page_id": pr["shot_page_id"],
+                "shot_page_title": pr["shot_page_title"],
+                "small_scene_name": pr["small_scene_name"],
+            })
+        required_specs = [s for s in spec_rows if s["is_required"]]
+        missing_required: list[dict[str, object]] = []
+        for vr in variant_rows:
+            affected_pages = pages_by_variant.get(vr["id"], [])
+            for sp in required_specs:
+                v = values.get(vr["id"], {}).get(sp["id"])
+                if v is None or (not v.get("prompt") and not v.get("lora_name")):
+                    missing_required.append({
+                        "variant_id": vr["id"],
+                        "variant_name": vr["name"],
+                        "spec_id": sp["id"],
+                        "spec_label": sp["custom_label"] or sp["spec_type"],
+                        "affected_shot_pages": affected_pages,
+                    })
+        return {
+            "character_id": character_id,
+            "is_complete": len(missing_required) == 0,
+            "missing_required": missing_required,
+            "required_spec_count": len(required_specs),
+            "variant_count": len(variant_rows),
+        }
+
     # ── Character Spec Values ───────────────────────────────────
 
     def get_character_spec_value(
