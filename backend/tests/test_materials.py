@@ -124,21 +124,23 @@ class MaterialsApiTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 422)
 
-    def test_same_type_same_name_rejected_409(self) -> None:
+    def test_same_type_same_name_allowed(self) -> None:
+        """v0.5.2: 去除 UNIQUE(material_type, name) 约束，支持复制场景。"""
         self._create_material(name="同名素材", material_type="scene")
         response = self.client.post(
             "/api/materials",
             json={"name": "同名素材", "material_type": "scene", "content": "正文"},
         )
-        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.status_code, 201)
 
-    def test_case_insensitive_same_name_rejected_409(self) -> None:
+    def test_case_insensitive_same_name_allowed(self) -> None:
+        """v0.5.2: 同名素材允许存在（大小写不敏感）。"""
         self._create_material(name="TestMaterial", material_type="scene")
         response = self.client.post(
             "/api/materials",
             json={"name": "testmaterial", "material_type": "scene", "content": "正文"},
         )
-        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.status_code, 201)
 
     def test_different_type_allows_same_name(self) -> None:
         self._create_material(name="同名素材", material_type="scene")
@@ -198,14 +200,15 @@ class MaterialsApiTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 404)
 
-    def test_patch_duplicate_name_returns_409(self) -> None:
+    def test_patch_duplicate_name_allowed(self) -> None:
+        """v0.5.2: 同名素材允许存在，改名到已有名称不再冲突。"""
         self._create_material(name="素材A", material_type="scene")
         material_b = self._create_material(name="素材B", material_type="scene")
         response = self.client.patch(
             f"/api/materials/{material_b['id']}",
             json={"name": "素材A"},
         )
-        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.status_code, 200)
 
     def test_delete_material(self) -> None:
         created = self._create_material()
@@ -378,7 +381,7 @@ class MaterialsApiTests(unittest.TestCase):
 
     def test_delete_material_cascades_tag_links(self) -> None:
         created = self._create_material(tags=["唯一标签"])
-        self.client.delete(f"/api/materials/{created['id']}")
+        self.client.delete(f"/api/materials/{created['id']}/permanent")
         # Tag still exists in tag table but no link
         response = self.client.get("/api/material-tags?q=唯一")
         self.assertEqual(response.status_code, 200)
@@ -408,7 +411,7 @@ class MaterialsApiTests(unittest.TestCase):
     def test_tag_suggestions_no_orphan_tags(self) -> None:
         # Create and delete to leave orphan tag
         created = self._create_material(tags=["孤儿标签"])
-        self.client.delete(f"/api/materials/{created['id']}")
+        self.client.delete(f"/api/materials/{created['id']}/permanent")
         response = self.client.get("/api/material-tags?q=孤儿")
         self.assertEqual(response.json()["items"], [])
 
@@ -519,7 +522,7 @@ class MaterialsApiTests(unittest.TestCase):
         )
         material_dir = self.manager.data_root / "materials" / material["id"]
         self.assertTrue(material_dir.exists())
-        self.client.delete(f"/api/materials/{material['id']}")
+        self.client.delete(f"/api/materials/{material['id']}/permanent")
         self.assertFalse(material_dir.exists())
 
     def test_get_preview_when_none_returns_404(self) -> None:

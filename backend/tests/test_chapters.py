@@ -205,8 +205,8 @@ class ChapterApiTests(unittest.TestCase):
         self.assertEqual(
             len(self.manager.list_chapters(self.project["id"], "production")), 0
         )
-        self.assertEqual(len(self.manager.list_projects("production")), 0)
-        self.assertEqual(len(self.manager.list_projects("test")), 1)
+        self.assertEqual(self.manager.list_projects(environment="production")["total"], 0)
+        self.assertEqual(self.manager.list_projects(environment="test")["total"], 1)
 
 
 class ChapterDatabaseTests(unittest.TestCase):

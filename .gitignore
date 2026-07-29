@@ -6,6 +6,12 @@ __pycache__/
 data/databases/*.sqlite3
 data/databases/*.sqlite3-shm
 data/databases/*.sqlite3-wal
+data/atelier.db
+data/atelier.db-shm
+data/atelier.db-wal
+data/atelier.sqlite3
+data/atelier.sqlite3-shm
+data/atelier.sqlite3-wal
 data/character-database/*.csv
 data/character-database/*.sqlite3
 data/character-database/*.sqlite3-shm
