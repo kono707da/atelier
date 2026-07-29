@@ -1431,6 +1431,23 @@ def _detect_project_blockers(project: dict, stats: dict) -> list[dict[str, str]]
     return blockers
 
 
+def _lookup_project_id_for_large_scene(manager: DatabaseManager, large_scene_id: str) -> str | None:
+    """通过大场景 ID 反查所属项目 ID（用于操作记录）。"""
+    try:
+        scene = manager.get_large_scene(large_scene_id)
+        if not scene:
+            return None
+        chapter_id = scene.get("chapter_id")
+        if not chapter_id:
+            return None
+        chapter = manager.get_chapter(chapter_id)
+        if chapter:
+            return chapter.get("project_id")
+    except Exception:
+        pass
+    return None
+
+
 def create_app(
     *,
     data_root: Path | None = None,
@@ -1478,6 +1495,8 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         """应用生命周期：启动/停止 WebSocket 监听器。"""
+        # 保存主事件循环引用，供同步路由中安全调度协程使用。
+        app.state.main_event_loop = asyncio.get_running_loop()
         if environment != "test":
             await ws_listener.start()
             logger.info("ComfyUI WebSocket 监听器已启动")
@@ -1505,10 +1524,15 @@ def create_app(
         comfyui_client.close()
         comfyui_client = _build_comfyui_client()
         app.state.comfyui_client = comfyui_client
-        # 同步更新 WebSocket 监听器 URL
+        # 同步更新 WebSocket 监听器 URL。
+        # 同步路由中没有运行事件循环，必须使用 run_coroutine_threadsafe 安全调度。
         new_ws_url = comfyui_client.config.derived_websocket_url()
         if environment != "test":
-            asyncio.create_task(ws_listener.update_url(new_ws_url))
+            loop = getattr(app.state, "main_event_loop", None)
+            if loop is not None and loop.is_running():
+                asyncio.run_coroutine_threadsafe(
+                    ws_listener.update_url(new_ws_url), loop
+                )
         return comfyui_client
 
     resolved_development_todo_path = (
@@ -3819,6 +3843,8 @@ def create_app(
     ) -> dict[str, object]:
         if manager.get_large_scene(large_scene_id) is None:
             raise HTTPException(status_code=404, detail="大场景不存在。")
+        # 捕获移动前状态用于撤销
+        before = manager.get_large_scene(large_scene_id)
         try:
             result = manager.move_large_scene(
                 large_scene_id,
@@ -3830,6 +3856,20 @@ def create_app(
             if "不存在" in message:
                 raise HTTPException(status_code=404, detail=message) from error
             raise HTTPException(status_code=409, detail=message) from error
+        # 记录操作用于撤销/重做（需求 §7.3）
+        project_id = _lookup_project_id_for_large_scene(manager, large_scene_id)
+        if project_id:
+            try:
+                manager.record_operation(
+                    project_id,
+                    "move",
+                    "large_scene",
+                    large_scene_id,
+                    before_state=before,
+                    after_state=result.get("large_scene"),
+                )
+            except Exception:
+                logger.warning("记录大场景移动操作失败", exc_info=True)
         return {
             "database_environment": manager.active_environment,
             **result,

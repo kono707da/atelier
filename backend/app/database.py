@@ -622,6 +622,10 @@ class DatabaseManager:
                 connection, "v0.8.0", "Add comfyui_instances table for multi-instance management",
                 self._migrate_comfyui_instances,
             )
+            self._run_migration(
+                connection, "v0.8.1", "Fix stale FK references to materials_old_v052 after materials table rebuild",
+                self._migrate_fix_materials_fk_references,
+            )
             marker = connection.execute(
                 "SELECT value FROM atelier_meta WHERE key = 'environment'"
             ).fetchone()
@@ -2320,6 +2324,97 @@ class DatabaseManager:
                         now,
                     ),
                 )
+
+    def _migrate_fix_materials_fk_references(self, connection) -> None:
+        """v0.8.1: 修复历次表重建后遗留的 stale FK 引用。
+
+        v0.5.1/v0.5.2/v0.5.3 通过 RENAME+CREATE+DROP 重建 projects/materials/characters
+        表，但 SQLite 不会自动更新其他表中指向被重建表的 FK 约束，导致 chapters、
+        project_characters、character_variants、character_tags、shot_page_characters、
+        material_tag_links、small_scene_materials、shot_page_materials、material_pages、
+        material_versions 仍然引用已删除的 *_old_v05* 表。
+
+        本迁移扫描所有表，发现指向不存在表的 FK 时，重建该表并替换 FK 引用。
+        使用 CREATE+COPY+DROP+RENAME 策略（而非 ALTER TABLE RENAME），
+        避免 SQLite 自动更新其他表的 FK 引用。
+        """
+        import re
+
+        # 映射：旧表名 → 正确的当前表名
+        stale_ref_map = {
+            "projects_old_v051": "projects",
+            "characters_old_v053": "characters",
+            "materials_old_v052": "materials",
+            "material_pages_old_v081": "material_pages",
+            "chapters_tmp_v081": "chapters",
+            "character_variants_tmp_v081": "character_variants",
+        }
+
+        # 扫描所有表，找出含有 stale FK 的表
+        all_tables = connection.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type='table' AND sql IS NOT NULL"
+        ).fetchall()
+
+        tables_to_rebuild: list[tuple[str, str, str]] = []  # (table_name, old_sql, new_sql)
+        for tbl_row in all_tables:
+            tbl_name = tbl_row["name"]
+            sql_text = tbl_row["sql"] or ""
+            new_sql = sql_text
+            changed = False
+            for old_ref, new_ref in stale_ref_map.items():
+                # 替换 "old_ref" 和 old_ref 两种引用形式
+                patterns = [f'"{old_ref}"', f"`{old_ref}`", old_ref]
+                for pat in patterns:
+                    if pat in new_sql:
+                        # 仅替换 REFERENCES 子句中的引用
+                        new_sql = re.sub(
+                            rf'REFERENCES\s+{re.escape(pat)}',
+                            f'REFERENCES "{new_ref}"',
+                            new_sql,
+                            flags=re.IGNORECASE,
+                        )
+                        changed = True
+            if changed:
+                tables_to_rebuild.append((tbl_name, sql_text, new_sql))
+
+        for tbl_name, old_sql, new_sql in tables_to_rebuild:
+            # 捕获索引定义（DROP TABLE 会删除关联索引）
+            index_sqls = [
+                idx["sql"]
+                for idx in connection.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name=? AND sql IS NOT NULL",
+                    (tbl_name,),
+                ).fetchall()
+            ]
+            # 使用 CREATE+COPY+DROP+RENAME 策略：
+            # 1. 创建新表（使用临时名，FK 已修正）
+            tmp_name = f"{tbl_name}_new_v081"
+            new_sql_with_tmp = new_sql.replace(
+                f"CREATE TABLE {tbl_name}", f"CREATE TABLE {tmp_name}", 1
+            )
+            connection.execute(new_sql_with_tmp)
+            # 2. 复制数据
+            new_cols = [
+                r["name"]
+                for r in connection.execute(f"PRAGMA table_info({tmp_name})").fetchall()
+            ]
+            old_cols = [
+                r["name"]
+                for r in connection.execute(f"PRAGMA table_info({tbl_name})").fetchall()
+            ]
+            common_cols = [c for c in new_cols if c in old_cols]
+            col_list = ", ".join(common_cols)
+            if col_list:
+                connection.execute(
+                    f"INSERT INTO {tmp_name}({col_list}) SELECT {col_list} FROM {tbl_name}"
+                )
+            # 3. 删除旧表（不会更新其他表的 FK 引用）
+            connection.execute(f"DROP TABLE {tbl_name}")
+            # 4. 重命名新表为原名（其他表的 FK 引用原名，现在指向新表）
+            connection.execute(f"ALTER TABLE {tmp_name} RENAME TO {tbl_name}")
+            # 5. 重建索引
+            for idx_sql in index_sqls:
+                connection.execute(idx_sql)
 
     def activate(self, environment: DatabaseEnvironment) -> None:
         target_environment = self._validate_environment(environment)

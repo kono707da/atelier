@@ -98,6 +98,8 @@
     comfyuiObjectInfo: "/api/comfyui/node-definitions",
     workflows: "/api/workflows",
     workflow: (id) => `/api/workflows/${id}`,
+    workflowImport: (id) => `/api/workflows/${id}/import`,
+    workflowImportFromImage: "/api/workflows/import-from-image",
     workflowDraft: (id) => `/api/workflows/${id}/draft`,
     workflowPublish: (id) => `/api/workflows/${id}/publish`,
     workflowExport: (id) => `/api/workflows/${id}/export`,
@@ -124,7 +126,7 @@
   };
 
   const emptyStateCopy = {
-    projects: ["还没有项目", "生产数据库目前为空。创建第一个项目后，项目进度会显示在这里。", "新建项目"],
+    projects: ["还没有项目", "创建第一个项目后，项目进度会显示在这里。", "新建项目"],
     overview: ["还没有项目概览", "先在项目中心创建或打开一个项目。", "返回项目中心"],
     "story-canvas": ["还没有剧本结构", "创建项目后，可以从章节和场景积木开始组织剧本。", "等待项目"],
     "scene-editor": ["还没有场景", "剧本画布中的场景会显示在这里。", "等待剧本"],
@@ -139,7 +141,7 @@
     tasks: ["还没有任务", "提交批量跑图后，运行状态会显示在这里。", "暂无任务"],
     review: ["还没有待审图片", "ComfyUI 生成的图片实例会按分镜页进入这里。", "等待生成"],
     assembly: ["还没有可装配图片", "在审片页采用图片后，才能排列最终作品。", "等待采用"],
-    library: ["图库为空", "生产数据库尚未索引任何图片。", "添加图片"],
+    library: ["图库为空", "尚未索引任何图片。", "添加图片"],
     "image-detail": ["没有可查看的图片", "先从项目生成或向图库添加图片。", "返回图库"],
     export: ["还没有可导出版本", "完成审片和作品装配后，再创建导出。", "等待成片"],
   };
@@ -211,7 +213,6 @@
       <h2>${copy[0]}</h2>
       <p>${copy[1]}</p>
       <span class="production-empty-action">${copy[2]}</span>
-      <small>当前使用生产数据库 · 未加载任何演示数据</small>
     `;
     page.appendChild(empty);
   }
@@ -224,8 +225,7 @@
           <h2>回收站为空</h2>
           <p>被删除的项目会暂存在这里，可恢复或永久删除。</p>
           <button class="btn" type="button" data-api-action="projects-back-to-active">返回项目列表</button>
-          <small>当前使用生产数据库 · 未加载任何演示数据</small>
-        </section>
+            </section>
       `;
     }
     if (archived) {
@@ -235,18 +235,16 @@
           <h2>没有已归档项目</h2>
           <p>归档的项目会显示在这里，可随时恢复。</p>
           <button class="btn" type="button" data-api-action="projects-back-to-active">返回项目列表</button>
-          <small>当前使用生产数据库 · 未加载任何演示数据</small>
-        </section>
+            </section>
       `;
     }
     return `
       <section class="production-empty-state">
         <span class="production-empty-icon">A</span>
         <h2>还没有项目</h2>
-        <p>生产数据库目前为空。输入项目名称，创建你的第一个真实项目。</p>
+        <p>输入项目名称，创建你的第一个真实项目。</p>
         <button class="btn primary" data-api-action="open-project-modal">新建项目</button>
-        <small>当前使用生产数据库 · 未加载任何演示数据</small>
-      </section>
+        </section>
     `;
   }
 
@@ -663,8 +661,7 @@
         <h2>还没有工作流</h2>
         <p>准备第一次跑图时，再从 ComfyUI 读取或创建工作流。</p>
         <button class="btn primary" type="button" data-api-action="create-workflow">新建工作流</button>
-        <small>当前使用生产数据库 · 未加载任何演示数据</small>
-      </section>
+        </section>
     `;
   }
 
@@ -1028,15 +1025,30 @@
     submit.textContent = "正在导入…";
     error.textContent = "";
     try {
-      await request(API.workflows, {
+      // 分两步：先创建空工作流，再导入 JSON 到草稿。
+      // 后端 create_workflow 不接受 graph 参数，必须用独立 import 接口。
+      const createResp = await request(API.workflows, {
         method: "POST",
-        body: JSON.stringify({
-          name,
-          source_type: "api",
-          source_format: formatSelect.value,
-          graph: parsed,
-        }),
+        body: JSON.stringify({ name, source_type: "import" }),
       });
+      const workflowId = createResp.workflow?.id;
+      if (!workflowId) {
+        throw new Error("创建工作流失败：未返回工作流 ID。");
+      }
+      try {
+        await request(API.workflowImport(workflowId), {
+          method: "POST",
+          body: JSON.stringify({ raw_json: parsed, source_format: "auto" }),
+        });
+      } catch (importError) {
+        // 导入失败时删除刚创建的空工作流，避免残留垃圾数据。
+        try {
+          await request(API.workflow(workflowId), { method: "DELETE" });
+        } catch (_) {
+          // 忽略清理失败
+        }
+        throw importError;
+      }
       closeWorkflowImportModal();
       await loadWorkflowsList(false);
       if (typeof showToast === "function") showToast(`工作流「${name}」已导入`);
@@ -1147,14 +1159,12 @@
   };
 
   function comfyuiInstanceStatusLabel(instance) {
-    if (instance.is_active && instance.connection_status === "connected") {
+    const status = instance.last_connection_status || instance.connection_status || "";
+    if (status === "ok" || status === "connected") {
       return { text: "已连接", color: "green" };
     }
-    if (instance.connection_status === "failed" || instance.connection_status === "error") {
+    if (status === "failed" || status === "error" || status === "unreachable") {
       return { text: "连接失败", color: "red" };
-    }
-    if (instance.connection_status === "connected") {
-      return { text: "已连接", color: "green" };
     }
     return { text: "未检测", color: "orange" };
   }
@@ -1162,12 +1172,21 @@
   function comfyuiInstanceCard(instance) {
     const status = comfyuiInstanceStatusLabel(instance);
     const name = escapeHtml(instance.name || "未命名实例");
-    const httpUrl = escapeHtml(instance.http_url || instance.base_url || "—");
-    const wsUrl = instance.ws_url ? escapeHtml(instance.ws_url) : "";
-    const version = instance.version ? escapeHtml(instance.version) : "连接后读取";
-    const device = instance.device ? escapeHtml(instance.device) : "连接后读取";
-    const nodeCount = Number(instance.node_count) || 0;
-    const latency = instance.latency != null ? `${instance.latency} ms` : "连接后读取";
+    const httpUrl = escapeHtml(instance.base_url || instance.http_url || "—");
+    const wsUrl = instance.websocket_url || instance.ws_url || "";
+    const version = instance.comfyui_version || instance.version || "";
+    const deviceSummary = instance.device_summary;
+    let device = "";
+    if (Array.isArray(deviceSummary) && deviceSummary.length > 0) {
+      device = deviceSummary.map((d) => d.name || "").filter(Boolean).join(", ");
+    } else if (typeof deviceSummary === "string") {
+      device = deviceSummary;
+    }
+    const nodeSummary = instance.node_definition_summary || {};
+    const nodeCount = Number(nodeSummary.node_count || instance.node_count || 0);
+    const lastChecked = instance.last_checked_at || "";
+    const lastSynced = nodeSummary.last_synced_at || "";
+    const syncTime = lastSynced || lastChecked || "连接后读取";
     const isActive = Boolean(instance.is_active);
     return `
       <article class="setting-card real-comfyui-card" data-instance-id="${escapeHtml(instance.id)}">
@@ -1180,11 +1199,11 @@
         <div class="setting-title" style="margin-top:12px">${name}</div>
         <div class="setting-desc">运行生成任务并提供节点定义。</div>
         <div class="setting-value">${httpUrl}</div>
-        ${wsUrl ? `<div class="kv"><span>WebSocket</span><strong>${wsUrl}</strong></div>` : ""}
-        <div class="kv"><span>延迟</span><strong>${escapeHtml(latency)}</strong></div>
-        <div class="kv"><span>版本</span><strong>${escapeHtml(version)}</strong></div>
-        <div class="kv"><span>GPU</span><strong>${escapeHtml(device)}</strong></div>
-        <div class="kv"><span>节点</span><strong>${nodeCount}</strong></div>
+        ${wsUrl ? `<div class="kv"><span>WebSocket</span><strong>${escapeHtml(wsUrl)}</strong></div>` : ""}
+        <div class="kv"><span>版本</span><strong>${version ? escapeHtml(version) : "连接后读取"}</strong></div>
+        <div class="kv"><span>GPU</span><strong>${device ? escapeHtml(device) : "连接后读取"}</strong></div>
+        <div class="kv"><span>节点</span><strong>${nodeCount || "连接后读取"}</strong></div>
+        <div class="kv"><span>同步时间</span><strong>${escapeHtml(syncTime)}</strong></div>
         <div class="project-card-actions" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:10px">
           ${isActive ? "" : `<button class="btn small primary" type="button" data-api-action="activate-comfyui-instance" data-instance-id="${escapeHtml(instance.id)}" data-instance-name="${name}">激活</button>`}
           <button class="btn small" type="button" data-api-action="test-comfyui-instance" data-instance-id="${escapeHtml(instance.id)}" data-instance-name="${name}">测试连接</button>
@@ -1215,7 +1234,6 @@
         <p>添加一个 ComfyUI 实例后，工作流和生成任务才能运行。</p>
         <button class="btn primary" type="button" data-api-action="add-comfyui-instance">添加实例</button>
         <button class="btn soft" type="button" data-api-action="discover-comfyui-instances">发现局域网实例</button>
-        <small>当前使用生产数据库 · 未加载任何演示数据</small>
       </section>
     `;
   }
@@ -1254,7 +1272,7 @@
     try {
       const payload = await request(API.comfyuiInstances);
       if (requestId !== comfyuiState.requestId) return;
-      const items = Array.isArray(payload.items) ? payload.items : (Array.isArray(payload) ? payload : []);
+      const items = Array.isArray(payload.instances) ? payload.instances : (Array.isArray(payload.items) ? payload.items : (Array.isArray(payload) ? payload : []));
       comfyuiState.instances = items;
       renderComfyuiInstancesList();
     } catch (error) {
@@ -1490,10 +1508,10 @@
     if (typeof showToast === "function") showToast(`正在测试「${name}」连接…`);
     try {
       const payload = await request(API.comfyuiInstanceTest(instanceId), { method: "POST" });
-      const ok = payload && (payload.ok || payload.success || payload.connected);
-      const latency = payload && payload.latency != null ? ` · 延迟 ${payload.latency} ms` : "";
+      const ok = payload && (payload.status === "ok" || payload.ok || payload.success || payload.connected);
       if (ok) {
-        if (typeof showToast === "function") showToast(`「${name}」连接成功${latency}`);
+        const version = payload.system && payload.system.comfyui_version ? ` · ${payload.system.comfyui_version}` : "";
+        if (typeof showToast === "function") showToast(`「${name}」连接成功${version}`);
       } else {
         const reason = (payload && (payload.message || payload.reason)) || "连接失败";
         if (typeof showToast === "function") showToast(`「${name}」${reason}`);
@@ -1509,7 +1527,8 @@
     try {
       const payload = await request(API.comfyuiInstanceSync(instanceId), { method: "POST" });
       const count = payload && (payload.node_count || payload.synced_count || 0);
-      if (typeof showToast === "function") showToast(`「${name}」已同步 ${count} 个节点`);
+      const custom = payload && (payload.custom_node_count || 0);
+      if (typeof showToast === "function") showToast(`「${name}」已同步 ${count} 个节点（自定义 ${custom}）`);
       await loadComfyuiInstances();
     } catch (requestError) {
       if (typeof showToast === "function") showToast(`「${name}」同步失败：${requestError.message}`);
@@ -1520,7 +1539,7 @@
     if (typeof showToast === "function") showToast("正在搜索局域网 ComfyUI 实例…");
     try {
       const payload = await request(API.comfyuiDiscover, { method: "POST" });
-      const candidates = Array.isArray(payload.items) ? payload.items : (Array.isArray(payload) ? payload : []);
+      const candidates = Array.isArray(payload.candidates) ? payload.candidates : (Array.isArray(payload.items) ? payload.items : (Array.isArray(payload) ? payload : []));
       if (!candidates.length) {
         if (typeof showToast === "function") showToast("未发现局域网 ComfyUI 实例");
         return;
@@ -1581,16 +1600,16 @@
     try {
       const payload = await request(API.comfyuiInstances);
       if (requestId !== comfyuiStatusRequestId) return;
-      const items = Array.isArray(payload.items) ? payload.items : (Array.isArray(payload) ? payload : []);
+      const items = Array.isArray(payload.instances) ? payload.instances : (Array.isArray(payload.items) ? payload.items : (Array.isArray(payload) ? payload : []));
       const active = items.find((i) => i.is_active) || items[0];
       if (!active) {
         applyComfyuiStatusIndicator({ color: "orange", text: "ComfyUI 未配置" });
         return;
       }
-      const connStatus = active.connection_status;
-      if (connStatus === "connected") {
+      const connStatus = active.last_connection_status || active.connection_status || "";
+      if (connStatus === "ok" || connStatus === "connected") {
         applyComfyuiStatusIndicator({ color: "green", text: `ComfyUI 已连接 · ${active.name || ""}`.trim() });
-      } else if (connStatus === "failed" || connStatus === "error") {
+      } else if (connStatus === "failed" || connStatus === "error" || connStatus === "unreachable") {
         applyComfyuiStatusIndicator({ color: "red", text: `ComfyUI 连接失败 · ${active.name || ""}`.trim() });
       } else {
         applyComfyuiStatusIndicator({ color: "orange", text: `ComfyUI 未检测 · ${active.name || ""}`.trim() });
@@ -9157,8 +9176,7 @@
         <h2>未打开工作流</h2>
         <p>${escapeHtml(message || "请从工作流库选择一个工作流进入画布。")}</p>
         <button class="btn primary" type="button" onclick="window.location.search='?page=workflows'">返回工作流库</button>
-        <small>当前使用生产数据库 · 未加载任何演示数据</small>
-      </section>
+        </section>
     `;
   }
 
@@ -9522,8 +9540,18 @@
 
   // 加载工作流草稿数据并更新本地状态。
   async function loadWorkflowCanvasData(workflowId) {
-    const draft = await request(API.workflowDraft(workflowId));
-    workflowCanvasState.workflowName = draft.workflow_name || draft.name || "工作流画布";
+    const response = await request(API.workflowDraft(workflowId));
+    // API 返回 {database_environment, draft: {...}}，提取 draft 对象。
+    const draft = response.draft || response;
+    // 工作流名称不在 draft 中，通过工作流详情 API 获取（如果有的话）。
+    if (!workflowCanvasState.workflowName || workflowCanvasState.workflowName === "工作流画布") {
+      try {
+        const wfResp = await request(API.workflow(workflowId));
+        workflowCanvasState.workflowName = wfResp.workflow?.name || "工作流画布";
+      } catch (_) {
+        workflowCanvasState.workflowName = "工作流画布";
+      }
+    }
     workflowCanvasState.draftRevision = draft.draft_revision != null ? draft.draft_revision : null;
     workflowCanvasState.isDirty = Boolean(draft.is_dirty);
     workflowCanvasState.graph = parseWorkflowGraph(draft);

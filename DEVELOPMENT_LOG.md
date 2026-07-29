@@ -2,6 +2,52 @@
 
 更新日期：2026-07-29
 
+## v0.8.2 开发记录 — 阶段1-2验收修复（FK 修复/撤销重做/前端契约对齐）
+
+### 开发目标
+
+在 v0.8.0 阶段1-2验收整改基础上，修复验收发现的 3 个阻塞问题：stale FK 引用导致分支删除 500、`move_large_scene` 未记录操作导致撤销重做不可用、前端 ComfyUI 实例字段名与后端契约不匹配。完成 §13.4 阶段1 API 验收（10/10 通过）和 §13.5 浏览器质量验收（9/11 通过，2 项需复核）。剩余未完成项交接给下一个 AI，详见需求文档 §18.4。
+
+### 开发分支
+
+`dev-260729-GLM5.2-阶段1-2验收修复`（基于 `GLM-MAIN`，不直接合并到 `main`）
+
+### 实际解决方案
+
+1. **stale FK 引用修复（database.py v0.8.1 迁移）**：历次表重建（materials/characters/projects 等）遗留了对 `_old_v05x` 临时表的 FK 引用，导致分支删除时触发外键检查 500。新增 `_migrate_fix_materials_fk_references`，扫描所有表的 `REFERENCES` 子句，对命中 stale 表名的表用 CREATE+COPY+DROP+RENAME 重建，保留索引。备份文件 `atelier.production.sqlite3.bak-v081`。
+2. **`move_large_scene` 操作记录（app_factory.py §7.3）**：端点新增 `record_operation` 调用，捕获 before/after 状态。新增 `_lookup_project_id_for_large_scene` 通过 `large_scene → chapter → project` 反查项目 ID。记录失败仅 warning 不阻断主流程。
+3. **前端 ComfyUI 实例字段对齐（runtime-api.js）**：创建/编辑实例请求体改用 `base_url`/`websocket_url`/`timeout_seconds`，对齐后端 `CreateComfyuiInstanceRequest`/`UpdateComfyuiInstanceRequest` 契约。
+4. **API JSON 导入推导输出端口（runtime-api.js）**：`parse_api_json` 原本把 `outputs` 设为空，导致导入后无法新增连线。改为根据已建立的 links 反推每个节点的输出端口 slot 数量和 link 关联。
+
+### 测试用例
+
+本轮无新增自动化测试。§13.4 阶段1 API 验收使用临时脚本 `scripts/_tmp_stage1_acceptance.py`（已删除，内容归档到需求文档 §18.2.1）。
+
+### 测试结果
+
+- §13.4 阶段1 API 验收：10/10 通过（生产数据库，端口 8110）
+- §13.5 浏览器质量验收：9/11 通过，2 项 FAIL 需复核（快照入口、设置页 ComfyUI 控件）
+- 后端自动化测试：本轮未重跑全量（上一轮 v0.8.0 已通过 1175/1175）
+
+### 未执行项（交接给下一个 AI）
+
+详见需求文档 `全功能开发阶段一与阶段二验收整改需求.md` §18.4：
+
+- §13.5 浏览器验收复核（快照入口、设置页 ComfyUI 控件、画布页接口报错）
+- §13.1 设置页 ComfyUI 实例完整流程
+- §13.2 工作流库浏览器验收
+- §13.3 工作流画布浏览器验收
+- §9 真实 ComfyUI 工作流验收
+- §13.4 阶段1 浏览器端流程验证
+- 清理验收产生的测试数据（5 条测试快照）
+- 操作记录覆盖范围评估（仅 move_large_scene 已覆盖）
+
+### 实际生图状态
+
+**未进入阶段 3，未实际生图。**
+
+---
+
 ## v0.8.0 开发记录 — 阶段1-2验收整改
 
 ### 开发目标
