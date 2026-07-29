@@ -561,5 +561,265 @@ class MaterialsApiTests(unittest.TestCase):
             self.assertEqual(int(row["n"]), 0)
 
 
+class MaterialVersionDeleteTests(unittest.TestCase):
+    """MOD-02: 素材版本删除接口验收测试。"""
+
+    def setUp(self) -> None:
+        from backend.tests import IsolatedTestCase
+
+        self._tc = IsolatedTestCase()
+        self._tc.setUp()
+        self.client = self._tc.client
+        self.manager = self._tc.manager
+
+    def tearDown(self) -> None:
+        self._tc.tearDown()
+
+    def _create_material(self) -> dict[str, object]:
+        response = self.client.post(
+            "/api/materials",
+            json={
+                "name": "版本测试素材",
+                "material_type": "composition",
+                "content": "v1 内容",
+            },
+        )
+        return response.json()["material"]
+
+    def test_delete_version_returns_404_for_missing_material(self) -> None:
+        response = self.client.delete(
+            "/api/materials/nonexistent/versions/1"
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_cannot_delete_only_remaining_version(self) -> None:
+        material = self._create_material()
+        # 创建一个版本(此时只有一个)
+        self.client.post(f"/api/materials/{material['id']}/versions")
+        response = self.client.delete(
+            f"/api/materials/{material['id']}/versions/1"
+        )
+        self.assertEqual(response.status_code, 409)
+
+    def test_delete_version_when_multiple_exist(self) -> None:
+        material = self._create_material()
+        # 创建两个版本
+        self.client.post(f"/api/materials/{material['id']}/versions")
+        self.client.post(f"/api/materials/{material['id']}/versions")
+        # 删除第一个版本
+        response = self.client.delete(
+            f"/api/materials/{material['id']}/versions/1"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["deleted"])
+        # 确认列表只剩一个
+        list_resp = self.client.get(
+            f"/api/materials/{material['id']}/versions"
+        )
+        self.assertEqual(len(list_resp.json()["versions"]), 1)
+
+
+class MaterialLinkModeTests(unittest.TestCase):
+    """MOD-02: 链接引用 vs 复制后独立复用模式验收测试。"""
+
+    def setUp(self) -> None:
+        from backend.tests import IsolatedTestCase
+
+        self._tc = IsolatedTestCase()
+        self._tc.setUp()
+        self.client = self._tc.client
+        self.manager = self._tc.manager
+
+    def tearDown(self) -> None:
+        self._tc.tearDown()
+
+    def _create_source_material(self, content: str = "源内容") -> dict[str, object]:
+        response = self.client.post(
+            "/api/materials",
+            json={
+                "name": "源素材",
+                "material_type": "composition",
+                "content": content,
+            },
+        )
+        material = response.json()["material"]
+        # 添加一个素材页
+        self.client.post(
+            f"/api/materials/{material['id']}/pages",
+            json={"name": "源页面", "content": "页面内容"},
+        )
+        return material
+
+    def test_independent_copy_creates_own_pages(self) -> None:
+        source = self._create_source_material()
+        response = self.client.post(
+            f"/api/materials/{source['id']}/copy",
+            json={"name": "独立副本", "mode": "independent"},
+        )
+        self.assertEqual(response.status_code, 201)
+        copy = response.json()["material"]
+        self.assertEqual(copy["link_mode"], "independent")
+        self.assertEqual(copy["source_material_id"], source["id"])
+        # 独立副本有自己的页面
+        pages_resp = self.client.get(f"/api/materials/{copy['id']}/pages")
+        self.assertEqual(pages_resp.json()["total"], 1)
+
+    def test_link_copy_does_not_duplicate_pages(self) -> None:
+        source = self._create_source_material()
+        response = self.client.post(
+            f"/api/materials/{source['id']}/copy",
+            json={"name": "链接副本", "mode": "link"},
+        )
+        self.assertEqual(response.status_code, 201)
+        copy = response.json()["material"]
+        self.assertEqual(copy["link_mode"], "link")
+        self.assertEqual(copy["source_material_id"], source["id"])
+        # 链接副本自己没有页面(直接查 material_pages 为空)
+        own_pages = self.client.get(f"/api/materials/{copy['id']}/pages")
+        self.assertEqual(own_pages.json()["total"], 0)
+        # 通过 resolved 接口可读到源素材的页面
+        resolved = self.client.get(
+            f"/api/materials/{copy['id']}/pages/resolved"
+        )
+        self.assertEqual(resolved.json()["total"], 1)
+        self.assertEqual(
+            resolved.json()["pages"][0]["name"],
+            "源页面",
+        )
+
+    def test_default_mode_is_independent(self) -> None:
+        source = self._create_source_material()
+        response = self.client.post(
+            f"/api/materials/{source['id']}/copy",
+            json={"name": "默认副本"},
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["material"]["link_mode"], "independent")
+
+
+class MaterialPackItemsTests(unittest.TestCase):
+    """MOD-02: 镜头模板/场景包/转场包(包素材成员管理)验收测试。"""
+
+    def setUp(self) -> None:
+        from backend.tests import IsolatedTestCase
+
+        self._tc = IsolatedTestCase()
+        self._tc.setUp()
+        self.client = self._tc.client
+        self.manager = self._tc.manager
+
+    def tearDown(self) -> None:
+        self._tc.tearDown()
+
+    def _create_material(self, name: str = "素材") -> dict[str, object]:
+        response = self.client.post(
+            "/api/materials",
+            json={
+                "name": name,
+                "material_type": "composition",
+                "content": "内容",
+            },
+        )
+        return response.json()["material"]
+
+    def test_default_kind_is_single(self) -> None:
+        material = self._create_material()
+        self.assertEqual(material["kind"], "single")
+
+    def test_set_material_kind_to_scene_pack(self) -> None:
+        material = self._create_material()
+        response = self.client.patch(
+            f"/api/materials/{material['id']}/kind",
+            json={"kind": "scene_pack"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["material"]["kind"], "scene_pack")
+
+    def test_cannot_add_pack_item_to_single_kind(self) -> None:
+        pack = self._create_material(name="包")
+        member = self._create_material(name="成员")
+        response = self.client.post(
+            f"/api/materials/{pack['id']}/pack-items",
+            json={"member_material_id": member["id"]},
+        )
+        self.assertEqual(response.status_code, 422)
+
+    def test_add_list_update_remove_pack_item(self) -> None:
+        # 创建包素材和成员素材
+        pack = self._create_material(name="场景包")
+        self.client.patch(
+            f"/api/materials/{pack['id']}/kind",
+            json={"kind": "scene_pack"},
+        )
+        member = self._create_material(name="成员 A")
+        member_page = self.client.post(
+            f"/api/materials/{member['id']}/pages",
+            json={"name": "页面 1", "content": "页面内容"},
+        ).json()["page"]
+
+        # 添加成员
+        add_resp = self.client.post(
+            f"/api/materials/{pack['id']}/pack-items",
+            json={
+                "member_material_id": member["id"],
+                "member_material_page_id": member_page["id"],
+                "slot_role": "background",
+            },
+        )
+        self.assertEqual(add_resp.status_code, 201)
+        item = add_resp.json()["item"]
+        self.assertEqual(item["slot_role"], "background")
+
+        # 列表
+        list_resp = self.client.get(
+            f"/api/materials/{pack['id']}/pack-items"
+        )
+        self.assertEqual(list_resp.json()["total"], 1)
+
+        # 更新
+        upd_resp = self.client.patch(
+            f"/api/material-pack-items/{item['id']}",
+            json={"slot_role": "foreground", "sort_order": 5},
+        )
+        self.assertEqual(upd_resp.status_code, 200)
+        self.assertEqual(upd_resp.json()["item"]["slot_role"], "foreground")
+        self.assertEqual(upd_resp.json()["item"]["sort_order"], 5)
+
+        # 删除
+        del_resp = self.client.delete(
+            f"/api/material-pack-items/{item['id']}"
+        )
+        self.assertEqual(del_resp.status_code, 200)
+        self.assertTrue(del_resp.json()["deleted"])
+
+        # 确认列表为空
+        list_resp2 = self.client.get(
+            f"/api/materials/{pack['id']}/pack-items"
+        )
+        self.assertEqual(list_resp2.json()["total"], 0)
+
+    def test_pack_item_validates_member_page_ownership(self) -> None:
+        pack = self._create_material(name="包")
+        self.client.patch(
+            f"/api/materials/{pack['id']}/kind",
+            json={"kind": "scene_pack"},
+        )
+        member = self._create_material(name="成员")
+        other = self._create_material(name="其他素材")
+        other_page = self.client.post(
+            f"/api/materials/{other['id']}/pages",
+            json={"name": "其他页面", "content": "x"},
+        ).json()["page"]
+        # member_material_page_id 属于 other,不属于 member,应拒绝
+        response = self.client.post(
+            f"/api/materials/{pack['id']}/pack-items",
+            json={
+                "member_material_id": member["id"],
+                "member_material_page_id": other_page["id"],
+            },
+        )
+        self.assertEqual(response.status_code, 422)
+
+
 if __name__ == "__main__":
     unittest.main()

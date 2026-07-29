@@ -1506,6 +1506,7 @@ class ReorderMaterialPagesRequest(BaseModel):
 
 class CopyMaterialRequest(BaseModel):
     name: str = Field(min_length=1, max_length=80)
+    mode: Literal["independent", "link"] = Field(default="independent")
 
     @field_validator("name")
     @classmethod
@@ -1700,6 +1701,23 @@ class LinkQueryRecordRequest(BaseModel):
 class BatchRenameRequest(BaseModel):
     name: str
     revision: int | None = None
+
+
+class UpdateMaterialKindRequest(BaseModel):
+    kind: Literal["single", "shot_template", "scene_pack", "transition_pack"]
+
+
+class AddMaterialPackItemRequest(BaseModel):
+    member_material_id: str = Field(min_length=1)
+    member_material_page_id: str | None = None
+    slot_role: str = Field(default="", max_length=80)
+    sort_order: int | None = Field(default=None, ge=0)
+
+
+class UpdateMaterialPackItemRequest(BaseModel):
+    slot_role: str | None = Field(default=None, max_length=80)
+    sort_order: int | None = Field(default=None, ge=0)
+    member_material_page_id: str | None = None
 
 
 # 状态码到错误码的映射，保持 API 错误响应统一可追溯。
@@ -5138,7 +5156,9 @@ def create_app(
     @app.post("/api/materials/{material_id}/copy", status_code=status.HTTP_201_CREATED)
     def copy_material(material_id: str, request: CopyMaterialRequest) -> dict[str, object]:
         try:
-            material = manager.copy_material(material_id, new_name=request.name)
+            material = manager.copy_material(
+                material_id, new_name=request.name, mode=request.mode
+            )
         except ValueError as error:
             msg = str(error)
             if "不存在" in msg:
@@ -5204,6 +5224,128 @@ def create_app(
         return {
             "database_environment": manager.active_environment,
             "material": material,
+        }
+
+    @app.delete("/api/materials/{material_id}/versions/{version_number}")
+    def delete_material_version(
+        material_id: str, version_number: int
+    ) -> dict[str, object]:
+        """删除指定版本快照。保留至少一个版本以防止历史完全丢失。"""
+        try:
+            deleted = manager.delete_material_version(material_id, version_number)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        if not deleted:
+            raise HTTPException(
+                status_code=409,
+                detail="不能删除唯一剩余的版本,至少保留一个历史快照。",
+            )
+        return {
+            "database_environment": manager.active_environment,
+            "deleted": True,
+            "material_id": material_id,
+            "version_number": version_number,
+        }
+
+    @app.get("/api/materials/{material_id}/pages/resolved")
+    def get_material_pages_resolved(material_id: str) -> dict[str, object]:
+        """获取素材的有效页面,自动解析 link 模式引用的源素材页面。"""
+        if manager.get_material(material_id) is None:
+            raise HTTPException(status_code=404, detail="素材不存在。")
+        pages = manager.resolve_material_pages(material_id)
+        return {
+            "database_environment": manager.active_environment,
+            "material_id": material_id,
+            "pages": pages,
+            "total": len(pages),
+        }
+
+    @app.patch("/api/materials/{material_id}/kind")
+    def update_material_kind(
+        material_id: str, request: UpdateMaterialKindRequest
+    ) -> dict[str, object]:
+        """切换素材 kind(single/shot_template/scene_pack/transition_pack)。"""
+        try:
+            material = manager.set_material_kind(material_id, request.kind)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        if material is None:
+            raise HTTPException(status_code=404, detail="素材不存在。")
+        return {
+            "database_environment": manager.active_environment,
+            "material": material,
+        }
+
+    @app.get("/api/materials/{material_id}/pack-items")
+    def list_material_pack_items(material_id: str) -> dict[str, object]:
+        """列出包素材的所有成员。"""
+        if manager.get_material(material_id) is None:
+            raise HTTPException(status_code=404, detail="素材不存在。")
+        items = manager.list_material_pack_items(material_id)
+        return {
+            "database_environment": manager.active_environment,
+            "material_id": material_id,
+            "items": items,
+            "total": len(items),
+        }
+
+    @app.post(
+        "/api/materials/{material_id}/pack-items",
+        status_code=status.HTTP_201_CREATED,
+    )
+    def add_material_pack_item(
+        material_id: str, request: AddMaterialPackItemRequest
+    ) -> dict[str, object]:
+        """向包素材添加成员。"""
+        try:
+            item = manager.add_material_pack_item(
+                material_id,
+                member_material_id=request.member_material_id,
+                member_material_page_id=request.member_material_page_id,
+                slot_role=request.slot_role,
+                sort_order=request.sort_order,
+            )
+        except ValueError as error:
+            msg = str(error)
+            if "不存在" in msg:
+                raise HTTPException(status_code=404, detail=msg) from error
+            raise HTTPException(status_code=422, detail=msg) from error
+        return {
+            "database_environment": manager.active_environment,
+            "item": item,
+        }
+
+    @app.patch("/api/material-pack-items/{item_id}")
+    def update_material_pack_item(
+        item_id: str, request: UpdateMaterialPackItemRequest
+    ) -> dict[str, object]:
+        """更新包成员的 slot_role、sort_order 或页面引用。"""
+        try:
+            item = manager.update_material_pack_item(
+                item_id,
+                slot_role=request.slot_role,
+                sort_order=request.sort_order,
+                member_material_page_id=request.member_material_page_id,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        if item is None:
+            raise HTTPException(status_code=404, detail="包成员不存在。")
+        return {
+            "database_environment": manager.active_environment,
+            "item": item,
+        }
+
+    @app.delete("/api/material-pack-items/{item_id}")
+    def remove_material_pack_item(item_id: str) -> dict[str, object]:
+        """从包中移除成员。"""
+        deleted = manager.remove_material_pack_item(item_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="包成员不存在。")
+        return {
+            "database_environment": manager.active_environment,
+            "deleted": True,
+            "item_id": item_id,
         }
 
     @app.get("/api/material-tags")
