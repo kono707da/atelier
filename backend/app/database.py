@@ -113,6 +113,10 @@ class DatabaseManager:
         with self._lock, self.connection(environment) as connection:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.execute("PRAGMA synchronous = NORMAL")
+            # Disable foreign keys during schema migration to allow table rebuilds
+            # (ALTER TABLE RENAME + CREATE + INSERT + DROP sequence would otherwise
+            # fail when other tables hold FK references to the table being rebuilt).
+            connection.execute("PRAGMA foreign_keys = OFF")
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS atelier_meta (
@@ -142,8 +146,9 @@ class DatabaseManager:
 
                 CREATE INDEX IF NOT EXISTS idx_projects_status
                     ON projects(status, updated_at DESC);
-                CREATE INDEX IF NOT EXISTS idx_projects_deleted
-                    ON projects(deleted_at);
+
+                -- Note: idx_projects_deleted is created by _migrate_projects_extend
+                -- to handle legacy tables missing the deleted_at column.
 
                 CREATE TABLE IF NOT EXISTS chapters (
                     id TEXT PRIMARY KEY,
@@ -352,11 +357,8 @@ class DatabaseManager:
                 CREATE INDEX IF NOT EXISTS idx_materials_status_updated
                     ON materials(validation_status, updated_at DESC);
 
-                CREATE INDEX IF NOT EXISTS idx_materials_deleted
-                    ON materials(deleted_at);
-
-                CREATE INDEX IF NOT EXISTS idx_materials_archived
-                    ON materials(archived_at);
+                -- Note: idx_materials_deleted and idx_materials_archived are created
+                -- by _migrate_materials_extend to handle legacy tables missing columns.
 
                 CREATE INDEX IF NOT EXISTS idx_materials_name
                     ON materials(name);
@@ -624,6 +626,8 @@ class DatabaseManager:
                 """,
                 (now,),
             )
+            # Re-enable foreign keys after migration is complete.
+            connection.execute("PRAGMA foreign_keys = ON")
 
     def _migrate_legacy_character_schema(self, connection) -> None:
         """Migrate pre-v0.1.7 schema: characters had project_id, project_specs was project-scoped."""
@@ -1147,6 +1151,14 @@ class DatabaseManager:
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_projects_deleted ON projects(deleted_at)"
             )
+        else:
+            # 表已经是新结构，确保索引存在（全新数据库或已迁移数据库）
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_projects_status ON projects(status, updated_at DESC)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_projects_deleted ON projects(deleted_at)"
+            )
 
     def _migrate_materials_extend(self, connection) -> None:
         """v0.5.2: 扩展 materials 和 material_pages 表。
@@ -1237,6 +1249,22 @@ class DatabaseManager:
                     f"SELECT {select_clause} FROM materials_old_v052"
                 )
                 connection.execute("DROP TABLE materials_old_v052")
+                connection.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_materials_type_updated "
+                    "ON materials(material_type, updated_at DESC)"
+                )
+                connection.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_materials_status_updated "
+                    "ON materials(validation_status, updated_at DESC)"
+                )
+                connection.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_materials_deleted ON materials(deleted_at)"
+                )
+                connection.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_materials_archived ON materials(archived_at)"
+                )
+            else:
+                # 表已经是新结构，确保索引存在（全新数据库或已迁移数据库）
                 connection.execute(
                     "CREATE INDEX IF NOT EXISTS idx_materials_type_updated "
                     "ON materials(material_type, updated_at DESC)"
