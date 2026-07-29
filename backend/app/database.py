@@ -401,6 +401,34 @@ class DatabaseManager:
                 CREATE INDEX IF NOT EXISTS idx_small_scenes_large_scene_sort
                     ON small_scenes(large_scene_id, sort_order);
 
+                CREATE TABLE IF NOT EXISTS transitions (
+                    id TEXT PRIMARY KEY,
+                    large_scene_id TEXT NOT NULL,
+                    name TEXT NOT NULL DEFAULT '',
+                    transition_type TEXT NOT NULL DEFAULT 'cut',
+                    duration_frames INTEGER NOT NULL DEFAULT 0,
+                    description TEXT NOT NULL DEFAULT '',
+                    source_small_scene_id TEXT,
+                    target_small_scene_id TEXT,
+                    sort_order INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    CHECK (
+                        transition_type IN (
+                            'cut', 'fade', 'dissolve', 'wipe', 'slide', 'custom'
+                        )
+                    ),
+                    FOREIGN KEY (large_scene_id)
+                        REFERENCES large_scenes(id) ON DELETE CASCADE,
+                    FOREIGN KEY (source_small_scene_id)
+                        REFERENCES small_scenes(id) ON DELETE SET NULL,
+                    FOREIGN KEY (target_small_scene_id)
+                        REFERENCES small_scenes(id) ON DELETE SET NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_transitions_large_scene_sort
+                    ON transitions(large_scene_id, sort_order);
+
                 CREATE TABLE IF NOT EXISTS branches (
                     id TEXT PRIMARY KEY,
                     parent_type TEXT NOT NULL,
@@ -5990,30 +6018,6 @@ class DatabaseManager:
                 )
         return self.get_small_scene(small_scene_id, environment=target_environment)  # type: ignore[return-value]
 
-    def delete_small_scene(
-        self,
-        small_scene_id: str,
-        environment: DatabaseEnvironment | None = None,
-    ) -> dict[str, object] | None:
-        target_environment = environment or self._active_environment
-        with self._lock, self.connection(target_environment) as connection:
-            row = connection.execute(
-                "SELECT id FROM materials WHERE id = ?",
-                (material_id,),
-            ).fetchone()
-            if row is None:
-                return None
-            now = datetime.now(timezone.utc).isoformat()
-            connection.execute(
-                """
-                UPDATE materials
-                SET preview_original_path = ?, preview_thumbnail_path = ?, updated_at = ?
-                WHERE id = ?
-                """,
-                (original_path, thumbnail_path, now, material_id),
-            )
-        return self.get_material(material_id, target_environment)
-
     # ── Small Scenes ───────────────────────────────────────────────────
 
     def delete_small_scene(
@@ -6049,6 +6053,253 @@ class DatabaseManager:
                     (idx, r["id"]),
                 )
         return {"id": small_scene_id, "name": existing["name"]}
+
+    # ── Transitions ────────────────────────────────────────────────────
+
+    _TRANSITION_TYPES = (
+        "cut", "fade", "dissolve", "wipe", "slide", "custom",
+    )
+
+    def list_transitions(
+        self,
+        large_scene_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> list[dict[str, object]]:
+        target_environment = environment or self._active_environment
+        with self.connection(target_environment) as connection:
+            rows = connection.execute(
+                """
+                SELECT t.id, t.large_scene_id, t.name, t.transition_type,
+                       t.duration_frames, t.description,
+                       t.source_small_scene_id, t.target_small_scene_id,
+                       t.sort_order, t.created_at, t.updated_at,
+                       ss_src.name AS source_small_scene_name,
+                       ss_tgt.name AS target_small_scene_name
+                FROM transitions t
+                LEFT JOIN small_scenes ss_src ON ss_src.id = t.source_small_scene_id
+                LEFT JOIN small_scenes ss_tgt ON ss_tgt.id = t.target_small_scene_id
+                WHERE t.large_scene_id = ?
+                ORDER BY t.sort_order ASC
+                """,
+                (large_scene_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_transition(
+        self,
+        transition_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        target_environment = environment or self._active_environment
+        with self.connection(target_environment) as connection:
+            row = connection.execute(
+                """
+                SELECT t.id, t.large_scene_id, t.name, t.transition_type,
+                       t.duration_frames, t.description,
+                       t.source_small_scene_id, t.target_small_scene_id,
+                       t.sort_order, t.created_at, t.updated_at,
+                       ss_src.name AS source_small_scene_name,
+                       ss_tgt.name AS target_small_scene_name
+                FROM transitions t
+                LEFT JOIN small_scenes ss_src ON ss_src.id = t.source_small_scene_id
+                LEFT JOIN small_scenes ss_tgt ON ss_tgt.id = t.target_small_scene_id
+                WHERE t.id = ?
+                """,
+                (transition_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def create_transition(
+        self,
+        large_scene_id: str,
+        name: str = "",
+        transition_type: str = "cut",
+        duration_frames: int = 0,
+        description: str = "",
+        source_small_scene_id: str | None = None,
+        target_small_scene_id: str | None = None,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        if transition_type not in self._TRANSITION_TYPES:
+            raise ValueError(
+                f"转场类型无效，允许值: {', '.join(self._TRANSITION_TYPES)}"
+            )
+        if duration_frames < 0:
+            raise ValueError("转场帧数不能为负数。")
+        name = name.strip()
+        if len(name) > 80:
+            raise ValueError("转场名称不能超过 80 字。")
+        target_environment = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        transition_id = str(uuid4())
+        with self._lock, self.connection(target_environment) as connection:
+            parent = connection.execute(
+                "SELECT id FROM large_scenes WHERE id = ?", (large_scene_id,)
+            ).fetchone()
+            if not parent:
+                raise ValueError("大场景不存在。")
+            if source_small_scene_id:
+                src = connection.execute(
+                    "SELECT id FROM small_scenes WHERE id = ? AND large_scene_id = ?",
+                    (source_small_scene_id, large_scene_id),
+                ).fetchone()
+                if not src:
+                    raise ValueError("来源小场景不存在或不属于该大场景。")
+            if target_small_scene_id:
+                tgt = connection.execute(
+                    "SELECT id FROM small_scenes WHERE id = ? AND large_scene_id = ?",
+                    (target_small_scene_id, large_scene_id),
+                ).fetchone()
+                if not tgt:
+                    raise ValueError("目标小场景不存在或不属于该大场景。")
+            max_order = connection.execute(
+                "SELECT COALESCE(MAX(sort_order), 0) FROM transitions WHERE large_scene_id = ?",
+                (large_scene_id,),
+            ).fetchone()[0]
+            connection.execute(
+                """
+                INSERT INTO transitions (id, large_scene_id, name, transition_type,
+                    duration_frames, description, source_small_scene_id,
+                    target_small_scene_id, sort_order, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (transition_id, large_scene_id, name, transition_type,
+                 duration_frames, description, source_small_scene_id,
+                 target_small_scene_id, max_order + 1, now, now),
+            )
+        return self.get_transition(transition_id, target_environment)  # type: ignore[return-value]
+
+    def update_transition(
+        self,
+        transition_id: str,
+        *,
+        name: str | None = None,
+        transition_type: str | None = None,
+        duration_frames: int | None = None,
+        description: str | None = None,
+        source_small_scene_id: str | None | object = _UNSET,
+        target_small_scene_id: str | None | object = _UNSET,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        target_environment = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self.connection(target_environment) as connection:
+            existing = connection.execute(
+                "SELECT id, large_scene_id FROM transitions WHERE id = ?",
+                (transition_id,),
+            ).fetchone()
+            if not existing:
+                raise ValueError("转场不存在。")
+            large_scene_id = existing["large_scene_id"]
+            sets: list[str] = []
+            params: list[object] = []
+            if name is not None:
+                name = name.strip()
+                if len(name) > 80:
+                    raise ValueError("转场名称不能超过 80 字。")
+                sets.append("name = ?")
+                params.append(name)
+            if transition_type is not None:
+                if transition_type not in self._TRANSITION_TYPES:
+                    raise ValueError(
+                        f"转场类型无效，允许值: {', '.join(self._TRANSITION_TYPES)}"
+                    )
+                sets.append("transition_type = ?")
+                params.append(transition_type)
+            if duration_frames is not None:
+                if duration_frames < 0:
+                    raise ValueError("转场帧数不能为负数。")
+                sets.append("duration_frames = ?")
+                params.append(duration_frames)
+            if description is not None:
+                sets.append("description = ?")
+                params.append(description)
+            if source_small_scene_id is not _UNSET:
+                if source_small_scene_id is not None:
+                    src = connection.execute(
+                        "SELECT id FROM small_scenes WHERE id = ? AND large_scene_id = ?",
+                        (source_small_scene_id, large_scene_id),
+                    ).fetchone()
+                    if not src:
+                        raise ValueError("来源小场景不存在或不属于该大场景。")
+                sets.append("source_small_scene_id = ?")
+                params.append(source_small_scene_id)
+            if target_small_scene_id is not _UNSET:
+                if target_small_scene_id is not None:
+                    tgt = connection.execute(
+                        "SELECT id FROM small_scenes WHERE id = ? AND large_scene_id = ?",
+                        (target_small_scene_id, large_scene_id),
+                    ).fetchone()
+                    if not tgt:
+                        raise ValueError("目标小场景不存在或不属于该大场景。")
+                sets.append("target_small_scene_id = ?")
+                params.append(target_small_scene_id)
+            if sets:
+                sets.append("updated_at = ?")
+                params.extend([now, transition_id])
+                connection.execute(
+                    f"UPDATE transitions SET {', '.join(sets)} WHERE id = ?",
+                    params,
+                )
+        return self.get_transition(transition_id, target_environment)  # type: ignore[return-value]
+
+    def delete_transition(
+        self,
+        transition_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        target_environment = environment or self._active_environment
+        with self._lock, self.connection(target_environment) as connection:
+            existing = connection.execute(
+                "SELECT id, large_scene_id FROM transitions WHERE id = ?",
+                (transition_id,),
+            ).fetchone()
+            if not existing:
+                return None
+            large_scene_id = existing["large_scene_id"]
+            connection.execute(
+                "DELETE FROM transitions WHERE id = ?", (transition_id,)
+            )
+            remaining = connection.execute(
+                "SELECT id FROM transitions WHERE large_scene_id = ? ORDER BY sort_order ASC",
+                (large_scene_id,),
+            ).fetchall()
+            for idx, r in enumerate(remaining, start=1):
+                connection.execute(
+                    "UPDATE transitions SET sort_order = ? WHERE id = ?",
+                    (idx, r["id"]),
+                )
+        return {"id": transition_id}
+
+    def reorder_transitions(
+        self,
+        large_scene_id: str,
+        transition_ids: list[str],
+        environment: DatabaseEnvironment | None = None,
+    ) -> list[dict[str, object]]:
+        target_environment = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self.connection(target_environment) as connection:
+            parent = connection.execute(
+                "SELECT id FROM large_scenes WHERE id = ?", (large_scene_id,)
+            ).fetchone()
+            if not parent:
+                raise ValueError("大场景不存在。")
+            existing_ids = {
+                r["id"] for r in connection.execute(
+                    "SELECT id FROM transitions WHERE large_scene_id = ?",
+                    (large_scene_id,),
+                ).fetchall()
+            }
+            for tid in transition_ids:
+                if tid not in existing_ids:
+                    raise ValueError(f"转场 {tid} 不属于该大场景。")
+            for idx, tid in enumerate(transition_ids, start=1):
+                connection.execute(
+                    "UPDATE transitions SET sort_order = ?, updated_at = ? WHERE id = ?",
+                    (idx, now, tid),
+                )
+        return self.list_transitions(large_scene_id, target_environment)
 
     # ── Shot Pages ─────────────────────────────────────────────────────
 

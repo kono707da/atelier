@@ -972,6 +972,32 @@ class MoveSmallSceneRequest(BaseModel):
     target_sort_order: int = Field(ge=1)
 
 
+class CreateTransitionRequest(BaseModel):
+    name: str = Field(default="", max_length=80)
+    transition_type: Literal[
+        "cut", "fade", "dissolve", "wipe", "slide", "custom"
+    ] = "cut"
+    duration_frames: int = Field(default=0, ge=0)
+    description: str = Field(default="", max_length=500)
+    source_small_scene_id: str | None = None
+    target_small_scene_id: str | None = None
+
+
+class UpdateTransitionRequest(BaseModel):
+    name: str | None = Field(default=None, max_length=80)
+    transition_type: Literal[
+        "cut", "fade", "dissolve", "wipe", "slide", "custom"
+    ] | None = None
+    duration_frames: int | None = Field(default=None, ge=0)
+    description: str | None = Field(default=None, max_length=500)
+    source_small_scene_id: str | None = None
+    target_small_scene_id: str | None = None
+
+
+class ReorderTransitionsRequest(BaseModel):
+    transition_ids: list[str]
+
+
 class CreateShotPageRequest(BaseModel):
     title: str = Field(min_length=1, max_length=120)
     branch_id: str | None = None
@@ -5161,6 +5187,85 @@ def create_app(
         return {
             "database_environment": manager.active_environment,
             "deleted": result,
+        }
+
+    # ── Transitions ───────────────────────────────────────────────────
+
+    @app.get("/api/large-scenes/{large_scene_id}/transitions")
+    def list_transitions(large_scene_id: str) -> dict[str, object]:
+        items = manager.list_transitions(large_scene_id)
+        return {
+            "database_environment": manager.active_environment,
+            "large_scene_id": large_scene_id,
+            "items": items,
+            "total": len(items),
+        }
+
+    @app.post(
+        "/api/large-scenes/{large_scene_id}/transitions",
+        status_code=status.HTTP_201_CREATED,
+    )
+    def create_transition(
+        large_scene_id: str, request: CreateTransitionRequest
+    ) -> dict[str, object]:
+        try:
+            transition = manager.create_transition(
+                large_scene_id,
+                name=request.name,
+                transition_type=request.transition_type,
+                duration_frames=request.duration_frames,
+                description=request.description,
+                source_small_scene_id=request.source_small_scene_id,
+                target_small_scene_id=request.target_small_scene_id,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return {
+            "database_environment": manager.active_environment,
+            "transition": transition,
+        }
+
+    @app.patch("/api/transitions/{transition_id}")
+    def update_transition(
+        transition_id: str, request: UpdateTransitionRequest
+    ) -> dict[str, object]:
+        if manager.get_transition(transition_id) is None:
+            raise HTTPException(status_code=404, detail="转场不存在。")
+        try:
+            updates = request.model_dump(exclude_unset=True)
+            transition = manager.update_transition(transition_id, **updates)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return {
+            "database_environment": manager.active_environment,
+            "transition": transition,
+        }
+
+    @app.delete("/api/transitions/{transition_id}")
+    def delete_transition(transition_id: str) -> dict[str, object]:
+        result = manager.delete_transition(transition_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail="转场不存在。")
+        return {
+            "database_environment": manager.active_environment,
+            "deleted": result,
+        }
+
+    @app.put("/api/large-scenes/{large_scene_id}/transitions/reorder")
+    def reorder_transitions(
+        large_scene_id: str, request: ReorderTransitionsRequest
+    ) -> dict[str, object]:
+        try:
+            items = manager.reorder_transitions(
+                large_scene_id, request.transition_ids
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return {
+            "database_environment": manager.active_environment,
+            "large_scene_id": large_scene_id,
+            "items": items,
+            "total": len(items),
         }
 
     # ── Shot Pages ────────────────────────────────────────────────────

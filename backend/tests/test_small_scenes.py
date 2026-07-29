@@ -395,5 +395,175 @@ class SmallSceneDatabaseTests(unittest.TestCase):
             )
 
 
+class TransitionApiTests(unittest.TestCase):
+    """转场结构块接口测试。"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.app = create_app(
+            data_root=Path(self._tmp.name),
+            environment="test",
+            locked_environment="test",
+        )
+        self.client = TestClient(self.app)
+        self.manager = self.app.state.database_manager
+        self.project = self.manager.create_project("转场测试项目")
+        self.chapter = self.manager.create_chapter(
+            str(self.project["id"]), "第一章"
+        )
+        self.large_scene = self.manager.create_large_scene(
+            str(self.chapter["id"]), "公共沙滩"
+        )
+
+    def _create_transition(self, **kwargs) -> dict:
+        response = self.client.post(
+            f"/api/large-scenes/{self.large_scene['id']}/transitions",
+            json=kwargs,
+        )
+        self.assertEqual(response.status_code, 201, response.text)
+        return response.json()["transition"]
+
+    def test_list_empty(self) -> None:
+        response = self.client.get(
+            f"/api/large-scenes/{self.large_scene['id']}/transitions"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["items"], [])
+
+    def test_create_transition(self) -> None:
+        t = self._create_transition(
+            name="淡入",
+            transition_type="fade",
+            duration_frames=12,
+            description="开场淡入",
+        )
+        self.assertEqual(t["name"], "淡入")
+        self.assertEqual(t["transition_type"], "fade")
+        self.assertEqual(t["duration_frames"], 12)
+        self.assertEqual(t["sort_order"], 1)
+
+    def test_create_default_cut(self) -> None:
+        t = self._create_transition()
+        self.assertEqual(t["transition_type"], "cut")
+        self.assertEqual(t["duration_frames"], 0)
+
+    def test_create_with_source_and_target(self) -> None:
+        ss_a = self.manager.create_small_scene(
+            str(self.large_scene["id"]), "场景A"
+        )
+        ss_b = self.manager.create_small_scene(
+            str(self.large_scene["id"]), "场景B"
+        )
+        t = self._create_transition(
+            name="A到B转场",
+            source_small_scene_id=str(ss_a["id"]),
+            target_small_scene_id=str(ss_b["id"]),
+        )
+        self.assertEqual(t["source_small_scene_id"], str(ss_a["id"]))
+        self.assertEqual(t["target_small_scene_id"], str(ss_b["id"]))
+        self.assertEqual(t["source_small_scene_name"], "场景A")
+        self.assertEqual(t["target_small_scene_name"], "场景B")
+
+    def test_invalid_transition_type_rejected(self) -> None:
+        response = self.client.post(
+            f"/api/large-scenes/{self.large_scene['id']}/transitions",
+            json={"transition_type": "invalid"},
+        )
+        self.assertEqual(response.status_code, 422)
+
+    def test_negative_duration_rejected(self) -> None:
+        response = self.client.post(
+            f"/api/large-scenes/{self.large_scene['id']}/transitions",
+            json={"duration_frames": -1},
+        )
+        self.assertEqual(response.status_code, 422)
+
+    def test_create_with_invalid_source_scene(self) -> None:
+        response = self.client.post(
+            f"/api/large-scenes/{self.large_scene['id']}/transitions",
+            json={"source_small_scene_id": "missing-id"},
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_update_transition(self) -> None:
+        t = self._create_transition(name="原名称")
+        response = self.client.patch(
+            f"/api/transitions/{t['id']}",
+            json={"name": "新名称", "duration_frames": 24},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        updated = response.json()["transition"]
+        self.assertEqual(updated["name"], "新名称")
+        self.assertEqual(updated["duration_frames"], 24)
+
+    def test_update_missing_returns_404(self) -> None:
+        response = self.client.patch(
+            "/api/transitions/missing-id",
+            json={"name": "x"},
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_delete_transition(self) -> None:
+        t = self._create_transition(name="删除我")
+        response = self.client.delete(f"/api/transitions/{t['id']}")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(response.json()["deleted"])
+        # Deleted transition is gone
+        self.assertIsNone(self.manager.get_transition(t["id"]))
+
+    def test_delete_missing_returns_404(self) -> None:
+        response = self.client.delete("/api/transitions/missing-id")
+        self.assertEqual(response.status_code, 404)
+
+    def test_delete_renumbers_remaining(self) -> None:
+        t1 = self._create_transition(name="T1")
+        t2 = self._create_transition(name="T2")
+        t3 = self._create_transition(name="T3")
+        self.client.delete(f"/api/transitions/{t2['id']}")
+        items = self.client.get(
+            f"/api/large-scenes/{self.large_scene['id']}/transitions"
+        ).json()["items"]
+        self.assertEqual(len(items), 2)
+        self.assertEqual([i["sort_order"] for i in items], [1, 2])
+        self.assertEqual(items[0]["id"], t1["id"])
+        self.assertEqual(items[1]["id"], t3["id"])
+
+    def test_reorder_transitions(self) -> None:
+        t1 = self._create_transition(name="T1")
+        t2 = self._create_transition(name="T2")
+        t3 = self._create_transition(name="T3")
+        response = self.client.put(
+            f"/api/large-scenes/{self.large_scene['id']}/transitions/reorder",
+            json={"transition_ids": [t3["id"], t1["id"], t2["id"]]},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        items = response.json()["items"]
+        self.assertEqual([i["id"] for i in items], [t3["id"], t1["id"], t2["id"]])
+        self.assertEqual([i["sort_order"] for i in items], [1, 2, 3])
+
+    def test_large_scene_delete_cascades_to_transitions(self) -> None:
+        self._create_transition(name="T1")
+        with self.manager.connection("test") as connection:
+            connection.execute(
+                "DELETE FROM large_scenes WHERE id = ?",
+                (str(self.large_scene["id"]),),
+            )
+        items = self.manager.list_transitions(str(self.large_scene["id"]))
+        self.assertEqual(items, [])
+
+    def test_source_scene_deleted_sets_null(self) -> None:
+        ss_a = self.manager.create_small_scene(
+            str(self.large_scene["id"]), "场景A"
+        )
+        t = self._create_transition(
+            source_small_scene_id=str(ss_a["id"]),
+        )
+        self.manager.delete_small_scene(str(ss_a["id"]))
+        refreshed = self.manager.get_transition(t["id"])
+        self.assertIsNotNone(refreshed)
+        self.assertIsNone(refreshed["source_small_scene_id"])
+
+
 if __name__ == "__main__":
     unittest.main()
