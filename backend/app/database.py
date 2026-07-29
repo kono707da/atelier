@@ -584,6 +584,22 @@ class DatabaseManager:
                 connection, "v0.5.4", "Extend branches with condition fields; add branch_overrides/story_snapshots/operation_history tables",
                 self._migrate_branches_extend,
             )
+            self._run_migration(
+                connection, "v0.5.5", "Add app_settings/comfyui_node_definitions/comfyui_resource_cache tables for ComfyUI connection layer",
+                self._migrate_comfyui_connect,
+            )
+            self._run_migration(
+                connection, "v0.5.6", "Add workflows/workflow_versions/workflow_drafts/semantic_slots/project_default_workflows tables",
+                self._migrate_workflows,
+            )
+            self._run_migration(
+                connection, "v0.5.7", "Extend workflow_drafts with last_node_id/last_link_id/validation_state for node editor",
+                self._migrate_workflow_draft_extend,
+            )
+            self._run_migration(
+                connection, "v0.5.8", "Extend workflow_drafts with layout_state for regular layout",
+                self._migrate_workflow_draft_layout_extend,
+            )
             marker = connection.execute(
                 "SELECT value FROM atelier_meta WHERE key = 'environment'"
             ).fetchone()
@@ -1559,6 +1575,248 @@ class DatabaseManager:
             "CREATE INDEX IF NOT EXISTS idx_operation_history_project "
             "ON operation_history(project_id, created_at DESC)"
         )
+
+    def _migrate_comfyui_connect(self, connection) -> None:
+        """v0.5.5: 新增 ComfyUI 连接层相关表。
+
+        - app_settings: 应用级键值配置（ComfyUI 地址/超时/WebSocket 等）
+        - comfyui_node_definitions: 缓存 /object_info 节点定义
+        - comfyui_resource_cache: 缓存模型/LoRA/VAE 等资源列表
+
+        幂等：CREATE TABLE IF NOT EXISTS。
+        """
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        # 插入默认 ComfyUI 连接配置（仅一次）
+        existing = connection.execute(
+            "SELECT key FROM app_settings WHERE key = 'comfyui.base_url'"
+        ).fetchone()
+        if not existing:
+            now = datetime.now(timezone.utc).isoformat()
+            defaults = [
+                ("comfyui.base_url", "http://127.0.0.1:8188"),
+                ("comfyui.timeout_seconds", "10"),
+                ("comfyui.websocket_url", ""),
+            ]
+            for key, value in defaults:
+                connection.execute(
+                    "INSERT OR IGNORE INTO app_settings(key, value, updated_at) VALUES (?, ?, ?)",
+                    (key, value, now),
+                )
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS comfyui_node_definitions (
+                node_class TEXT PRIMARY KEY,
+                python_module TEXT NOT NULL DEFAULT '',
+                category TEXT NOT NULL DEFAULT '',
+                display_name TEXT NOT NULL DEFAULT '',
+                definition_json TEXT NOT NULL,
+                is_custom_node INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_comfyui_node_definitions_category "
+            "ON comfyui_node_definitions(category)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_comfyui_node_definitions_custom "
+            "ON comfyui_node_definitions(is_custom_node)"
+        )
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS comfyui_resource_cache (
+                resource_type TEXT NOT NULL,
+                resource_name TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (resource_type, resource_name)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS comfyui_sync_meta (
+                sync_key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+
+    def _migrate_workflows(self, connection) -> None:
+        """v0.5.6: 新增工作流库相关表。
+
+        - workflows: 工作流主表（全局模板或项目副本）
+        - workflow_versions: 不可变版本（发布后不可修改）
+        - workflow_drafts: 可编辑草稿（每个工作流最多一个）
+        - semantic_slots: 语义插槽绑定（节点输入→业务语义）
+        - project_default_workflows: 项目默认工作流关联
+
+        幂等：CREATE TABLE IF NOT EXISTS。
+        """
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS workflows (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                source_type TEXT NOT NULL DEFAULT 'manual',
+                source_identifier TEXT NOT NULL DEFAULT '',
+                project_id TEXT,
+                source_workflow_id TEXT,
+                current_version_id TEXT,
+                draft_id TEXT,
+                is_archived INTEGER NOT NULL DEFAULT 0,
+                archived_at TEXT,
+                is_global_default INTEGER NOT NULL DEFAULT 0,
+                node_count INTEGER NOT NULL DEFAULT 0,
+                revision INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_workflows_project "
+            "ON workflows(project_id, is_archived)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_workflows_archived "
+            "ON workflows(is_archived, updated_at DESC)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_workflows_global_default "
+            "ON workflows(is_global_default) WHERE is_global_default = 1"
+        )
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS workflow_versions (
+                id TEXT PRIMARY KEY,
+                workflow_id TEXT NOT NULL,
+                version_number INTEGER NOT NULL,
+                label TEXT NOT NULL DEFAULT '',
+                normalized_graph TEXT NOT NULL,
+                raw_ui_json TEXT,
+                raw_api_json TEXT,
+                node_count INTEGER NOT NULL DEFAULT 0,
+                checksum TEXT NOT NULL DEFAULT '',
+                is_validated INTEGER NOT NULL DEFAULT 0,
+                validation_result TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (workflow_id)
+                    REFERENCES workflows(id) ON DELETE CASCADE,
+                UNIQUE (workflow_id, version_number)
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_workflow_versions_workflow "
+            "ON workflow_versions(workflow_id, version_number DESC)"
+        )
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS workflow_drafts (
+                id TEXT PRIMARY KEY,
+                workflow_id TEXT NOT NULL UNIQUE,
+                normalized_graph TEXT NOT NULL,
+                raw_ui_json TEXT,
+                raw_api_json TEXT,
+                node_count INTEGER NOT NULL DEFAULT 0,
+                semantic_slots_json TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (workflow_id)
+                    REFERENCES workflows(id) ON DELETE CASCADE
+            )
+            """
+        )
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS semantic_slots (
+                id TEXT PRIMARY KEY,
+                workflow_id TEXT NOT NULL,
+                slot_name TEXT NOT NULL,
+                slot_type TEXT NOT NULL,
+                node_id TEXT NOT NULL,
+                input_name TEXT NOT NULL,
+                transform_rule TEXT NOT NULL DEFAULT '',
+                default_value TEXT,
+                is_required INTEGER NOT NULL DEFAULT 0,
+                conflict_strategy TEXT NOT NULL DEFAULT 'overwrite',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (workflow_id)
+                    REFERENCES workflows(id) ON DELETE CASCADE,
+                UNIQUE (workflow_id, slot_name)
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_semantic_slots_workflow "
+            "ON semantic_slots(workflow_id, slot_type)"
+        )
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS project_default_workflows (
+                project_id TEXT NOT NULL,
+                workflow_id TEXT NOT NULL,
+                set_at TEXT NOT NULL,
+                PRIMARY KEY (project_id),
+                FOREIGN KEY (workflow_id)
+                    REFERENCES workflows(id) ON DELETE CASCADE
+            )
+            """
+        )
+
+    def _migrate_workflow_draft_extend(self, connection) -> None:
+        """v0.5.7: 扩展 workflow_drafts 表，支持节点编辑器。
+
+        - last_node_id: 草稿中已分配的最大节点 ID（用于新增节点分配 ID）
+        - last_link_id: 草稿中已分配的最大连线 ID
+        - validation_state: 上次校验结果（JSON 字符串，含 errors/warnings/validated_at）
+
+        幂等：使用 PRAGMA table_info 检查列是否存在。
+        """
+        cols = [row["name"] for row in connection.execute("PRAGMA table_info(workflow_drafts)").fetchall()]
+        if "last_node_id" not in cols:
+            connection.execute(
+                "ALTER TABLE workflow_drafts ADD COLUMN last_node_id INTEGER NOT NULL DEFAULT 0"
+            )
+        if "last_link_id" not in cols:
+            connection.execute(
+                "ALTER TABLE workflow_drafts ADD COLUMN last_link_id INTEGER NOT NULL DEFAULT 0"
+            )
+        if "validation_state" not in cols:
+            connection.execute(
+                "ALTER TABLE workflow_drafts ADD COLUMN validation_state TEXT"
+            )
+
+    def _migrate_workflow_draft_layout_extend(self, connection) -> None:
+        """v0.5.8: 扩展 workflow_drafts 表，支持规整布局。
+
+        - layout_state: 布局状态（JSON 字符串，含 user_order_constraints/groups/layout）
+
+        幂等：使用 PRAGMA table_info 检查列是否存在。
+        """
+        cols = [row["name"] for row in connection.execute("PRAGMA table_info(workflow_drafts)").fetchall()]
+        if "layout_state" not in cols:
+            connection.execute(
+                "ALTER TABLE workflow_drafts ADD COLUMN layout_state TEXT"
+            )
 
     def activate(self, environment: DatabaseEnvironment) -> None:
         target_environment = self._validate_environment(environment)
@@ -8561,4 +8819,1284 @@ class DatabaseManager:
                     "blocked_pages": blocked_pages,
                 },
             }
+
+    # ──────────────────────────────────────────────────────────────────
+    # 应用设置（app_settings 表）
+    # ──────────────────────────────────────────────────────────────────
+
+    def get_setting(
+        self,
+        key: str,
+        *,
+        environment: DatabaseEnvironment | None = None,
+    ) -> str | None:
+        target = environment or self._active_environment
+        with self._lock, self.connection(target) as connection:
+            row = connection.execute(
+                "SELECT value FROM app_settings WHERE key = ?",
+                (key,),
+            ).fetchone()
+            return row["value"] if row else None
+
+    def set_setting(
+        self,
+        key: str,
+        value: str,
+        *,
+        environment: DatabaseEnvironment | None = None,
+    ) -> None:
+        target = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self.connection(target) as connection:
+            connection.execute(
+                "INSERT INTO app_settings(key, value, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                (key, value, now),
+            )
+
+    def get_settings(
+        self,
+        prefix: str = "",
+        *,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, str]:
+        target = environment or self._active_environment
+        with self._lock, self.connection(target) as connection:
+            if prefix:
+                rows = connection.execute(
+                    "SELECT key, value FROM app_settings WHERE key LIKE ? ORDER BY key",
+                    (f"{prefix}%",),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT key, value FROM app_settings ORDER BY key",
+                ).fetchall()
+            return {row["key"]: row["value"] for row in rows}
+
+    def get_comfyui_settings(
+        self,
+        *,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        target = environment or self._active_environment
+        with self._lock, self.connection(target) as connection:
+            rows = connection.execute(
+                "SELECT key, value FROM app_settings WHERE key LIKE 'comfyui.%' ORDER BY key",
+            ).fetchall()
+        settings: dict[str, str] = {row["key"]: row["value"] for row in rows}
+        base_url = settings.get("comfyui.base_url", "http://127.0.0.1:8188")
+        timeout_raw = settings.get("comfyui.timeout_seconds", "10")
+        try:
+            timeout = float(timeout_raw)
+        except (TypeError, ValueError):
+            timeout = 10.0
+        websocket_url = settings.get("comfyui.websocket_url", "")
+        return {
+            "base_url": base_url,
+            "timeout_seconds": timeout,
+            "websocket_url": websocket_url,
+        }
+
+    def set_comfyui_settings(
+        self,
+        *,
+        base_url: str | None = None,
+        timeout_seconds: float | None = None,
+        websocket_url: str | None = None,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        target = environment or self._active_environment
+        if base_url is not None:
+            self.set_setting("comfyui.base_url", str(base_url), environment=target)
+        if timeout_seconds is not None:
+            self.set_setting("comfyui.timeout_seconds", str(timeout_seconds), environment=target)
+        if websocket_url is not None:
+            self.set_setting("comfyui.websocket_url", str(websocket_url), environment=target)
+        return self.get_comfyui_settings(environment=target)
+
+    # ──────────────────────────────────────────────────────────────────
+    # ComfyUI 节点定义缓存（comfyui_node_definitions 表）
+    # ──────────────────────────────────────────────────────────────────
+
+    def save_node_definitions(
+        self,
+        object_info: dict[str, object],
+        *,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        """全量替换节点定义缓存。
+
+        删除旧缓存并写入新数据。返回摘要信息。
+        """
+        target = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self.connection(target) as connection:
+            connection.execute("DELETE FROM comfyui_node_definitions")
+            rows_to_insert: list[tuple] = []
+            custom_count = 0
+            for node_class, definition in object_info.items():
+                if not isinstance(definition, dict):
+                    continue
+                python_module = str(definition.get("python_module", ""))
+                category = str(definition.get("category", ""))
+                display_name = str(definition.get("display_name", node_class))
+                is_custom = 1 if python_module.startswith("custom_nodes.") else 0
+                if is_custom:
+                    custom_count += 1
+                rows_to_insert.append(
+                    (
+                        node_class,
+                        python_module,
+                        category,
+                        display_name,
+                        json.dumps(definition, ensure_ascii=False),
+                        is_custom,
+                        now,
+                    )
+                )
+            connection.executemany(
+                """
+                INSERT INTO comfyui_node_definitions
+                    (node_class, python_module, category, display_name, definition_json, is_custom_node, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows_to_insert,
+            )
+            total = len(rows_to_insert)
+            connection.execute(
+                "INSERT INTO comfyui_sync_meta(sync_key, value, updated_at) VALUES ('node_definitions.count', ?, ?) "
+                "ON CONFLICT(sync_key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                (str(total), now),
+            )
+            connection.execute(
+                "INSERT INTO comfyui_sync_meta(sync_key, value, updated_at) VALUES ('node_definitions.custom_count', ?, ?) "
+                "ON CONFLICT(sync_key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                (str(custom_count), now),
+            )
+            connection.execute(
+                "INSERT INTO comfyui_sync_meta(sync_key, value, updated_at) VALUES ('node_definitions.last_sync', ?, ?) "
+                "ON CONFLICT(sync_key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                (now, now),
+            )
+        return {
+            "node_count": total,
+            "custom_node_count": custom_count,
+            "synced_at": now,
+        }
+
+    def list_node_definitions(
+        self,
+        *,
+        category: str | None = None,
+        is_custom: bool | None = None,
+        search: str | None = None,
+        limit: int = 200,
+        offset: int = 0,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        target = environment or self._active_environment
+        with self._lock, self.connection(target) as connection:
+            where_parts: list[str] = []
+            params: list[object] = []
+            if category:
+                where_parts.append("category = ?")
+                params.append(category)
+            if is_custom is not None:
+                where_parts.append("is_custom_node = ?")
+                params.append(1 if is_custom else 0)
+            if search:
+                where_parts.append("(node_class LIKE ? OR display_name LIKE ?)")
+                params.extend([f"%{search}%", f"%{search}%"])
+            where_clause = (" WHERE " + " AND ".join(where_parts)) if where_parts else ""
+            total_row = connection.execute(
+                f"SELECT COUNT(*) AS cnt FROM comfyui_node_definitions{where_clause}",
+                params,
+            ).fetchone()
+            total = total_row["cnt"] if total_row else 0
+            rows = connection.execute(
+                f"""
+                SELECT node_class, python_module, category, display_name, is_custom_node, updated_at
+                FROM comfyui_node_definitions{where_clause}
+                ORDER BY category, node_class
+                LIMIT ? OFFSET ?
+                """,
+                params + [limit, offset],
+            ).fetchall()
+            items = [
+                {
+                    "node_class": row["node_class"],
+                    "python_module": row["python_module"],
+                    "category": row["category"],
+                    "display_name": row["display_name"],
+                    "is_custom_node": bool(row["is_custom_node"]),
+                    "updated_at": row["updated_at"],
+                }
+                for row in rows
+            ]
+        return {
+            "items": items,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "has_more": (offset + len(items)) < total,
+        }
+
+    def get_node_definition(
+        self,
+        node_class: str,
+        *,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        target = environment or self._active_environment
+        with self._lock, self.connection(target) as connection:
+            row = connection.execute(
+                "SELECT * FROM comfyui_node_definitions WHERE node_class = ?",
+                (node_class,),
+            ).fetchone()
+            if not row:
+                return None
+            try:
+                definition = json.loads(row["definition_json"])
+            except (TypeError, ValueError):
+                definition = {}
+        return {
+            "node_class": row["node_class"],
+            "python_module": row["python_module"],
+            "category": row["category"],
+            "display_name": row["display_name"],
+            "is_custom_node": bool(row["is_custom_node"]),
+            "updated_at": row["updated_at"],
+            "definition": definition,
+        }
+
+    def get_node_definition_summary(
+        self,
+        *,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        target = environment or self._active_environment
+        with self._lock, self.connection(target) as connection:
+            count_row = connection.execute(
+                "SELECT COUNT(*) AS cnt FROM comfyui_node_definitions"
+            ).fetchone()
+            custom_row = connection.execute(
+                "SELECT COUNT(*) AS cnt FROM comfyui_node_definitions WHERE is_custom_node = 1"
+            ).fetchone()
+            meta_rows = connection.execute(
+                "SELECT sync_key, value, updated_at FROM comfyui_sync_meta "
+                "WHERE sync_key LIKE 'node_definitions.%'"
+            ).fetchall()
+        meta = {row["sync_key"]: row["value"] for row in meta_rows}
+        last_sync = meta.get("node_definitions.last_sync", "")
+        return {
+            "node_count": count_row["cnt"] if count_row else 0,
+            "custom_node_count": custom_row["cnt"] if custom_row else 0,
+            "last_synced_at": last_sync,
+        }
+
+    def list_node_categories(
+        self,
+        *,
+        environment: DatabaseEnvironment | None = None,
+    ) -> list[str]:
+        target = environment or self._active_environment
+        with self._lock, self.connection(target) as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT category FROM comfyui_node_definitions "
+                "WHERE category != '' ORDER BY category"
+            ).fetchall()
+        return [row["category"] for row in rows]
+
+    # ──────────────────────────────────────────────────────────────────
+    # ComfyUI 资源缓存（comfyui_resource_cache 表）
+    # ──────────────────────────────────────────────────────────────────
+
+    def save_resource_cache(
+        self,
+        resource_type: str,
+        resource_names: list[str],
+        *,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        """全量替换某一资源类型的缓存。"""
+        target = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self.connection(target) as connection:
+            connection.execute(
+                "DELETE FROM comfyui_resource_cache WHERE resource_type = ?",
+                (resource_type,),
+            )
+            if resource_names:
+                connection.executemany(
+                    "INSERT INTO comfyui_resource_cache(resource_type, resource_name, updated_at) VALUES (?, ?, ?)",
+                    [(resource_type, name, now) for name in resource_names],
+                )
+            connection.execute(
+                "INSERT INTO comfyui_sync_meta(sync_key, value, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(sync_key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                (f"resources.{resource_type}.count", str(len(resource_names)), now),
+            )
+            connection.execute(
+                "INSERT INTO comfyui_sync_meta(sync_key, value, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(sync_key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                (f"resources.{resource_type}.last_sync", now, now),
+            )
+        return {
+            "resource_type": resource_type,
+            "count": len(resource_names),
+            "synced_at": now,
+        }
+
+    def list_resource_cache(
+        self,
+        resource_type: str | None = None,
+        *,
+        search: str | None = None,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        target = environment or self._active_environment
+        with self._lock, self.connection(target) as connection:
+            where_parts: list[str] = []
+            params: list[object] = []
+            if resource_type:
+                where_parts.append("resource_type = ?")
+                params.append(resource_type)
+            if search:
+                where_parts.append("resource_name LIKE ?")
+                params.append(f"%{search}%")
+            where_clause = (" WHERE " + " AND ".join(where_parts)) if where_parts else ""
+            rows = connection.execute(
+                f"""
+                SELECT resource_type, resource_name, updated_at
+                FROM comfyui_resource_cache{where_clause}
+                ORDER BY resource_type, resource_name
+                """
+                + (" LIMIT 2000" if not where_clause else " LIMIT 2000"),
+                params,
+            ).fetchall()
+            grouped: dict[str, list[str]] = {}
+            updated_map: dict[str, str] = {}
+            for row in rows:
+                grouped.setdefault(row["resource_type"], []).append(row["resource_name"])
+                updated_map[row["resource_type"]] = row["updated_at"]
+        return {
+            "resources": grouped,
+            "updated_at": updated_map,
+        }
+
+    # ──────────────────────────────────────────────────────────────────
+    # 工作流库（workflows/workflow_versions/workflow_drafts/semantic_slots 表）
+    # ──────────────────────────────────────────────────────────────────
+
+    def create_workflow(
+        self,
+        name: str,
+        *,
+        description: str = "",
+        source_type: str = "manual",
+        source_identifier: str = "",
+        project_id: str | None = None,
+        source_workflow_id: str | None = None,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        """创建工作流。project_id 为 None 时是全局模板。"""
+        target = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        workflow_id = uuid4().hex
+        workflow = {
+            "id": workflow_id,
+            "name": name,
+            "description": description,
+            "source_type": source_type,
+            "source_identifier": source_identifier,
+            "project_id": project_id,
+            "source_workflow_id": source_workflow_id,
+            "current_version_id": None,
+            "draft_id": None,
+            "is_archived": False,
+            "archived_at": None,
+            "is_global_default": False,
+            "node_count": 0,
+            "revision": 1,
+            "created_at": now,
+            "updated_at": now,
+        }
+        with self._lock, self.connection(target) as connection:
+            connection.execute(
+                """
+                INSERT INTO workflows(
+                    id, name, description, source_type, source_identifier,
+                    project_id, source_workflow_id, current_version_id, draft_id,
+                    is_archived, archived_at, is_global_default, node_count, revision,
+                    created_at, updated_at
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    workflow_id, name, description, source_type, source_identifier,
+                    project_id, source_workflow_id, None, None,
+                    0, None, 0, 0, 1, now, now,
+                ),
+            )
+        return workflow
+
+    def get_workflow(
+        self,
+        workflow_id: str,
+        *,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        """获取工作流详情，包括 current_version 和 draft 摘要。"""
+        target = environment or self._active_environment
+        with self.connection(target) as connection:
+            row = connection.execute(
+                """
+                SELECT w.id, w.name, w.description, w.source_type, w.source_identifier,
+                       w.project_id, w.source_workflow_id, w.current_version_id, w.draft_id,
+                       w.is_archived, w.archived_at, w.is_global_default, w.node_count,
+                       w.revision, w.created_at, w.updated_at
+                FROM workflows w
+                WHERE w.id = ?
+                """,
+                (workflow_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            result = dict(row)
+            result["is_archived"] = bool(result["is_archived"])
+            result["is_global_default"] = bool(result["is_global_default"])
+            current_version = None
+            if row["current_version_id"]:
+                cv = connection.execute(
+                    """
+                    SELECT id, version_number, label, node_count, checksum,
+                           is_validated, created_at
+                    FROM workflow_versions
+                    WHERE id = ?
+                    """,
+                    (row["current_version_id"],),
+                ).fetchone()
+                if cv:
+                    current_version = dict(cv)
+                    current_version["is_validated"] = bool(current_version["is_validated"])
+            result["current_version"] = current_version
+            draft = None
+            if row["draft_id"]:
+                dr = connection.execute(
+                    """
+                    SELECT id, workflow_id, node_count, updated_at
+                    FROM workflow_drafts
+                    WHERE id = ?
+                    """,
+                    (row["draft_id"],),
+                ).fetchone()
+                if dr:
+                    draft = dict(dr)
+            result["draft"] = draft
+        return result
+
+    def list_workflows(
+        self,
+        *,
+        project_id: str | None = None,
+        include_global: bool = True,
+        include_archived: bool = False,
+        archived_only: bool = False,
+        search: str | None = None,
+        sort: str = "updated",
+        limit: int = 50,
+        offset: int = 0,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        """列出工作流。project_id=None 列全局模板，project_id 非空列项目副本+全局模板。
+
+        - include_archived=True: 返回所有工作流（含归档）
+        - archived_only=True: 只返回归档的工作流（优先级高于 include_archived）
+        - 两者都为 False: 只返回未归档的工作流
+        """
+        target = environment or self._active_environment
+        conditions: list[str] = []
+        params: list[object] = []
+        if project_id is None:
+            conditions.append("project_id IS NULL")
+        else:
+            if include_global:
+                conditions.append("(project_id = ? OR project_id IS NULL)")
+                params.append(project_id)
+            else:
+                conditions.append("project_id = ?")
+                params.append(project_id)
+        if archived_only:
+            conditions.append("is_archived = 1")
+        elif not include_archived:
+            conditions.append("is_archived = 0")
+        if search:
+            conditions.append("(name LIKE ? OR description LIKE ?)")
+            params.extend([f"%{search}%", f"%{search}%"])
+        where_clause = " WHERE " + " AND ".join(conditions)
+        order_clause = {
+            "updated": " ORDER BY updated_at DESC, created_at DESC",
+            "created": " ORDER BY created_at DESC, updated_at DESC",
+            "name": " ORDER BY name ASC, created_at ASC",
+            "node_count": " ORDER BY node_count DESC, updated_at DESC",
+        }.get(sort, " ORDER BY updated_at DESC, created_at DESC")
+        with self.connection(target) as connection:
+            count_row = connection.execute(
+                f"SELECT COUNT(*) AS count FROM workflows{where_clause}",
+                params,
+            ).fetchone()
+            total = int(count_row["count"])
+            rows = connection.execute(
+                f"""
+                SELECT id, name, description, source_type, source_identifier,
+                       project_id, source_workflow_id, current_version_id, draft_id,
+                       is_archived, archived_at, is_global_default, node_count,
+                       revision, created_at, updated_at
+                FROM workflows{where_clause}{order_clause}
+                LIMIT ? OFFSET ?
+                """,
+                [*params, limit, offset],
+            ).fetchall()
+        items = []
+        for row in rows:
+            item = dict(row)
+            item["is_archived"] = bool(item["is_archived"])
+            item["is_global_default"] = bool(item["is_global_default"])
+            items.append(item)
+        return {
+            "items": items,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "has_more": (offset + len(items)) < total,
+        }
+
+    def update_workflow(
+        self,
+        workflow_id: str,
+        *,
+        name: str | None = None,
+        description: str | None = None,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        """更新工作流基本信息。同时递增 revision。"""
+        target = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self.connection(target) as connection:
+            existing = connection.execute(
+                "SELECT id FROM workflows WHERE id = ?",
+                (workflow_id,),
+            ).fetchone()
+            if existing is None:
+                return None
+            set_parts: list[str] = []
+            params: list[object] = []
+            if name is not None:
+                set_parts.append("name = ?")
+                params.append(name)
+            if description is not None:
+                set_parts.append("description = ?")
+                params.append(description)
+            set_parts.append("revision = revision + 1")
+            set_parts.append("updated_at = ?")
+            params.append(now)
+            params.append(workflow_id)
+            connection.execute(
+                f"UPDATE workflows SET {', '.join(set_parts)} WHERE id = ?",
+                params,
+            )
+            row = connection.execute(
+                """
+                SELECT id, name, description, source_type, source_identifier,
+                       project_id, source_workflow_id, current_version_id, draft_id,
+                       is_archived, archived_at, is_global_default, node_count,
+                       revision, created_at, updated_at
+                FROM workflows
+                WHERE id = ?
+                """,
+                (workflow_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["is_archived"] = bool(result["is_archived"])
+        result["is_global_default"] = bool(result["is_global_default"])
+        return result
+
+    def delete_workflow(
+        self,
+        workflow_id: str,
+        *,
+        environment: DatabaseEnvironment | None = None,
+    ) -> bool:
+        """删除工作流（级联删除版本、草稿、插槽）。"""
+        target = environment or self._active_environment
+        with self._lock, self.connection(target) as connection:
+            cursor = connection.execute(
+                "DELETE FROM workflows WHERE id = ?",
+                (workflow_id,),
+            )
+            return cursor.rowcount > 0
+
+    def archive_workflow(
+        self,
+        workflow_id: str,
+        *,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        """归档工作流。"""
+        target = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self.connection(target) as connection:
+            existing = connection.execute(
+                "SELECT id FROM workflows WHERE id = ?",
+                (workflow_id,),
+            ).fetchone()
+            if existing is None:
+                return None
+            connection.execute(
+                "UPDATE workflows SET is_archived = 1, archived_at = ?, updated_at = ? WHERE id = ?",
+                (now, now, workflow_id),
+            )
+            row = connection.execute(
+                """
+                SELECT id, name, description, source_type, source_identifier,
+                       project_id, source_workflow_id, current_version_id, draft_id,
+                       is_archived, archived_at, is_global_default, node_count,
+                       revision, created_at, updated_at
+                FROM workflows
+                WHERE id = ?
+                """,
+                (workflow_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["is_archived"] = bool(result["is_archived"])
+        result["is_global_default"] = bool(result["is_global_default"])
+        return result
+
+    def restore_workflow(
+        self,
+        workflow_id: str,
+        *,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        """恢复归档工作流。"""
+        target = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self.connection(target) as connection:
+            existing = connection.execute(
+                "SELECT id FROM workflows WHERE id = ?",
+                (workflow_id,),
+            ).fetchone()
+            if existing is None:
+                return None
+            connection.execute(
+                "UPDATE workflows SET is_archived = 0, archived_at = NULL, updated_at = ? WHERE id = ?",
+                (now, workflow_id),
+            )
+            row = connection.execute(
+                """
+                SELECT id, name, description, source_type, source_identifier,
+                       project_id, source_workflow_id, current_version_id, draft_id,
+                       is_archived, archived_at, is_global_default, node_count,
+                       revision, created_at, updated_at
+                FROM workflows
+                WHERE id = ?
+                """,
+                (workflow_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["is_archived"] = bool(result["is_archived"])
+        result["is_global_default"] = bool(result["is_global_default"])
+        return result
+
+    def copy_workflow(
+        self,
+        workflow_id: str,
+        *,
+        new_name: str | None = None,
+        project_id: str | None = None,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        """复制工作流。project_id 为 None 时复制为全局模板，非 None 时创建项目副本。
+        source_workflow_id 指向源工作流。复制草稿但不复制版本。"""
+        target = environment or self._active_environment
+        source = self.get_workflow(workflow_id, environment=target)
+        if source is None:
+            raise ValueError("工作流不存在。")
+        now = datetime.now(timezone.utc).isoformat()
+        new_id = uuid4().hex
+        name = new_name or f"{source['name']} (副本)"
+        with self._lock, self.connection(target) as connection:
+            connection.execute(
+                """
+                INSERT INTO workflows(
+                    id, name, description, source_type, source_identifier,
+                    project_id, source_workflow_id, current_version_id, draft_id,
+                    is_archived, archived_at, is_global_default, node_count, revision,
+                    created_at, updated_at
+                )
+                VALUES(?, ?, ?, 'copy', '', ?, ?, NULL, NULL, 0, NULL, 0, ?, 1, ?, ?)
+                """,
+                (
+                    new_id, name, source.get("description", ""),
+                    project_id, workflow_id,
+                    int(source.get("node_count") or 0), now, now,
+                ),
+            )
+            draft_row = connection.execute(
+                """
+                SELECT normalized_graph, raw_ui_json, raw_api_json, node_count, semantic_slots_json
+                FROM workflow_drafts
+                WHERE workflow_id = ?
+                """,
+                (workflow_id,),
+            ).fetchone()
+            if draft_row:
+                new_draft_id = uuid4().hex
+                connection.execute(
+                    """
+                    INSERT INTO workflow_drafts(
+                        id, workflow_id, normalized_graph, raw_ui_json, raw_api_json,
+                        node_count, semantic_slots_json, created_at, updated_at
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        new_draft_id, new_id,
+                        draft_row["normalized_graph"], draft_row["raw_ui_json"],
+                        draft_row["raw_api_json"], draft_row["node_count"],
+                        draft_row["semantic_slots_json"], now, now,
+                    ),
+                )
+                connection.execute(
+                    "UPDATE workflows SET draft_id = ? WHERE id = ?",
+                    (new_draft_id, new_id),
+                )
+            slot_rows = connection.execute(
+                """
+                SELECT slot_name, slot_type, node_id, input_name, transform_rule,
+                       default_value, is_required, conflict_strategy
+                FROM semantic_slots
+                WHERE workflow_id = ?
+                """,
+                (workflow_id,),
+            ).fetchall()
+            for sr in slot_rows:
+                connection.execute(
+                    """
+                    INSERT INTO semantic_slots(
+                        id, workflow_id, slot_name, slot_type, node_id, input_name,
+                        transform_rule, default_value, is_required, conflict_strategy,
+                        created_at, updated_at
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        uuid4().hex, new_id,
+                        sr["slot_name"], sr["slot_type"], sr["node_id"], sr["input_name"],
+                        sr["transform_rule"], sr["default_value"], sr["is_required"],
+                        sr["conflict_strategy"], now, now,
+                    ),
+                )
+        copied = self.get_workflow(new_id, environment=target)
+        assert copied is not None
+        return copied
+
+    def publish_workflow_version(
+        self,
+        workflow_id: str,
+        *,
+        label: str = "",
+        normalized_graph: str,
+        raw_ui_json: str | None = None,
+        raw_api_json: str | None = None,
+        node_count: int = 0,
+        checksum: str = "",
+        is_validated: bool = False,
+        validation_result: str | None = None,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        """发布不可变版本。version_number 自增。更新 workflow.current_version_id。"""
+        target = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        version_id = uuid4().hex
+        with self._lock, self.connection(target) as connection:
+            existing = connection.execute(
+                "SELECT id FROM workflows WHERE id = ?",
+                (workflow_id,),
+            ).fetchone()
+            if existing is None:
+                raise ValueError("工作流不存在。")
+            max_row = connection.execute(
+                "SELECT COALESCE(MAX(version_number), 0) AS max_num FROM workflow_versions WHERE workflow_id = ?",
+                (workflow_id,),
+            ).fetchone()
+            next_number = int(max_row["max_num"]) + 1
+            connection.execute(
+                """
+                INSERT INTO workflow_versions(
+                    id, workflow_id, version_number, label, normalized_graph,
+                    raw_ui_json, raw_api_json, node_count, checksum,
+                    is_validated, validation_result, created_at
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    version_id, workflow_id, next_number, label, normalized_graph,
+                    raw_ui_json, raw_api_json, node_count, checksum,
+                    1 if is_validated else 0, validation_result, now,
+                ),
+            )
+            connection.execute(
+                "UPDATE workflows SET current_version_id = ?, node_count = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
+                (version_id, node_count, now, workflow_id),
+            )
+            row = connection.execute(
+                """
+                SELECT id, workflow_id, version_number, label, normalized_graph,
+                       raw_ui_json, raw_api_json, node_count, checksum,
+                       is_validated, validation_result, created_at
+                FROM workflow_versions
+                WHERE id = ?
+                """,
+                (version_id,),
+            ).fetchone()
+        result = dict(row)
+        result["is_validated"] = bool(result["is_validated"])
+        return result
+
+    def list_workflow_versions(
+        self,
+        workflow_id: str,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        """列出工作流的版本（按 version_number 降序）。"""
+        target = environment or self._active_environment
+        with self.connection(target) as connection:
+            count_row = connection.execute(
+                "SELECT COUNT(*) AS count FROM workflow_versions WHERE workflow_id = ?",
+                (workflow_id,),
+            ).fetchone()
+            total = int(count_row["count"])
+            rows = connection.execute(
+                """
+                SELECT id, workflow_id, version_number, label, node_count, checksum,
+                       is_validated, validation_result, created_at
+                FROM workflow_versions
+                WHERE workflow_id = ?
+                ORDER BY version_number DESC
+                LIMIT ? OFFSET ?
+                """,
+                (workflow_id, limit, offset),
+            ).fetchall()
+        items = []
+        for row in rows:
+            item = dict(row)
+            item["is_validated"] = bool(item["is_validated"])
+            items.append(item)
+        return {
+            "items": items,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "has_more": (offset + len(items)) < total,
+        }
+
+    def get_workflow_version(
+        self,
+        version_id: str,
+        *,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        """获取版本详情，包含 normalized_graph/raw_ui_json/raw_api_json。"""
+        target = environment or self._active_environment
+        with self.connection(target) as connection:
+            row = connection.execute(
+                """
+                SELECT id, workflow_id, version_number, label, normalized_graph,
+                       raw_ui_json, raw_api_json, node_count, checksum,
+                       is_validated, validation_result, created_at
+                FROM workflow_versions
+                WHERE id = ?
+                """,
+                (version_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["is_validated"] = bool(result["is_validated"])
+        return result
+
+    def get_workflow_draft(
+        self,
+        workflow_id: str,
+        *,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        """获取工作流草稿。"""
+        target = environment or self._active_environment
+        with self.connection(target) as connection:
+            row = connection.execute(
+                """
+                SELECT id, workflow_id, normalized_graph, raw_ui_json, raw_api_json,
+                       node_count, semantic_slots_json, last_node_id, last_link_id,
+                       validation_state, layout_state, created_at, updated_at
+                FROM workflow_drafts
+                WHERE workflow_id = ?
+                """,
+                (workflow_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def save_workflow_draft(
+        self,
+        workflow_id: str,
+        *,
+        normalized_graph: str,
+        raw_ui_json: str | None = None,
+        raw_api_json: str | None = None,
+        node_count: int = 0,
+        semantic_slots_json: str = "[]",
+        last_node_id: int | None = None,
+        last_link_id: int | None = None,
+        validation_state: str | None = None,
+        layout_state: str | None = None,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        """保存草稿（upsert）。如果没有草稿则创建，有则更新。同时更新 workflow.draft_id 和 node_count。"""
+        target = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self.connection(target) as connection:
+            existing = connection.execute(
+                "SELECT id FROM workflows WHERE id = ?",
+                (workflow_id,),
+            ).fetchone()
+            if existing is None:
+                raise ValueError("工作流不存在。")
+            existing_draft = connection.execute(
+                "SELECT id, last_node_id, last_link_id, validation_state, layout_state FROM workflow_drafts WHERE workflow_id = ?",
+                (workflow_id,),
+            ).fetchone()
+            if existing_draft:
+                draft_id = existing_draft["id"]
+                # 保留未传入字段的现有值（草稿增量更新）
+                resolved_last_node = last_node_id if last_node_id is not None else int(existing_draft["last_node_id"] or 0)
+                resolved_last_link = last_link_id if last_link_id is not None else int(existing_draft["last_link_id"] or 0)
+                resolved_validation = validation_state if validation_state is not None else existing_draft["validation_state"]
+                resolved_layout = layout_state if layout_state is not None else existing_draft["layout_state"]
+                connection.execute(
+                    """
+                    UPDATE workflow_drafts
+                    SET normalized_graph = ?, raw_ui_json = ?, raw_api_json = ?,
+                        node_count = ?, semantic_slots_json = ?,
+                        last_node_id = ?, last_link_id = ?, validation_state = ?,
+                        layout_state = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (normalized_graph, raw_ui_json, raw_api_json,
+                     node_count, semantic_slots_json,
+                     resolved_last_node, resolved_last_link, resolved_validation,
+                     resolved_layout,
+                     now, draft_id),
+                )
+            else:
+                draft_id = uuid4().hex
+                connection.execute(
+                    """
+                    INSERT INTO workflow_drafts(
+                        id, workflow_id, normalized_graph, raw_ui_json, raw_api_json,
+                        node_count, semantic_slots_json, last_node_id, last_link_id,
+                        validation_state, layout_state, created_at, updated_at
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        draft_id, workflow_id, normalized_graph, raw_ui_json, raw_api_json,
+                        node_count, semantic_slots_json,
+                        last_node_id or 0, last_link_id or 0, validation_state,
+                        layout_state,
+                        now, now,
+                    ),
+                )
+            connection.execute(
+                "UPDATE workflows SET draft_id = ?, node_count = ?, updated_at = ? WHERE id = ?",
+                (draft_id, node_count, now, workflow_id),
+            )
+            row = connection.execute(
+                """
+                SELECT id, workflow_id, normalized_graph, raw_ui_json, raw_api_json,
+                       node_count, semantic_slots_json, last_node_id, last_link_id,
+                       validation_state, layout_state, created_at, updated_at
+                FROM workflow_drafts
+                WHERE id = ?
+                """,
+                (draft_id,),
+            ).fetchone()
+        return dict(row)
+
+    def batch_get_node_definitions(
+        self,
+        node_classes: list[str],
+        *,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, dict[str, object]]:
+        """批量获取节点定义。返回 {node_class: definition_dict}。
+
+        用于节点编辑器加载工作流所需的所有节点定义。
+        """
+        if not node_classes:
+            return {}
+        target = environment or self._active_environment
+        # 去重并保持顺序
+        unique_classes: list[str] = []
+        seen: set[str] = set()
+        for cls in node_classes:
+            if cls and cls not in seen:
+                seen.add(cls)
+                unique_classes.append(cls)
+        placeholders = ",".join("?" for _ in unique_classes)
+        with self.connection(target) as connection:
+            rows = connection.execute(
+                f"""
+                SELECT node_class, python_module, category, display_name,
+                       is_custom_node, definition_json, updated_at
+                FROM comfyui_node_definitions
+                WHERE node_class IN ({placeholders})
+                """,
+                unique_classes,
+            ).fetchall()
+        result: dict[str, dict[str, object]] = {}
+        for row in rows:
+            try:
+                definition = json.loads(row["definition_json"])
+            except (TypeError, ValueError):
+                definition = {}
+            result[row["node_class"]] = {
+                "node_class": row["node_class"],
+                "python_module": row["python_module"],
+                "category": row["category"],
+                "display_name": row["display_name"],
+                "is_custom_node": bool(row["is_custom_node"]),
+                "updated_at": row["updated_at"],
+                "definition": definition,
+            }
+        return result
+
+    def set_global_default_workflow(
+        self,
+        workflow_id: str,
+        *,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        """设置全局默认工作流。清除其他工作流的 is_global_default。"""
+        target = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self.connection(target) as connection:
+            existing = connection.execute(
+                "SELECT id FROM workflows WHERE id = ?",
+                (workflow_id,),
+            ).fetchone()
+            if existing is None:
+                raise ValueError("工作流不存在。")
+            connection.execute(
+                "UPDATE workflows SET is_global_default = 0 WHERE is_global_default = 1"
+            )
+            connection.execute(
+                "UPDATE workflows SET is_global_default = 1, updated_at = ? WHERE id = ?",
+                (now, workflow_id),
+            )
+            row = connection.execute(
+                """
+                SELECT id, name, description, source_type, source_identifier,
+                       project_id, source_workflow_id, current_version_id, draft_id,
+                       is_archived, archived_at, is_global_default, node_count,
+                       revision, created_at, updated_at
+                FROM workflows
+                WHERE id = ?
+                """,
+                (workflow_id,),
+            ).fetchone()
+        result = dict(row)
+        result["is_archived"] = bool(result["is_archived"])
+        result["is_global_default"] = bool(result["is_global_default"])
+        return result
+
+    def set_project_default_workflow(
+        self,
+        project_id: str,
+        workflow_id: str,
+        *,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        """设置项目默认工作流（upsert project_default_workflows）。"""
+        target = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self.connection(target) as connection:
+            workflow_existing = connection.execute(
+                "SELECT id FROM workflows WHERE id = ?",
+                (workflow_id,),
+            ).fetchone()
+            if workflow_existing is None:
+                raise ValueError("工作流不存在。")
+            connection.execute(
+                """
+                INSERT INTO project_default_workflows(project_id, workflow_id, set_at)
+                VALUES(?, ?, ?)
+                ON CONFLICT(project_id) DO UPDATE SET
+                    workflow_id = excluded.workflow_id,
+                    set_at = excluded.set_at
+                """,
+                (project_id, workflow_id, now),
+            )
+        return {
+            "project_id": project_id,
+            "workflow_id": workflow_id,
+            "set_at": now,
+        }
+
+    def get_project_default_workflow(
+        self,
+        project_id: str,
+        *,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        """获取项目默认工作流。"""
+        target = environment or self._active_environment
+        with self.connection(target) as connection:
+            row = connection.execute(
+                """
+                SELECT pdw.project_id, pdw.workflow_id, pdw.set_at,
+                       w.id, w.name, w.description, w.node_count, w.revision,
+                       w.source_type, w.source_identifier, w.project_id AS workflow_project_id,
+                       w.source_workflow_id, w.current_version_id, w.draft_id,
+                       w.is_archived, w.archived_at, w.is_global_default,
+                       w.created_at, w.updated_at
+                FROM project_default_workflows pdw
+                JOIN workflows w ON w.id = pdw.workflow_id
+                WHERE pdw.project_id = ?
+                """,
+                (project_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["is_archived"] = bool(result.get("is_archived"))
+        result["is_global_default"] = bool(result.get("is_global_default"))
+        return result
+
+    def list_semantic_slots(
+        self,
+        workflow_id: str,
+        *,
+        environment: DatabaseEnvironment | None = None,
+    ) -> list[dict[str, object]]:
+        """列出工作流的语义插槽。"""
+        target = environment or self._active_environment
+        with self.connection(target) as connection:
+            rows = connection.execute(
+                """
+                SELECT id, workflow_id, slot_name, slot_type, node_id, input_name,
+                       transform_rule, default_value, is_required, conflict_strategy,
+                       created_at, updated_at
+                FROM semantic_slots
+                WHERE workflow_id = ?
+                ORDER BY slot_name ASC
+                """,
+                (workflow_id,),
+            ).fetchall()
+        items = []
+        for row in rows:
+            item = dict(row)
+            item["is_required"] = bool(item["is_required"])
+            items.append(item)
+        return items
+
+    def set_semantic_slot(
+        self,
+        workflow_id: str,
+        slot_name: str,
+        *,
+        slot_type: str,
+        node_id: str,
+        input_name: str,
+        transform_rule: str = "",
+        default_value: str | None = None,
+        is_required: bool = False,
+        conflict_strategy: str = "overwrite",
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        """设置语义插槽（upsert by workflow_id + slot_name）。"""
+        target = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        slot_id = uuid4().hex
+        with self._lock, self.connection(target) as connection:
+            existing = connection.execute(
+                "SELECT id FROM workflows WHERE id = ?",
+                (workflow_id,),
+            ).fetchone()
+            if existing is None:
+                raise ValueError("工作流不存在。")
+            connection.execute(
+                """
+                INSERT INTO semantic_slots(
+                    id, workflow_id, slot_name, slot_type, node_id, input_name,
+                    transform_rule, default_value, is_required, conflict_strategy,
+                    created_at, updated_at
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(workflow_id, slot_name) DO UPDATE SET
+                    slot_type = excluded.slot_type,
+                    node_id = excluded.node_id,
+                    input_name = excluded.input_name,
+                    transform_rule = excluded.transform_rule,
+                    default_value = excluded.default_value,
+                    is_required = excluded.is_required,
+                    conflict_strategy = excluded.conflict_strategy,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    slot_id, workflow_id, slot_name, slot_type, node_id, input_name,
+                    transform_rule, default_value, 1 if is_required else 0,
+                    conflict_strategy, now, now,
+                ),
+            )
+            row = connection.execute(
+                """
+                SELECT id, workflow_id, slot_name, slot_type, node_id, input_name,
+                       transform_rule, default_value, is_required, conflict_strategy,
+                       created_at, updated_at
+                FROM semantic_slots
+                WHERE workflow_id = ? AND slot_name = ?
+                """,
+                (workflow_id, slot_name),
+            ).fetchone()
+        result = dict(row)
+        result["is_required"] = bool(result["is_required"])
+        return result
+
+    def delete_semantic_slot(
+        self,
+        workflow_id: str,
+        slot_name: str,
+        *,
+        environment: DatabaseEnvironment | None = None,
+    ) -> bool:
+        """删除语义插槽。"""
+        target = environment or self._active_environment
+        with self._lock, self.connection(target) as connection:
+            cursor = connection.execute(
+                "DELETE FROM semantic_slots WHERE workflow_id = ? AND slot_name = ?",
+                (workflow_id, slot_name),
+            )
+            return cursor.rowcount > 0
+
 

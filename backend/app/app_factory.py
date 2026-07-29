@@ -7,12 +7,13 @@ ASGI 入口 ``app`` 由 ``backend.app.main`` 单独持有。
 from __future__ import annotations
 
 import io
+import json
 import re
 import shutil
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File, status
 from fastapi.encoders import jsonable_encoder
@@ -26,6 +27,51 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .database import DatabaseManager, DatabaseSafetyError
 from . import character_database
+from .comfyui_client import (
+    ComfyUIClient,
+    ComfyUIConnectionConfig,
+    ComfyUIError,
+    extract_resource_lists,
+    summarize_node_definitions,
+)
+from .workflow_models import (
+    NormalizedWorkflow,
+    WorkflowParseError,
+    allocate_link_id,
+    allocate_node_id,
+    are_ports_compatible,
+    build_default_node,
+    detect_format,
+    extract_workflow_from_image,
+    parse_api_json,
+    parse_ui_json,
+    parse_workflow_from_raw,
+    serialize_workflow,
+    validate_workflow,
+)
+from .workflow_layout import (
+    assign_node_to_group,
+    compute_focus_subgraph,
+    compute_layout,
+    compute_link_bundles,
+    create_group,
+    generate_large_workflow,
+    reorder_node,
+    apply_layout,
+)
+from .workflow_slots import (
+    list_builtin_slot_definitions,
+    resolve_all_slots,
+    validate_slot_bindings,
+    apply_slots_to_workflow,
+)
+from .workflow_publish import (
+    export_workflow,
+    normalized_to_api_json,
+    normalized_to_ui_json,
+    precheck_publish,
+    roundtrip_test,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -127,6 +173,204 @@ def read_development_progress(todo_path: Path) -> dict[str, object]:
 class ActivateDatabaseRequest(BaseModel):
     environment: Literal["production", "test"]
     confirmation: str | None = None
+
+
+class ComfyUISettingsRequest(BaseModel):
+    base_url: str | None = None
+    timeout_seconds: float | None = Field(default=None, ge=1.0, le=120.0)
+    websocket_url: str | None = None
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_base_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("ComfyUI 地址不能为空。")
+        if not stripped.startswith(("http://", "https://")):
+            raise ValueError("ComfyUI 地址必须以 http:// 或 https:// 开头。")
+        return stripped.rstrip("/")
+
+
+class SyncResourcesRequest(BaseModel):
+    resource_types: list[str] = Field(
+        default_factory=lambda: [
+            "checkpoints",
+            "loras",
+            "vaes",
+            "embeddings",
+            "controlnet",
+            "upscale_models",
+        ]
+    )
+
+
+class CreateWorkflowRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    description: str = Field(default="", max_length=2000)
+    source_type: str = Field(default="manual")
+    source_identifier: str = Field(default="")
+    project_id: str | None = None
+    source_workflow_id: str | None = None
+
+    @field_validator("name")
+    @classmethod
+    def name_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("工作流名称不能为空。")
+        return value.strip()
+
+    @field_validator("source_type")
+    @classmethod
+    def validate_source_type(cls, value: str) -> str:
+        allowed = {"manual", "ui_json", "api_json", "image_metadata", "copy"}
+        if value not in allowed:
+            raise ValueError(f"source_type 必须是 {allowed} 之一。")
+        return value
+
+class UpdateWorkflowRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = Field(default=None, max_length=2000)
+
+class CopyWorkflowRequest(BaseModel):
+    new_name: str | None = Field(default=None, max_length=120)
+    project_id: str | None = None
+
+class ImportWorkflowRequest(BaseModel):
+    source_format: str = Field(default="auto")
+    raw_json: dict | None = None
+    label: str = Field(default="")
+
+    @field_validator("source_format")
+    @classmethod
+    def validate_source_format(cls, value: str) -> str:
+        allowed = {"auto", "ui_json", "api_json"}
+        if value not in allowed:
+            raise ValueError(f"source_format 必须是 {allowed} 之一。")
+        return value
+
+class PublishVersionRequest(BaseModel):
+    label: str = Field(default="", max_length=200)
+    normalized_graph: str
+    raw_ui_json: str | None = None
+    raw_api_json: str | None = None
+    node_count: int = Field(default=0, ge=0)
+    checksum: str = Field(default="")
+    is_validated: bool = False
+    validation_result: str | None = None
+
+class ExportWorkflowRequest(BaseModel):
+    format: str = Field(default="api_json")
+
+    @field_validator("format")
+    @classmethod
+    def validate_format(cls, value: str) -> str:
+        allowed = {"api_json", "ui_json"}
+        if value not in allowed:
+            raise ValueError(f"format 必须是 {allowed} 之一。")
+        return value
+
+class RoundtripTestRequest(BaseModel):
+    workflow: dict[str, Any] = Field(default_factory=dict)
+    source_format: str = Field(default="auto")
+
+    @field_validator("source_format")
+    @classmethod
+    def validate_source_format(cls, value: str) -> str:
+        allowed = {"auto", "ui_json", "api_json"}
+        if value not in allowed:
+            raise ValueError(f"source_format 必须是 {allowed} 之一。")
+        return value
+
+class SaveDraftRequest(BaseModel):
+    normalized_graph: str
+    raw_ui_json: str | None = None
+    raw_api_json: str | None = None
+    node_count: int = Field(default=0, ge=0)
+    semantic_slots_json: str = Field(default="[]")
+    last_node_id: int | None = Field(default=None, ge=0)
+    last_link_id: int | None = Field(default=None, ge=0)
+    validation_state: str | None = None
+    layout_state: str | None = None
+
+class AddNodeRequest(BaseModel):
+    node_class: str = Field(min_length=1, max_length=200)
+    position_x: int = Field(default=0)
+    position_y: int = Field(default=0)
+
+class UpdateNodeRequest(BaseModel):
+    title: str | None = Field(default=None, max_length=200)
+    widgets_values: list | None = None
+    flags: dict | None = None
+    properties: dict | None = None
+
+class CreateLinkRequest(BaseModel):
+    source_node: str = Field(min_length=1)
+    source_slot: int = Field(default=0, ge=0)
+    target_node: str = Field(min_length=1)
+    target_slot: int = Field(default=0, ge=0)
+    link_type: str = Field(default="")
+
+class BatchNodeDefinitionsRequest(BaseModel):
+    node_classes: list[str] = Field(default_factory=list)
+
+class SetSemanticSlotRequest(BaseModel):
+    slot_name: str = Field(min_length=1, max_length=80)
+    slot_type: str
+    node_id: str
+    input_name: str
+    transform_rule: str = Field(default="")
+    default_value: str | None = None
+    is_required: bool = False
+    conflict_strategy: str = Field(default="overwrite")
+
+class SetProjectDefaultWorkflowRequest(BaseModel):
+    workflow_id: str
+
+
+class ReorderNodeRequest(BaseModel):
+    action: Literal[
+        "forward", "backward", "prev_column", "next_column", "to_top", "to_bottom"
+    ]
+
+
+class CreateGroupRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    color: str = Field(default="#3f789e", max_length=32)
+    members: list[str] = Field(default_factory=list)
+
+
+class UpdateGroupRequest(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    color: str | None = Field(default=None, max_length=32)
+
+
+class AssignGroupRequest(BaseModel):
+    group_id: str | None = None
+
+
+class SaveLayoutStateRequest(BaseModel):
+    layout_state: str = Field(min_length=1)
+
+
+class FocusSubgraphRequest(BaseModel):
+    node_id: str = Field(min_length=1)
+    direction: Literal["upstream", "downstream", "both", "errors"] = "both"
+    error_node_ids: list[str] | None = None
+
+
+class ResolveSlotsRequest(BaseModel):
+    """插槽解析预览请求。
+
+    context 字段传入业务上下文（人物值、素材值、项目默认配置）。
+    """
+    context: dict | None = None
+
+
+class ValidateSlotsRequest(BaseModel):
+    """插槽绑定校验请求。"""
+    pass
 
 
 class CreateProjectRequest(BaseModel):
@@ -923,7 +1167,7 @@ def create_app(
 ) -> FastAPI:
     app = FastAPI(
         title="Atelier API",
-        version="0.5.4",
+        version="0.6.0",
         docs_url="/api/docs",
         redoc_url=None,
     )
@@ -933,6 +1177,28 @@ def create_app(
         locked_environment=locked_environment,
     )
     app.state.database_manager = manager
+
+    # ComfyUI 客户端：基于数据库设置构造，运行时可更新配置
+    def _build_comfyui_client() -> ComfyUIClient:
+        settings = manager.get_comfyui_settings()
+        config = ComfyUIConnectionConfig(
+            base_url=str(settings.get("base_url", "http://127.0.0.1:8188")),
+            timeout_seconds=float(settings.get("timeout_seconds", 10.0)),
+            websocket_url=str(settings.get("websocket_url", "")),
+        )
+        return ComfyUIClient(config)
+
+    comfyui_client = _build_comfyui_client()
+    app.state.comfyui_client = comfyui_client
+
+    def _refresh_comfyui_client() -> ComfyUIClient:
+        """根据数据库最新设置重建 ComfyUI 客户端。"""
+        nonlocal comfyui_client
+        comfyui_client.close()
+        comfyui_client = _build_comfyui_client()
+        app.state.comfyui_client = comfyui_client
+        return comfyui_client
+
     resolved_development_todo_path = (
         system_features_path or SYSTEM_FEATURES_PATH
     ).resolve()
@@ -1101,6 +1367,1397 @@ def create_app(
             return manager.verify_isolation()
         except DatabaseSafetyError as error:
             raise HTTPException(status_code=500, detail=str(error)) from error
+
+    # ── ComfyUI 连接层 ──
+
+    @app.get("/api/settings/comfyui")
+    def get_comfyui_settings() -> dict[str, object]:
+        return {
+            "database_environment": manager.active_environment,
+            "settings": manager.get_comfyui_settings(),
+        }
+
+    @app.put("/api/settings/comfyui")
+    def update_comfyui_settings(request: ComfyUISettingsRequest) -> dict[str, object]:
+        settings = manager.set_comfyui_settings(
+            base_url=request.base_url,
+            timeout_seconds=request.timeout_seconds,
+            websocket_url=request.websocket_url,
+        )
+        # 配置变更后重建客户端
+        _refresh_comfyui_client()
+        return {
+            "database_environment": manager.active_environment,
+            "settings": settings,
+            "message": "ComfyUI 设置已保存，客户端已刷新。",
+        }
+
+    @app.post("/api/comfyui/test-connection")
+    def test_comfyui_connection() -> dict[str, object]:
+        try:
+            stats = comfyui_client.test_connection()
+        except ComfyUIError as error:
+            return {
+                "database_environment": manager.active_environment,
+                "status": "error",
+                "message": str(error),
+                "base_url": comfyui_client.config.normalized_base_url(),
+            }
+        return {
+            "database_environment": manager.active_environment,
+            "status": "ok",
+            "base_url": comfyui_client.config.normalized_base_url(),
+            "websocket_url": comfyui_client.config.derived_websocket_url(),
+            "system": stats.raw.get("system", {}),
+            "devices": stats.devices,
+        }
+
+    @app.get("/api/comfyui/system-stats")
+    def get_comfyui_system_stats() -> dict[str, object]:
+        try:
+            stats = comfyui_client.get_system_stats()
+        except ComfyUIError as error:
+            raise HTTPException(status_code=502, detail=str(error)) from error
+        return {
+            "database_environment": manager.active_environment,
+            "system_stats": stats,
+        }
+
+    @app.get("/api/comfyui/sync-status")
+    def get_comfyui_sync_status() -> dict[str, object]:
+        summary = manager.get_node_definition_summary()
+        resources = manager.list_resource_cache()
+        return {
+            "database_environment": manager.active_environment,
+            "node_definitions": summary,
+            "resources": {
+                rtype: {
+                    "count": len(names),
+                    "updated_at": resources.get("updated_at", {}).get(rtype, ""),
+                }
+                for rtype, names in resources.get("resources", {}).items()
+            },
+        }
+
+    @app.post("/api/comfyui/sync-object-info")
+    def sync_comfyui_object_info() -> dict[str, object]:
+        try:
+            object_info = comfyui_client.get_object_info()
+        except ComfyUIError as error:
+            raise HTTPException(status_code=502, detail=str(error)) from error
+        summary = summarize_node_definitions(object_info)
+        saved = manager.save_node_definitions(object_info)
+        # 从 object_info 提取资源列表并缓存
+        extracted = extract_resource_lists(object_info)
+        synced_resources: list[dict[str, object]] = []
+        for rtype, names in extracted.items():
+            result = manager.save_resource_cache(rtype, names)
+            synced_resources.append(result)
+        return {
+            "database_environment": manager.active_environment,
+            "sha256": summary.sha256,
+            "node_count": saved["node_count"],
+            "custom_node_count": saved["custom_node_count"],
+            "synced_at": saved["synced_at"],
+            "resources_synced": synced_resources,
+        }
+
+    @app.get("/api/comfyui/node-definitions")
+    def list_comfyui_node_definitions(
+        category: str | None = None,
+        custom: bool | None = None,
+        search: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, object]:
+        result = manager.list_node_definitions(
+            category=category,
+            is_custom=custom,
+            search=search,
+            limit=limit,
+            offset=offset,
+        )
+        return {
+            "database_environment": manager.active_environment,
+            **result,
+        }
+
+    @app.get("/api/comfyui/node-definitions/{node_class}")
+    def get_comfyui_node_definition(node_class: str) -> dict[str, object]:
+        definition = manager.get_node_definition(node_class)
+        if not definition:
+            raise HTTPException(status_code=404, detail="节点定义不存在，请先同步。")
+        return {
+            "database_environment": manager.active_environment,
+            "node_definition": definition,
+        }
+
+    @app.get("/api/comfyui/node-categories")
+    def list_comfyui_node_categories() -> dict[str, object]:
+        categories = manager.list_node_categories()
+        return {
+            "database_environment": manager.active_environment,
+            "categories": categories,
+        }
+
+    @app.post("/api/comfyui/sync-resources")
+    def sync_comfyui_resources(request: SyncResourcesRequest) -> dict[str, object]:
+        results: list[dict[str, object]] = []
+        for rtype in request.resource_types:
+            try:
+                if rtype == "embeddings":
+                    names = comfyui_client.get_embeddings()
+                else:
+                    names = comfyui_client.get_models(rtype)
+                saved = manager.save_resource_cache(rtype, names)
+                results.append(saved)
+            except ComfyUIError as error:
+                results.append({
+                    "resource_type": rtype,
+                    "error": str(error),
+                    "count": 0,
+                })
+        return {
+            "database_environment": manager.active_environment,
+            "synced": results,
+        }
+
+    @app.get("/api/comfyui/resources")
+    def list_comfyui_resources(
+        resource_type: str | None = None,
+        search: str | None = None,
+    ) -> dict[str, object]:
+        result = manager.list_resource_cache(resource_type=resource_type, search=search)
+        return {
+            "database_environment": manager.active_environment,
+            **result,
+        }
+
+    # ── 工作流库 ──
+
+    @app.get("/api/workflows")
+    def list_workflows(
+        project_id: str | None = None,
+        include_global: bool = True,
+        archived: bool = False,
+        search: str | None = None,
+        sort: str = "updated",
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, object]:
+        # archived=true 表示只看归档的工作流；archived=false 表示只看活跃工作流
+        result = manager.list_workflows(
+            project_id=project_id,
+            include_global=include_global,
+            include_archived=False,
+            archived_only=archived,
+            search=search,
+            sort=sort,
+            limit=limit,
+            offset=offset,
+        )
+        return {"database_environment": manager.active_environment, **result}
+
+    @app.post("/api/workflows", status_code=status.HTTP_201_CREATED)
+    def create_workflow(request: CreateWorkflowRequest) -> dict[str, object]:
+        workflow = manager.create_workflow(
+            request.name,
+            description=request.description,
+            source_type=request.source_type,
+            source_identifier=request.source_identifier,
+            project_id=request.project_id,
+            source_workflow_id=request.source_workflow_id,
+        )
+        return {"database_environment": manager.active_environment, "workflow": workflow}
+
+    @app.get("/api/workflows/{workflow_id}")
+    def get_workflow(workflow_id: str) -> dict[str, object]:
+        workflow = manager.get_workflow(workflow_id)
+        if not workflow:
+            raise HTTPException(status_code=404, detail="工作流不存在。")
+        return {"database_environment": manager.active_environment, "workflow": workflow}
+
+    @app.patch("/api/workflows/{workflow_id}")
+    def update_workflow(workflow_id: str, request: UpdateWorkflowRequest) -> dict[str, object]:
+        workflow = manager.update_workflow(
+            workflow_id,
+            name=request.name,
+            description=request.description,
+        )
+        if not workflow:
+            raise HTTPException(status_code=404, detail="工作流不存在。")
+        return {"database_environment": manager.active_environment, "workflow": workflow}
+
+    @app.delete("/api/workflows/{workflow_id}")
+    def delete_workflow(workflow_id: str) -> dict[str, object]:
+        deleted = manager.delete_workflow(workflow_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="工作流不存在。")
+        return {"database_environment": manager.active_environment, "deleted": True}
+
+    @app.post("/api/workflows/{workflow_id}/archive")
+    def archive_workflow(workflow_id: str) -> dict[str, object]:
+        workflow = manager.archive_workflow(workflow_id)
+        if not workflow:
+            raise HTTPException(status_code=404, detail="工作流不存在。")
+        return {"database_environment": manager.active_environment, "workflow": workflow}
+
+    @app.post("/api/workflows/{workflow_id}/restore")
+    def restore_workflow(workflow_id: str) -> dict[str, object]:
+        workflow = manager.restore_workflow(workflow_id)
+        if not workflow:
+            raise HTTPException(status_code=404, detail="工作流不存在。")
+        return {"database_environment": manager.active_environment, "workflow": workflow}
+
+    @app.post("/api/workflows/{workflow_id}/copy")
+    def copy_workflow(workflow_id: str, request: CopyWorkflowRequest) -> dict[str, object]:
+        try:
+            workflow = manager.copy_workflow(
+                workflow_id,
+                new_name=request.new_name,
+                project_id=request.project_id,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        return {"database_environment": manager.active_environment, "workflow": workflow}
+
+    @app.post("/api/workflows/{workflow_id}/import")
+    def import_workflow(workflow_id: str, request: ImportWorkflowRequest) -> dict[str, object]:
+        """导入工作流 JSON 到草稿。"""
+        if request.raw_json is None:
+            raise HTTPException(status_code=422, detail="raw_json 不能为空。")
+        try:
+            normalized, actual_format = parse_workflow_from_raw(request.raw_json, request.source_format)
+        except WorkflowParseError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        serialized = serialize_workflow(
+            normalized,
+            raw_ui_json=request.raw_json if actual_format == "ui_json" else None,
+            raw_api_json=request.raw_json if actual_format == "api_json" else None,
+        )
+        draft = manager.save_workflow_draft(
+            workflow_id,
+            normalized_graph=serialized["normalized"] if isinstance(serialized["normalized"], str) else json.dumps(serialized["normalized"], ensure_ascii=False),
+            raw_ui_json=serialized.get("raw_ui_json") and json.dumps(serialized["raw_ui_json"], ensure_ascii=False),
+            raw_api_json=serialized.get("raw_api_json") and json.dumps(serialized["raw_api_json"], ensure_ascii=False),
+            node_count=serialized["node_count"],
+        )
+        # 更新工作流 source_type
+        manager.update_workflow(workflow_id, name=None, description=None)  # 触发 revision 递增
+        return {
+            "database_environment": manager.active_environment,
+            "draft": draft,
+            "source_format": actual_format,
+            "node_count": serialized["node_count"],
+            "checksum": serialized["checksum"],
+        }
+
+    @app.post("/api/workflows/import-from-image")
+    def import_workflow_from_image(file: UploadFile = File(...)) -> dict[str, object]:
+        """从图片提取工作流元数据。"""
+        image_bytes = file.file.read()
+        try:
+            result = extract_workflow_from_image(image_bytes)
+        except WorkflowParseError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        parsed_workflows = {}
+        if result.get("ui_json"):
+            try:
+                normalized = parse_ui_json(result["ui_json"])
+                parsed_workflows["ui_json"] = {
+                    "normalized": normalized.to_dict(),
+                    "node_count": normalized.node_count(),
+                    "raw": result["ui_json"],
+                }
+            except WorkflowParseError:
+                pass
+        if result.get("api_json"):
+            try:
+                normalized = parse_api_json(result["api_json"])
+                parsed_workflows["api_json"] = {
+                    "normalized": normalized.to_dict(),
+                    "node_count": normalized.node_count(),
+                    "raw": result["api_json"],
+                }
+            except WorkflowParseError:
+                pass
+        return {
+            "database_environment": manager.active_environment,
+            "workflows": parsed_workflows,
+        }
+
+    @app.post("/api/workflows/{workflow_id}/versions")
+    def publish_workflow_version(workflow_id: str, request: PublishVersionRequest) -> dict[str, object]:
+        try:
+            version = manager.publish_workflow_version(
+                workflow_id,
+                label=request.label,
+                normalized_graph=request.normalized_graph,
+                raw_ui_json=request.raw_ui_json,
+                raw_api_json=request.raw_api_json,
+                node_count=request.node_count,
+                checksum=request.checksum,
+                is_validated=request.is_validated,
+                validation_result=request.validation_result,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        return {"database_environment": manager.active_environment, "version": version}
+
+    @app.get("/api/workflows/{workflow_id}/versions")
+    def list_workflow_versions(
+        workflow_id: str,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, object]:
+        result = manager.list_workflow_versions(workflow_id, limit=limit, offset=offset)
+        return {"database_environment": manager.active_environment, **result}
+
+    @app.get("/api/workflow-versions/{version_id}")
+    def get_workflow_version(version_id: str) -> dict[str, object]:
+        version = manager.get_workflow_version(version_id)
+        if not version:
+            raise HTTPException(status_code=404, detail="工作流版本不存在。")
+        return {"database_environment": manager.active_environment, "version": version}
+
+    @app.get("/api/workflows/{workflow_id}/draft")
+    def get_workflow_draft(workflow_id: str) -> dict[str, object]:
+        draft = manager.get_workflow_draft(workflow_id)
+        if not draft:
+            raise HTTPException(status_code=404, detail="草稿不存在。")
+        return {"database_environment": manager.active_environment, "draft": draft}
+
+    @app.put("/api/workflows/{workflow_id}/draft")
+    def save_workflow_draft(workflow_id: str, request: SaveDraftRequest) -> dict[str, object]:
+        try:
+            draft = manager.save_workflow_draft(
+                workflow_id,
+                normalized_graph=request.normalized_graph,
+                raw_ui_json=request.raw_ui_json,
+                raw_api_json=request.raw_api_json,
+                node_count=request.node_count,
+                semantic_slots_json=request.semantic_slots_json,
+                last_node_id=request.last_node_id,
+                last_link_id=request.last_link_id,
+                validation_state=request.validation_state,
+                layout_state=request.layout_state,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        return {"database_environment": manager.active_environment, "draft": draft}
+
+    @app.post("/api/workflows/{workflow_id}/draft/validate")
+    def validate_workflow_draft(workflow_id: str) -> dict[str, object]:
+        """校验工作流草稿的节点和参数。
+
+        基于 ComfyUI 节点定义校验：
+        - 未知节点（ComfyUI 未安装）
+        - 节点定义未同步
+        - 必填输入未连线
+        - 参数缺失
+        - 连线完整性（悬空节点）
+        - 重复连线
+        """
+        draft = manager.get_workflow_draft(workflow_id)
+        if not draft:
+            raise HTTPException(status_code=404, detail="草稿不存在。")
+        try:
+            normalized_data = json.loads(draft["normalized_graph"])
+            normalized = NormalizedWorkflow.from_dict(normalized_data)
+        except (TypeError, ValueError, KeyError) as error:
+            raise HTTPException(
+                status_code=422, detail=f"草稿数据解析失败：{error}"
+            ) from error
+        node_classes = [str(node.get("type", "")) for node in normalized.nodes]
+        definitions = manager.batch_get_node_definitions(node_classes)
+        result = validate_workflow(normalized, definitions)
+        # 保存校验状态到草稿
+        validation_state = json.dumps(result, ensure_ascii=False)
+        try:
+            manager.save_workflow_draft(
+                workflow_id,
+                normalized_graph=draft["normalized_graph"],
+                raw_ui_json=draft.get("raw_ui_json"),
+                raw_api_json=draft.get("raw_api_json"),
+                node_count=draft["node_count"],
+                semantic_slots_json=draft.get("semantic_slots_json", "[]"),
+                last_node_id=draft.get("last_node_id", 0),
+                last_link_id=draft.get("last_link_id", 0),
+                validation_state=validation_state,
+            )
+        except ValueError:
+            pass
+        return {"database_environment": manager.active_environment, "validation": result}
+
+    @app.post("/api/comfyui/node-definitions/batch")
+    def batch_get_node_definitions(request: BatchNodeDefinitionsRequest) -> dict[str, object]:
+        """批量获取节点定义。"""
+        definitions = manager.batch_get_node_definitions(request.node_classes)
+        return {
+            "database_environment": manager.active_environment,
+            "definitions": definitions,
+            "found_count": len(definitions),
+            "missing_classes": [cls for cls in request.node_classes if cls and cls not in definitions],
+        }
+
+    @app.get("/api/workflows/{workflow_id}/node-definitions")
+    def get_workflow_node_definitions(workflow_id: str) -> dict[str, object]:
+        """获取工作流草稿所需的所有节点定义。"""
+        draft = manager.get_workflow_draft(workflow_id)
+        if not draft:
+            raise HTTPException(status_code=404, detail="草稿不存在。")
+        try:
+            normalized_data = json.loads(draft["normalized_graph"])
+            normalized = NormalizedWorkflow.from_dict(normalized_data)
+        except (TypeError, ValueError, KeyError) as error:
+            raise HTTPException(
+                status_code=422, detail=f"草稿数据解析失败：{error}"
+            ) from error
+        node_classes = [str(node.get("type", "")) for node in normalized.nodes]
+        definitions = manager.batch_get_node_definitions(node_classes)
+        return {
+            "database_environment": manager.active_environment,
+            "definitions": definitions,
+            "found_count": len(definitions),
+            "missing_classes": [cls for cls in node_classes if cls and cls not in definitions],
+        }
+
+    @app.post("/api/workflows/{workflow_id}/draft/nodes")
+    def add_node_to_draft(workflow_id: str, request: AddNodeRequest) -> dict[str, object]:
+        """向草稿添加节点。根据节点定义生成默认节点实例。"""
+        draft = manager.get_workflow_draft(workflow_id)
+        if not draft:
+            raise HTTPException(status_code=404, detail="草稿不存在。")
+        try:
+            normalized_data = json.loads(draft["normalized_graph"])
+            normalized = NormalizedWorkflow.from_dict(normalized_data)
+        except (TypeError, ValueError, KeyError) as error:
+            raise HTTPException(
+                status_code=422, detail=f"草稿数据解析失败：{error}"
+            ) from error
+        definition = manager.get_node_definition(request.node_class)
+        if definition is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"节点定义未同步：{request.node_class}。请先同步 ComfyUI 节点定义。",
+            )
+        new_id, new_last = allocate_node_id(normalized, draft.get("last_node_id", 0))
+        node = build_default_node(
+            request.node_class,
+            definition,
+            node_id=new_id,
+            position=(request.position_x, request.position_y),
+        )
+        normalized.nodes.append(node)
+        serialized = serialize_workflow(normalized)
+        updated_draft = manager.save_workflow_draft(
+            workflow_id,
+            normalized_graph=json.dumps(serialized["normalized"], ensure_ascii=False),
+            raw_ui_json=draft.get("raw_ui_json"),
+            raw_api_json=draft.get("raw_api_json"),
+            node_count=serialized["node_count"],
+            semantic_slots_json=draft.get("semantic_slots_json", "[]"),
+            last_node_id=new_last,
+            last_link_id=draft.get("last_link_id", 0),
+        )
+        return {
+            "database_environment": manager.active_environment,
+            "node": node,
+            "draft": updated_draft,
+        }
+
+    @app.put("/api/workflows/{workflow_id}/draft/nodes/{node_id}")
+    def update_node_in_draft(
+        workflow_id: str, node_id: str, request: UpdateNodeRequest
+    ) -> dict[str, object]:
+        """更新草稿中的节点（标题/参数/标志/属性）。"""
+        draft = manager.get_workflow_draft(workflow_id)
+        if not draft:
+            raise HTTPException(status_code=404, detail="草稿不存在。")
+        try:
+            normalized_data = json.loads(draft["normalized_graph"])
+            normalized = NormalizedWorkflow.from_dict(normalized_data)
+        except (TypeError, ValueError, KeyError) as error:
+            raise HTTPException(
+                status_code=422, detail=f"草稿数据解析失败：{error}"
+            ) from error
+        target = None
+        for node in normalized.nodes:
+            if str(node.get("id", "")) == node_id:
+                target = node
+                break
+        if target is None:
+            raise HTTPException(status_code=404, detail="节点不存在。")
+        if target.get("is_unknown"):
+            raise HTTPException(
+                status_code=422,
+                detail="未知节点为只读，无法编辑。请先安装对应 ComfyUI 节点。",
+            )
+        if request.title is not None:
+            target["title"] = request.title
+        if request.widgets_values is not None:
+            target["widgets_values"] = request.widgets_values
+        if request.flags is not None:
+            current_flags = target.get("flags", {}) if isinstance(target.get("flags"), dict) else {}
+            current_flags.update(request.flags)
+            target["flags"] = current_flags
+        if request.properties is not None:
+            current_props = target.get("properties", {}) if isinstance(target.get("properties"), dict) else {}
+            current_props.update(request.properties)
+            target["properties"] = current_props
+        serialized = serialize_workflow(normalized)
+        updated_draft = manager.save_workflow_draft(
+            workflow_id,
+            normalized_graph=json.dumps(serialized["normalized"], ensure_ascii=False),
+            raw_ui_json=draft.get("raw_ui_json"),
+            raw_api_json=draft.get("raw_api_json"),
+            node_count=serialized["node_count"],
+            semantic_slots_json=draft.get("semantic_slots_json", "[]"),
+            last_node_id=draft.get("last_node_id", 0),
+            last_link_id=draft.get("last_link_id", 0),
+        )
+        return {
+            "database_environment": manager.active_environment,
+            "node": target,
+            "draft": updated_draft,
+        }
+
+    @app.delete("/api/workflows/{workflow_id}/draft/nodes/{node_id}")
+    def delete_node_from_draft(workflow_id: str, node_id: str) -> dict[str, object]:
+        """删除草稿中的节点及其关联连线。"""
+        draft = manager.get_workflow_draft(workflow_id)
+        if not draft:
+            raise HTTPException(status_code=404, detail="草稿不存在。")
+        try:
+            normalized_data = json.loads(draft["normalized_graph"])
+            normalized = NormalizedWorkflow.from_dict(normalized_data)
+        except (TypeError, ValueError, KeyError) as error:
+            raise HTTPException(
+                status_code=422, detail=f"草稿数据解析失败：{error}"
+            ) from error
+        original_count = len(normalized.nodes)
+        normalized.nodes = [n for n in normalized.nodes if str(n.get("id", "")) != node_id]
+        if len(normalized.nodes) == original_count:
+            raise HTTPException(status_code=404, detail="节点不存在。")
+        # 移除关联连线，并清理其他节点上对该连线的引用
+        removed_link_ids = {
+            str(link.get("id", ""))
+            for link in normalized.links
+            if str(link.get("source_node", "")) == node_id
+            or str(link.get("target_node", "")) == node_id
+        }
+        normalized.links = [
+            link for link in normalized.links
+            if str(link.get("id", "")) not in removed_link_ids
+        ]
+        for node in normalized.nodes:
+            for inp in node.get("inputs", []) if isinstance(node.get("inputs"), list) else []:
+                if inp.get("link") and str(inp.get("link")) in removed_link_ids:
+                    inp["link"] = None
+            for out in node.get("outputs", []) if isinstance(node.get("outputs"), list) else []:
+                if isinstance(out.get("links"), list):
+                    out["links"] = [lid for lid in out["links"] if str(lid) not in removed_link_ids]
+        serialized = serialize_workflow(normalized)
+        updated_draft = manager.save_workflow_draft(
+            workflow_id,
+            normalized_graph=json.dumps(serialized["normalized"], ensure_ascii=False),
+            raw_ui_json=draft.get("raw_ui_json"),
+            raw_api_json=draft.get("raw_api_json"),
+            node_count=serialized["node_count"],
+            semantic_slots_json=draft.get("semantic_slots_json", "[]"),
+            last_node_id=draft.get("last_node_id", 0),
+            last_link_id=draft.get("last_link_id", 0),
+        )
+        return {
+            "database_environment": manager.active_environment,
+            "deleted": True,
+            "removed_links": list(removed_link_ids),
+            "draft": updated_draft,
+        }
+
+    @app.post("/api/workflows/{workflow_id}/draft/nodes/{node_id}/duplicate")
+    def duplicate_node_in_draft(workflow_id: str, node_id: str) -> dict[str, object]:
+        """复制草稿中的节点（含参数，但不复制连线）。"""
+        draft = manager.get_workflow_draft(workflow_id)
+        if not draft:
+            raise HTTPException(status_code=404, detail="草稿不存在。")
+        try:
+            normalized_data = json.loads(draft["normalized_graph"])
+            normalized = NormalizedWorkflow.from_dict(normalized_data)
+        except (TypeError, ValueError, KeyError) as error:
+            raise HTTPException(
+                status_code=422, detail=f"草稿数据解析失败：{error}"
+            ) from error
+        source = None
+        for node in normalized.nodes:
+            if str(node.get("id", "")) == node_id:
+                source = node
+                break
+        if source is None:
+            raise HTTPException(status_code=404, detail="节点不存在。")
+        new_id, new_last = allocate_node_id(normalized, draft.get("last_node_id", 0))
+        # 深拷贝并清空连线状态
+        new_node = json.loads(json.dumps(source, ensure_ascii=False))
+        new_node["id"] = new_id
+        new_node["title"] = f"{source.get('title', source.get('type', '节点'))}_copy"
+        old_position = source.get("position", [0, 0])
+        new_node["position"] = [int(old_position[0]) + 40 if isinstance(old_position, list) and len(old_position) >= 2 else 40, int(old_position[1]) + 40 if isinstance(old_position, list) and len(old_position) >= 2 else 40]
+        for inp in new_node.get("inputs", []) if isinstance(new_node.get("inputs"), list) else []:
+            inp["link"] = None
+        for out in new_node.get("outputs", []) if isinstance(new_node.get("outputs"), list) else []:
+            if isinstance(out.get("links"), list):
+                out["links"] = []
+        normalized.nodes.append(new_node)
+        serialized = serialize_workflow(normalized)
+        updated_draft = manager.save_workflow_draft(
+            workflow_id,
+            normalized_graph=json.dumps(serialized["normalized"], ensure_ascii=False),
+            raw_ui_json=draft.get("raw_ui_json"),
+            raw_api_json=draft.get("raw_api_json"),
+            node_count=serialized["node_count"],
+            semantic_slots_json=draft.get("semantic_slots_json", "[]"),
+            last_node_id=new_last,
+            last_link_id=draft.get("last_link_id", 0),
+        )
+        return {
+            "database_environment": manager.active_environment,
+            "node": new_node,
+            "draft": updated_draft,
+        }
+
+    @app.post("/api/workflows/{workflow_id}/draft/links")
+    def create_link_in_draft(
+        workflow_id: str, request: CreateLinkRequest
+    ) -> dict[str, object]:
+        """创建连线。会进行端口类型校验。"""
+        draft = manager.get_workflow_draft(workflow_id)
+        if not draft:
+            raise HTTPException(status_code=404, detail="草稿不存在。")
+        try:
+            normalized_data = json.loads(draft["normalized_graph"])
+            normalized = NormalizedWorkflow.from_dict(normalized_data)
+        except (TypeError, ValueError, KeyError) as error:
+            raise HTTPException(
+                status_code=422, detail=f"草稿数据解析失败：{error}"
+            ) from error
+        source_node = None
+        target_node = None
+        for node in normalized.nodes:
+            if str(node.get("id", "")) == request.source_node:
+                source_node = node
+            if str(node.get("id", "")) == request.target_node:
+                target_node = node
+        if source_node is None:
+            raise HTTPException(status_code=404, detail="源节点不存在。")
+        if target_node is None:
+            raise HTTPException(status_code=404, detail="目标节点不存在。")
+        if source_node.get("is_unknown") or target_node.get("is_unknown"):
+            raise HTTPException(status_code=422, detail="未知节点不参与连线。")
+        source_outputs = source_node.get("outputs", []) if isinstance(source_node.get("outputs"), list) else []
+        target_inputs = target_node.get("inputs", []) if isinstance(target_node.get("inputs"), list) else []
+        if request.source_slot >= len(source_outputs):
+            raise HTTPException(status_code=422, detail=f"源节点输出端口 {request.source_slot} 不存在。")
+        if request.target_slot >= len(target_inputs):
+            raise HTTPException(status_code=422, detail=f"目标节点输入端口 {request.target_slot} 不存在。")
+        source_port = source_outputs[request.source_slot]
+        target_port = target_inputs[request.target_slot]
+        source_type = str(source_port.get("type", ""))
+        target_type = str(target_port.get("type", ""))
+        compatible, reason = are_ports_compatible(source_type, target_type)
+        if not compatible:
+            raise HTTPException(status_code=422, detail=f"端口类型不兼容：{reason}")
+        # 一个输入只能连一根线，先断开旧线
+        existing_link = target_port.get("link")
+        removed_link_ids: list[str] = []
+        if existing_link:
+            normalized.links = [
+                link for link in normalized.links
+                if str(link.get("id", "")) != str(existing_link)
+            ]
+            removed_link_ids.append(str(existing_link))
+        new_id, new_last = allocate_link_id(normalized, draft.get("last_link_id", 0))
+        link = {
+            "id": new_id,
+            "source_node": request.source_node,
+            "source_slot": request.source_slot,
+            "target_node": request.target_node,
+            "target_slot": request.target_slot,
+            "type": request.link_type or (source_type if source_type else target_type),
+        }
+        normalized.links.append(link)
+        target_port["link"] = new_id
+        if isinstance(source_port.get("links"), list):
+            if new_id not in source_port["links"]:
+                source_port["links"].append(new_id)
+        else:
+            source_port["links"] = [new_id]
+        serialized = serialize_workflow(normalized)
+        updated_draft = manager.save_workflow_draft(
+            workflow_id,
+            normalized_graph=json.dumps(serialized["normalized"], ensure_ascii=False),
+            raw_ui_json=draft.get("raw_ui_json"),
+            raw_api_json=draft.get("raw_api_json"),
+            node_count=serialized["node_count"],
+            semantic_slots_json=draft.get("semantic_slots_json", "[]"),
+            last_node_id=draft.get("last_node_id", 0),
+            last_link_id=new_last,
+        )
+        return {
+            "database_environment": manager.active_environment,
+            "link": link,
+            "removed_links": removed_link_ids,
+            "draft": updated_draft,
+        }
+
+    @app.delete("/api/workflows/{workflow_id}/draft/links/{link_id}")
+    def delete_link_from_draft(workflow_id: str, link_id: str) -> dict[str, object]:
+        """删除连线。"""
+        draft = manager.get_workflow_draft(workflow_id)
+        if not draft:
+            raise HTTPException(status_code=404, detail="草稿不存在。")
+        try:
+            normalized_data = json.loads(draft["normalized_graph"])
+            normalized = NormalizedWorkflow.from_dict(normalized_data)
+        except (TypeError, ValueError, KeyError) as error:
+            raise HTTPException(
+                status_code=422, detail=f"草稿数据解析失败：{error}"
+            ) from error
+        original_count = len(normalized.links)
+        target_link = None
+        for link in normalized.links:
+            if str(link.get("id", "")) == link_id:
+                target_link = link
+                break
+        if target_link is None:
+            raise HTTPException(status_code=404, detail="连线不存在。")
+        normalized.links = [
+            link for link in normalized.links
+            if str(link.get("id", "")) != link_id
+        ]
+        # 清理端口引用
+        source_node_id = str(target_link.get("source_node", ""))
+        target_node_id = str(target_link.get("target_node", ""))
+        source_slot = target_link.get("source_slot")
+        target_slot = target_link.get("target_slot")
+        for node in normalized.nodes:
+            if str(node.get("id", "")) == source_node_id:
+                for out in node.get("outputs", []) if isinstance(node.get("outputs"), list) else []:
+                    if isinstance(out.get("links"), list):
+                        out["links"] = [lid for lid in out["links"] if str(lid) != link_id]
+            if str(node.get("id", "")) == target_node_id:
+                for inp in node.get("inputs", []) if isinstance(node.get("inputs"), list) else []:
+                    if str(inp.get("link", "")) == link_id:
+                        inp["link"] = None
+        serialized = serialize_workflow(normalized)
+        updated_draft = manager.save_workflow_draft(
+            workflow_id,
+            normalized_graph=json.dumps(serialized["normalized"], ensure_ascii=False),
+            raw_ui_json=draft.get("raw_ui_json"),
+            raw_api_json=draft.get("raw_api_json"),
+            node_count=serialized["node_count"],
+            semantic_slots_json=draft.get("semantic_slots_json", "[]"),
+            last_node_id=draft.get("last_node_id", 0),
+            last_link_id=draft.get("last_link_id", 0),
+        )
+        return {
+            "database_environment": manager.active_environment,
+            "deleted": True,
+            "draft": updated_draft,
+        }
+
+    # ── 规整布局 API (v0.5.8) ──────────────────────────────────────
+
+    def _load_draft_layout_state(draft: dict) -> dict:
+        """从草稿加载布局状态。返回 {user_order_constraints, groups}。"""
+        layout_state_raw = draft.get("layout_state")
+        if not layout_state_raw:
+            return {"user_order_constraints": {}, "groups": []}
+        try:
+            state = json.loads(layout_state_raw)
+            if not isinstance(state, dict):
+                return {"user_order_constraints": {}, "groups": []}
+            return {
+                "user_order_constraints": state.get("user_order_constraints", {}) if isinstance(state.get("user_order_constraints"), dict) else {},
+                "groups": state.get("groups", []) if isinstance(state.get("groups"), list) else [],
+            }
+        except (TypeError, ValueError):
+            return {"user_order_constraints": {}, "groups": []}
+
+    def _save_draft_layout_state(
+        workflow_id: str, draft: dict, layout_state: dict
+    ) -> dict:
+        """保存布局状态到草稿并返回更新后的草稿。"""
+        try:
+            updated = manager.save_workflow_draft(
+                workflow_id,
+                normalized_graph=draft["normalized_graph"],
+                raw_ui_json=draft.get("raw_ui_json"),
+                raw_api_json=draft.get("raw_api_json"),
+                node_count=draft["node_count"],
+                semantic_slots_json=draft.get("semantic_slots_json", "[]"),
+                last_node_id=draft.get("last_node_id", 0),
+                last_link_id=draft.get("last_link_id", 0),
+                validation_state=draft.get("validation_state"),
+                layout_state=json.dumps(layout_state, ensure_ascii=False),
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        return updated
+
+    @app.post("/api/workflows/{workflow_id}/draft/layout/compute")
+    def compute_workflow_layout(workflow_id: str) -> dict[str, object]:
+        """计算并应用自动布局。
+
+        基于拓扑分层算法计算节点位置，应用用户排序约束和分组泳道。
+        计算结果会保存到草稿的 layout_state 中，节点位置也会更新到 normalized_graph。
+        """
+        draft = manager.get_workflow_draft(workflow_id)
+        if not draft:
+            raise HTTPException(status_code=404, detail="草稿不存在。")
+        try:
+            normalized_data = json.loads(draft["normalized_graph"])
+            normalized = NormalizedWorkflow.from_dict(normalized_data)
+        except (TypeError, ValueError, KeyError) as error:
+            raise HTTPException(
+                status_code=422, detail=f"草稿数据解析失败：{error}"
+            ) from error
+        state = _load_draft_layout_state(draft)
+        layout = compute_layout(
+            normalized,
+            user_order_constraints=state["user_order_constraints"],
+            groups=state["groups"],
+        )
+        # 应用位置到节点
+        apply_layout(normalized, layout)
+        serialized = serialize_workflow(normalized)
+        layout_state = {
+            "user_order_constraints": state["user_order_constraints"],
+            "groups": state["groups"],
+            "layout": layout,
+        }
+        updated_draft = _save_draft_layout_state(
+            workflow_id,
+            {**draft, "normalized_graph": json.dumps(serialized["normalized"], ensure_ascii=False)},
+            layout_state,
+        )
+        return {
+            "database_environment": manager.active_environment,
+            "layout": layout,
+            "draft": updated_draft,
+        }
+
+    @app.get("/api/workflows/{workflow_id}/draft/layout")
+    def get_workflow_layout(workflow_id: str) -> dict[str, object]:
+        """获取当前布局状态。"""
+        draft = manager.get_workflow_draft(workflow_id)
+        if not draft:
+            raise HTTPException(status_code=404, detail="草稿不存在。")
+        state = _load_draft_layout_state(draft)
+        try:
+            normalized_data = json.loads(draft["normalized_graph"])
+            normalized = NormalizedWorkflow.from_dict(normalized_data)
+        except (TypeError, ValueError, KeyError) as error:
+            raise HTTPException(
+                status_code=422, detail=f"草稿数据解析失败：{error}"
+            ) from error
+        # 实时计算布局（不保存），确保与当前节点状态同步
+        layout = compute_layout(
+            normalized,
+            user_order_constraints=state["user_order_constraints"],
+            groups=state["groups"],
+        )
+        return {
+            "database_environment": manager.active_environment,
+            "layout": layout,
+            "user_order_constraints": state["user_order_constraints"],
+            "groups": state["groups"],
+        }
+
+    @app.put("/api/workflows/{workflow_id}/draft/layout")
+    def save_workflow_layout_state(
+        workflow_id: str, request: SaveLayoutStateRequest
+    ) -> dict[str, object]:
+        """保存布局状态（用户排序约束和分组信息）。"""
+        draft = manager.get_workflow_draft(workflow_id)
+        if not draft:
+            raise HTTPException(status_code=404, detail="草稿不存在。")
+        try:
+            json.loads(request.layout_state)  # 验证是合法JSON
+        except (TypeError, ValueError) as error:
+            raise HTTPException(
+                status_code=422, detail=f"布局状态JSON格式无效：{error}"
+            ) from error
+        updated_draft = _save_draft_layout_state(workflow_id, draft, {"raw": request.layout_state})
+        return {
+            "database_environment": manager.active_environment,
+            "draft": updated_draft,
+        }
+
+    @app.post("/api/workflows/{workflow_id}/draft/nodes/{node_id}/reorder")
+    def reorder_workflow_node(
+        workflow_id: str, node_id: str, request: ReorderNodeRequest
+    ) -> dict[str, object]:
+        """对节点执行结构化排序操作。
+
+        支持的操作：前移、后移、换列（上一列/下一列）、置顶、置底。
+        操作会更新用户排序约束，并重新计算布局。
+        """
+        draft = manager.get_workflow_draft(workflow_id)
+        if not draft:
+            raise HTTPException(status_code=404, detail="草稿不存在。")
+        try:
+            normalized_data = json.loads(draft["normalized_graph"])
+            normalized = NormalizedWorkflow.from_dict(normalized_data)
+        except (TypeError, ValueError, KeyError) as error:
+            raise HTTPException(
+                status_code=422, detail=f"草稿数据解析失败：{error}"
+            ) from error
+        state = _load_draft_layout_state(draft)
+        try:
+            result = reorder_node(
+                normalized,
+                node_id,
+                request.action,
+                user_order_constraints=state["user_order_constraints"],
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        # 应用新布局到节点
+        apply_layout(normalized, result["layout"])
+        serialized = serialize_workflow(normalized)
+        new_state = {
+            "user_order_constraints": result["user_order_constraints"],
+            "groups": state["groups"],
+            "layout": result["layout"],
+        }
+        updated_draft = _save_draft_layout_state(
+            workflow_id,
+            {**draft, "normalized_graph": json.dumps(serialized["normalized"], ensure_ascii=False)},
+            new_state,
+        )
+        return {
+            "database_environment": manager.active_environment,
+            "layout": result["layout"],
+            "user_order_constraints": result["user_order_constraints"],
+            "draft": updated_draft,
+        }
+
+    @app.post("/api/workflows/{workflow_id}/draft/groups")
+    def create_workflow_group(
+        workflow_id: str, request: CreateGroupRequest
+    ) -> dict[str, object]:
+        """创建分组泳道。"""
+        draft = manager.get_workflow_draft(workflow_id)
+        if not draft:
+            raise HTTPException(status_code=404, detail="草稿不存在。")
+        state = _load_draft_layout_state(draft)
+        # 校验成员是否存在
+        try:
+            normalized_data = json.loads(draft["normalized_graph"])
+            normalized = NormalizedWorkflow.from_dict(normalized_data)
+        except (TypeError, ValueError, KeyError) as error:
+            raise HTTPException(
+                status_code=422, detail=f"草稿数据解析失败：{error}"
+            ) from error
+        existing_ids = {str(n.get("id", "")) for n in normalized.nodes}
+        valid_members = [m for m in request.members if str(m) in existing_ids]
+        group = create_group(
+            request.title,
+            color=request.color,
+            members=valid_members,
+        )
+        new_groups = state["groups"] + [group]
+        new_state = {
+            "user_order_constraints": state["user_order_constraints"],
+            "groups": new_groups,
+        }
+        updated_draft = _save_draft_layout_state(workflow_id, draft, new_state)
+        return {
+            "database_environment": manager.active_environment,
+            "group": group,
+            "draft": updated_draft,
+        }
+
+    @app.put("/api/workflows/{workflow_id}/draft/groups/{group_id}")
+    def update_workflow_group(
+        workflow_id: str, group_id: str, request: UpdateGroupRequest
+    ) -> dict[str, object]:
+        """更新分组泳道的标题或颜色。"""
+        draft = manager.get_workflow_draft(workflow_id)
+        if not draft:
+            raise HTTPException(status_code=404, detail="草稿不存在。")
+        state = _load_draft_layout_state(draft)
+        found = False
+        new_groups: list[dict[str, object]] = []
+        for group in state["groups"]:
+            new_group = dict(group)
+            if str(group.get("id", "")) == group_id:
+                if request.title is not None:
+                    new_group["title"] = request.title
+                if request.color is not None:
+                    new_group["color"] = request.color
+                found = True
+            new_groups.append(new_group)
+        if not found:
+            raise HTTPException(status_code=404, detail="分组不存在。")
+        new_state = {
+            "user_order_constraints": state["user_order_constraints"],
+            "groups": new_groups,
+        }
+        updated_draft = _save_draft_layout_state(workflow_id, draft, new_state)
+        return {
+            "database_environment": manager.active_environment,
+            "groups": new_groups,
+            "draft": updated_draft,
+        }
+
+    @app.delete("/api/workflows/{workflow_id}/draft/groups/{group_id}")
+    def delete_workflow_group(workflow_id: str, group_id: str) -> dict[str, object]:
+        """删除分组泳道（不影响节点）。"""
+        draft = manager.get_workflow_draft(workflow_id)
+        if not draft:
+            raise HTTPException(status_code=404, detail="草稿不存在。")
+        state = _load_draft_layout_state(draft)
+        original_count = len(state["groups"])
+        new_groups = [g for g in state["groups"] if str(g.get("id", "")) != group_id]
+        if len(new_groups) == original_count:
+            raise HTTPException(status_code=404, detail="分组不存在。")
+        new_state = {
+            "user_order_constraints": state["user_order_constraints"],
+            "groups": new_groups,
+        }
+        updated_draft = _save_draft_layout_state(workflow_id, draft, new_state)
+        return {
+            "database_environment": manager.active_environment,
+            "deleted": True,
+            "draft": updated_draft,
+        }
+
+    @app.post("/api/workflows/{workflow_id}/draft/nodes/{node_id}/assign-group")
+    def assign_node_to_workflow_group(
+        workflow_id: str, node_id: str, request: AssignGroupRequest
+    ) -> dict[str, object]:
+        """将节点加入或移出分组泳道。"""
+        draft = manager.get_workflow_draft(workflow_id)
+        if not draft:
+            raise HTTPException(status_code=404, detail="草稿不存在。")
+        try:
+            normalized_data = json.loads(draft["normalized_graph"])
+            normalized = NormalizedWorkflow.from_dict(normalized_data)
+        except (TypeError, ValueError, KeyError) as error:
+            raise HTTPException(
+                status_code=422, detail=f"草稿数据解析失败：{error}"
+            ) from error
+        existing_ids = {str(n.get("id", "")) for n in normalized.nodes}
+        if node_id not in existing_ids:
+            raise HTTPException(status_code=404, detail="节点不存在。")
+        state = _load_draft_layout_state(draft)
+        if request.group_id is not None:
+            valid_group_ids = {str(g.get("id", "")) for g in state["groups"]}
+            if request.group_id not in valid_group_ids:
+                raise HTTPException(status_code=404, detail="分组不存在。")
+        new_groups = assign_node_to_group(state["groups"], node_id, request.group_id)
+        new_state = {
+            "user_order_constraints": state["user_order_constraints"],
+            "groups": new_groups,
+        }
+        updated_draft = _save_draft_layout_state(workflow_id, draft, new_state)
+        return {
+            "database_environment": manager.active_environment,
+            "groups": new_groups,
+            "draft": updated_draft,
+        }
+
+    @app.get("/api/workflows/{workflow_id}/draft/links/bundles")
+    def get_workflow_link_bundles(workflow_id: str) -> dict[str, object]:
+        """获取连线合束信息和类型提示。"""
+        draft = manager.get_workflow_draft(workflow_id)
+        if not draft:
+            raise HTTPException(status_code=404, detail="草稿不存在。")
+        try:
+            normalized_data = json.loads(draft["normalized_graph"])
+            normalized = NormalizedWorkflow.from_dict(normalized_data)
+        except (TypeError, ValueError, KeyError) as error:
+            raise HTTPException(
+                status_code=422, detail=f"草稿数据解析失败：{error}"
+            ) from error
+        bundles = compute_link_bundles(normalized)
+        return {
+            "database_environment": manager.active_environment,
+            **bundles,
+        }
+
+    @app.post("/api/workflows/{workflow_id}/draft/focus")
+    def compute_workflow_focus(
+        workflow_id: str, request: FocusSubgraphRequest
+    ) -> dict[str, object]:
+        """计算聚焦节点的上游/下游/错误子图。
+
+        返回高亮节点、变暗节点和相关连线，用于前端高亮显示。
+        """
+        draft = manager.get_workflow_draft(workflow_id)
+        if not draft:
+            raise HTTPException(status_code=404, detail="草稿不存在。")
+        try:
+            normalized_data = json.loads(draft["normalized_graph"])
+            normalized = NormalizedWorkflow.from_dict(normalized_data)
+        except (TypeError, ValueError, KeyError) as error:
+            raise HTTPException(
+                status_code=422, detail=f"草稿数据解析失败：{error}"
+            ) from error
+        try:
+            focus = compute_focus_subgraph(
+                normalized,
+                request.node_id,
+                request.direction,
+                error_node_ids=request.error_node_ids,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        return {
+            "database_environment": manager.active_environment,
+            "focus": focus,
+        }
+
+    @app.post("/api/workflows/{workflow_id}/draft/layout/perf-test")
+    def perf_test_workflow_layout(workflow_id: str) -> dict[str, object]:
+        """500节点性能测试：生成大规模工作流并计算布局，返回耗时。
+
+        仅供开发/测试环境使用，不会修改草稿数据。
+        """
+        import time
+        large_wf = generate_large_workflow(500)
+        start = time.perf_counter()
+        layout = compute_layout(large_wf)
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        return {
+            "database_environment": manager.active_environment,
+            "node_count": 500,
+            "link_count": len(large_wf.links),
+            "layer_count": len(layout["layers"]),
+            "elapsed_ms": round(elapsed_ms, 2),
+            "layout_summary": {
+                "positions_count": len(layout["positions"]),
+                "groups_count": len(layout["groups"]),
+                "cycle_nodes_count": len(layout["cycle_nodes"]),
+            },
+        }
+
+    @app.post("/api/workflows/{workflow_id}/set-global-default")
+    def set_global_default_workflow(workflow_id: str) -> dict[str, object]:
+        try:
+            result = manager.set_global_default_workflow(workflow_id)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        return {"database_environment": manager.active_environment, **result}
+
+    @app.post("/api/projects/{project_id}/default-workflow")
+    def set_project_default_workflow(
+        project_id: str, request: SetProjectDefaultWorkflowRequest
+    ) -> dict[str, object]:
+        try:
+            result = manager.set_project_default_workflow(project_id, request.workflow_id)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        return {"database_environment": manager.active_environment, **result}
+
+    @app.get("/api/projects/{project_id}/default-workflow")
+    def get_project_default_workflow(project_id: str) -> dict[str, object]:
+        workflow = manager.get_project_default_workflow(project_id)
+        if not workflow:
+            raise HTTPException(status_code=404, detail="项目未设置默认工作流。")
+        return {"database_environment": manager.active_environment, "workflow": workflow}
+
+    @app.get("/api/workflows/{workflow_id}/semantic-slots")
+    def list_semantic_slots(workflow_id: str) -> dict[str, object]:
+        slots = manager.list_semantic_slots(workflow_id)
+        return {"database_environment": manager.active_environment, "slots": slots}
+
+    @app.put("/api/workflows/{workflow_id}/semantic-slots")
+    def set_semantic_slot(
+        workflow_id: str, request: SetSemanticSlotRequest
+    ) -> dict[str, object]:
+        slot = manager.set_semantic_slot(
+            workflow_id,
+            request.slot_name,
+            slot_type=request.slot_type,
+            node_id=request.node_id,
+            input_name=request.input_name,
+            transform_rule=request.transform_rule,
+            default_value=request.default_value,
+            is_required=request.is_required,
+            conflict_strategy=request.conflict_strategy,
+        )
+        return {"database_environment": manager.active_environment, "slot": slot}
+
+    @app.delete("/api/workflows/{workflow_id}/semantic-slots/{slot_name}")
+    def delete_semantic_slot(workflow_id: str, slot_name: str) -> dict[str, object]:
+        deleted = manager.delete_semantic_slot(workflow_id, slot_name)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="语义插槽不存在。")
+        return {"database_environment": manager.active_environment, "deleted": True}
+
+    # ── 语义插槽解析与校验 API (v0.5.9) ───────────────────────────
+
+    @app.get("/api/slot-definitions")
+    def list_slot_definitions() -> dict[str, object]:
+        """列出所有内置插槽定义。"""
+        return {
+            "database_environment": manager.active_environment,
+            "definitions": list_builtin_slot_definitions(),
+        }
+
+    @app.post("/api/workflows/{workflow_id}/slots/resolve")
+    def resolve_workflow_slots(
+        workflow_id: str, request: ResolveSlotsRequest
+    ) -> dict[str, object]:
+        """解析工作流的所有语义插槽（预览）。
+
+        根据业务上下文（人物值、素材值、项目默认配置）解析每个插槽的最终值。
+        不修改工作流草稿，仅返回解析结果。
+        """
+        draft = manager.get_workflow_draft(workflow_id)
+        if not draft:
+            raise HTTPException(status_code=404, detail="草稿不存在。")
+        try:
+            normalized_data = json.loads(draft["normalized_graph"])
+            normalized = NormalizedWorkflow.from_dict(normalized_data)
+        except (TypeError, ValueError, KeyError) as error:
+            raise HTTPException(
+                status_code=422, detail=f"草稿数据解析失败：{error}"
+            ) from error
+        slots = manager.list_semantic_slots(workflow_id)
+        result = resolve_all_slots(slots, normalized, context=request.context)
+        return {
+            "database_environment": manager.active_environment,
+            **result,
+        }
+
+    @app.post("/api/workflows/{workflow_id}/slots/validate")
+    def validate_workflow_slots(workflow_id: str) -> dict[str, object]:
+        """校验工作流的插槽绑定是否有效。
+
+        检查节点存在性、输入名存在性、冲突策略有效性、插槽名唯一性。
+        """
+        draft = manager.get_workflow_draft(workflow_id)
+        if not draft:
+            raise HTTPException(status_code=404, detail="草稿不存在。")
+        try:
+            normalized_data = json.loads(draft["normalized_graph"])
+            normalized = NormalizedWorkflow.from_dict(normalized_data)
+        except (TypeError, ValueError, KeyError) as error:
+            raise HTTPException(
+                status_code=422, detail=f"草稿数据解析失败：{error}"
+            ) from error
+        slots = manager.list_semantic_slots(workflow_id)
+        result = validate_slot_bindings(slots, normalized)
+        return {
+            "database_environment": manager.active_environment,
+            **result,
+        }
+
+    # ── 阶段 2.6 转换、校验和发布 ────────────────────────────────
+
+    @app.post("/api/workflows/{workflow_id}/export")
+    def export_workflow_api(workflow_id: str, request: ExportWorkflowRequest) -> dict[str, object]:
+        """导出工作流为 API JSON 或 UI JSON 格式。
+
+        优先返回原始 JSON（如果存在），否则从规范化结构生成。
+        """
+        draft = manager.get_workflow_draft(workflow_id)
+        if not draft:
+            raise HTTPException(status_code=404, detail="草稿不存在。")
+        try:
+            normalized_data = json.loads(draft["normalized_graph"])
+            normalized = NormalizedWorkflow.from_dict(normalized_data)
+        except (TypeError, ValueError, KeyError) as error:
+            raise HTTPException(
+                status_code=422, detail=f"草稿数据解析失败：{error}"
+            ) from error
+        raw_ui_json = json.loads(draft["raw_ui_json"]) if draft.get("raw_ui_json") else None
+        raw_api_json = json.loads(draft["raw_api_json"]) if draft.get("raw_api_json") else None
+        try:
+            result = export_workflow(
+                normalized,
+                format=request.format,
+                raw_ui_json=raw_ui_json,
+                raw_api_json=raw_api_json,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return {"database_environment": manager.active_environment, **result}
+
+    @app.post("/api/workflows/{workflow_id}/precheck")
+    def precheck_workflow_publish(workflow_id: str) -> dict[str, object]:
+        """发布前预检查：节点定义、必填输入、模型资源、连线完整性、语义插槽。
+
+        返回阻塞错误和警告列表，can_publish 为 True 时才允许发布。
+        """
+        draft = manager.get_workflow_draft(workflow_id)
+        if not draft:
+            raise HTTPException(status_code=404, detail="草稿不存在。")
+        try:
+            normalized_data = json.loads(draft["normalized_graph"])
+            normalized = NormalizedWorkflow.from_dict(normalized_data)
+        except (TypeError, ValueError, KeyError) as error:
+            raise HTTPException(
+                status_code=422, detail=f"草稿数据解析失败：{error}"
+            ) from error
+        node_classes = [str(node.get("type", "")) for node in normalized.nodes]
+        definitions = manager.batch_get_node_definitions(node_classes)
+        slots = manager.list_semantic_slots(workflow_id)
+        result = precheck_publish(normalized, definitions, semantic_slots=slots)
+        return {"database_environment": manager.active_environment, **result}
+
+    @app.post("/api/workflows/{workflow_id}/publish")
+    def publish_workflow_from_draft(workflow_id: str, request: PublishVersionRequest) -> dict[str, object]:
+        """基于草稿发布不可变版本。
+
+        如果 request.normalized_graph 为空，则使用当前草稿的规范化结构。
+        发布前建议先调用 /precheck 检查。
+        """
+        draft = manager.get_workflow_draft(workflow_id)
+        if not draft:
+            raise HTTPException(status_code=404, detail="草稿不存在。")
+        normalized_graph = request.normalized_graph or draft["normalized_graph"]
+        raw_ui_json = request.raw_ui_json or draft.get("raw_ui_json")
+        raw_api_json = request.raw_api_json or draft.get("raw_api_json")
+        try:
+            normalized_data = json.loads(normalized_graph)
+            normalized = NormalizedWorkflow.from_dict(normalized_data)
+        except (TypeError, ValueError, KeyError) as error:
+            raise HTTPException(
+                status_code=422, detail=f"草稿数据解析失败：{error}"
+            ) from error
+        try:
+            version = manager.publish_workflow_version(
+                workflow_id,
+                label=request.label,
+                normalized_graph=normalized_graph,
+                raw_ui_json=raw_ui_json,
+                raw_api_json=raw_api_json,
+                node_count=normalized.node_count(),
+                checksum=normalized.checksum(),
+                is_validated=request.is_validated,
+                validation_result=request.validation_result,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        return {"database_environment": manager.active_environment, "version": version}
+
+    @app.post("/api/workflows/roundtrip-test")
+    def roundtrip_test_api(request: RoundtripTestRequest) -> dict[str, object]:
+        """往返测试：导入—导出—重新导入，验证数据完整性。
+
+        不写入数据库，仅用于验证工作流转换的正确性。
+        """
+        try:
+            result = roundtrip_test(request.workflow, request.source_format)
+        except Exception as error:
+            raise HTTPException(
+                status_code=422, detail=f"往返测试失败：{error}"
+            ) from error
+        return {"database_environment": manager.active_environment, **result}
 
     @app.get("/api/projects")
     def list_projects(
