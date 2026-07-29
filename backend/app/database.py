@@ -20,6 +20,31 @@ class DatabaseSafetyError(RuntimeError):
     """Raised when an operation could cross the production/test boundary."""
 
 
+def _build_deletion_warnings(
+    *,
+    has_files: bool,
+    has_images: bool,
+    has_tasks: bool,
+    has_snapshots: bool,
+    already_soft_deleted: bool,
+) -> list[str]:
+    """Build human-readable warning messages shown in the deletion confirm dialog."""
+    warnings: list[str] = []
+    if has_files:
+        warnings.append("项目包含已存储的文件,永久删除将一并清理文件目录。")
+    if has_images:
+        warnings.append("项目包含生成的图片实例,删除后无法恢复。")
+    if has_tasks:
+        warnings.append("项目包含任务记录,删除后任务历史将不可追溯。")
+    if has_snapshots:
+        warnings.append("项目存在剧本快照,删除后历史版本将丢失。")
+    if already_soft_deleted:
+        warnings.append("项目已在回收站中,本次操作为永久删除且不可撤销。")
+    if not warnings:
+        warnings.append("当前项目仅包含结构数据,可安全删除。")
+    return warnings
+
+
 @dataclass(frozen=True)
 class DatabaseDescriptor:
     environment: DatabaseEnvironment
@@ -2813,6 +2838,159 @@ class DatabaseManager:
             "shot_page_count": int(row["shot_page_count"]),
             "material_count": int(row["material_count"]),
             "character_count": int(row["character_count"]),
+        }
+
+    def get_project_deletion_impact(
+        self,
+        project_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        """Preview the impact of deleting a project before actually removing data.
+
+        Returns a dict with counts of all dependent resources that will be
+        affected by soft or permanent deletion. Returns None if the project
+        does not exist.
+
+        Extends ``get_project_stats`` with branches, snapshots, batches,
+        tasks, files and image instances so the confirmation dialog can show
+        the full blast radius.
+        """
+        target_environment = environment or self._active_environment
+        with self.connection(target_environment) as connection:
+            project = connection.execute(
+                "SELECT id, name, status, archived_at, deleted_at FROM projects WHERE id = ?",
+                (project_id,),
+            ).fetchone()
+            if project is None:
+                return None
+
+            row = connection.execute(
+                """
+                SELECT
+                    (SELECT COUNT(*) FROM chapters c
+                     WHERE c.project_id = p.id) AS chapter_count,
+                    (SELECT COUNT(*) FROM large_scenes ls
+                     JOIN chapters c ON c.id = ls.chapter_id
+                     WHERE c.project_id = p.id) AS large_scene_count,
+                    (SELECT COUNT(*) FROM small_scenes ss
+                     JOIN large_scenes ls ON ls.id = ss.large_scene_id
+                     JOIN chapters c ON c.id = ls.chapter_id
+                     WHERE c.project_id = p.id) AS small_scene_count,
+                    (SELECT COUNT(*) FROM shot_pages sp
+                     JOIN small_scenes ss ON ss.id = sp.small_scene_id
+                     JOIN large_scenes ls ON ls.id = ss.large_scene_id
+                     JOIN chapters c ON c.id = ls.chapter_id
+                     WHERE c.project_id = p.id) AS shot_page_count,
+                    (SELECT COUNT(DISTINCT ssm.material_id)
+                     FROM small_scene_materials ssm
+                     JOIN small_scenes ss ON ss.id = ssm.small_scene_id
+                     JOIN large_scenes ls ON ls.id = ss.large_scene_id
+                     JOIN chapters c ON c.id = ls.chapter_id
+                     WHERE c.project_id = p.id) AS linked_material_count,
+                    (SELECT COUNT(*) FROM project_characters pc
+                     WHERE pc.project_id = p.id) AS character_count,
+                    (SELECT COUNT(*) FROM branches b
+                     WHERE b.parent_type = 'large_scene'
+                       AND b.parent_id IN (
+                           SELECT ls.id FROM large_scenes ls
+                           JOIN chapters c ON c.id = ls.chapter_id
+                           WHERE c.project_id = p.id
+                       )) AS large_scene_branch_count,
+                    (SELECT COUNT(*) FROM branches b
+                     WHERE b.parent_type = 'small_scene'
+                       AND b.parent_id IN (
+                           SELECT ss.id FROM small_scenes ss
+                           JOIN large_scenes ls ON ls.id = ss.large_scene_id
+                           JOIN chapters c ON c.id = ls.chapter_id
+                           WHERE c.project_id = p.id
+                       )) AS small_scene_branch_count,
+                    (SELECT COUNT(*) FROM story_snapshots ss
+                     WHERE ss.project_id = p.id) AS snapshot_count,
+                    (SELECT COUNT(*) FROM operation_history oh
+                     WHERE oh.project_id = p.id) AS operation_count,
+                    (SELECT COUNT(*) FROM batches bat
+                     WHERE bat.project_id = p.id) AS batch_count,
+                    (SELECT COUNT(*) FROM tasks t
+                     JOIN batches bat ON bat.id = t.batch_id
+                     WHERE bat.project_id = p.id) AS task_count,
+                    (SELECT COUNT(*) FROM image_instances ii
+                     WHERE ii.project_id = p.id) AS image_instance_count,
+                    (SELECT COUNT(*) FROM files f
+                     WHERE f.project_id = p.id) AS file_count
+                FROM projects p
+                WHERE p.id = ?
+                """,
+                (project_id,),
+            ).fetchone()
+
+        linked_materials = int(row["linked_material_count"])
+        chapters = int(row["chapter_count"])
+        large_scenes = int(row["large_scene_count"])
+        small_scenes = int(row["small_scene_count"])
+        shot_pages = int(row["shot_page_count"])
+        characters = int(row["character_count"])
+        large_scene_branches = int(row["large_scene_branch_count"])
+        small_scene_branches = int(row["small_scene_branch_count"])
+        snapshots = int(row["snapshot_count"])
+        operations = int(row["operation_count"])
+        batches = int(row["batch_count"])
+        tasks = int(row["task_count"])
+        image_instances = int(row["image_instance_count"])
+        files = int(row["file_count"])
+
+        total_structural = (
+            chapters
+            + large_scenes
+            + small_scenes
+            + shot_pages
+            + large_scene_branches
+            + small_scene_branches
+        )
+        total_assets = linked_materials + characters
+        total_history = snapshots + operations
+        total_generation = batches + tasks + image_instances + files
+        total_affected = (
+            total_structural + total_assets + total_history + total_generation
+        )
+
+        return {
+            "project": {
+                "id": project["id"],
+                "name": project["name"],
+                "status": project["status"],
+                "archived_at": project["archived_at"],
+                "deleted_at": project["deleted_at"],
+            },
+            "counts": {
+                "chapters": chapters,
+                "large_scenes": large_scenes,
+                "small_scenes": small_scenes,
+                "shot_pages": shot_pages,
+                "linked_materials": linked_materials,
+                "characters": characters,
+                "large_scene_branches": large_scene_branches,
+                "small_scene_branches": small_scene_branches,
+                "snapshots": snapshots,
+                "operations": operations,
+                "batches": batches,
+                "tasks": tasks,
+                "image_instances": image_instances,
+                "files": files,
+            },
+            "totals": {
+                "structural": total_structural,
+                "assets": total_assets,
+                "history": total_history,
+                "generation": total_generation,
+                "affected": total_affected,
+            },
+            "warnings": _build_deletion_warnings(
+                has_files=files > 0,
+                has_images=image_instances > 0,
+                has_tasks=tasks > 0,
+                has_snapshots=snapshots > 0,
+                already_soft_deleted=project["deleted_at"] is not None,
+            ),
         }
 
     def copy_project(
