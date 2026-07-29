@@ -297,6 +297,23 @@ def parse_api_json(raw: dict[str, Any]) -> NormalizedWorkflow:
             "raw": node_data,
         })
 
+    # API JSON 不包含输出端口定义，根据已建立的连线推导输出端口。
+    # 否则导入后无法新增连线（create_link 校验源节点输出端口存在性）。
+    node_outputs: dict[str, list[dict[str, Any]]] = {}
+    for link in links:
+        src_node = str(link.get("source_node", ""))
+        src_slot = int(link.get("source_slot", 0))
+        if src_node not in node_outputs:
+            node_outputs[src_node] = []
+        while len(node_outputs[src_node]) <= src_slot:
+            node_outputs[src_node].append({"name": "", "type": "*", "links": []})
+        if link.get("id") not in node_outputs[src_node][src_slot]["links"]:
+            node_outputs[src_node][src_slot]["links"].append(link["id"])
+    for node in nodes:
+        nid = str(node.get("id", ""))
+        if nid in node_outputs:
+            node["outputs"] = node_outputs[nid]
+
     return NormalizedWorkflow(
         nodes=nodes,
         links=links,
