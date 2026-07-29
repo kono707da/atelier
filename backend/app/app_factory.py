@@ -6,20 +6,23 @@ ASGI 入口 ``app`` 由 ``backend.app.main`` 单独持有。
 """
 from __future__ import annotations
 
+import asyncio
 import io
 import json
+import logging
 import re
 import shutil
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, AsyncIterator, Literal
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -72,6 +75,77 @@ from .workflow_publish import (
     precheck_publish,
     roundtrip_test,
 )
+from .compiler import (
+    apply_slots_to_api_json,
+    compile_project,
+    resolve_slots_for_item,
+)
+from .batch_drafts import (
+    BatchConfig,
+    VALID_BATCH_STATUSES,
+    commit_draft,
+    create_draft,
+    delete_batch,
+    delete_draft,
+    get_batch,
+    get_draft,
+    list_batches,
+    list_drafts,
+    preview_draft,
+    update_batch_status,
+    update_draft,
+)
+from .task_queue import (
+    DEFAULT_LEASE_SECONDS,
+    DEFAULT_MAX_ATTEMPTS,
+    VALID_TASK_STATUSES,
+    cancel_task,
+    claim_next_task,
+    create_tasks_from_batch,
+    expire_stale_leases,
+    get_attempt,
+    get_batch_progress,
+    get_task,
+    get_task_center_summary,
+    list_all_tasks,
+    list_attempts,
+    list_events,
+    list_tasks,
+    mark_attempt_completed,
+    mark_attempt_failed,
+    mark_attempt_submitted,
+    mark_attempt_unknown,
+    pause_task,
+    recover_after_restart,
+    release_lease,
+    resume_task,
+    retry_task,
+    set_task_priority,
+)
+from .comfyui_submit import (
+    build_api_json_for_item,
+    check_comfyui_history,
+    submit_task_to_comfyui,
+)
+from .comfyui_progress import (
+    ProgressTracker,
+    ComfyUIWebSocketListener,
+    poll_comfyui_history_for_attempt,
+    recover_submitted_attempts,
+    sse_progress_generator,
+)
+from .output_receiver import (
+    collect_attempt_outputs,
+    get_file_path,
+    get_file_record,
+    get_image_instance,
+    list_background_jobs,
+    list_image_instances,
+    parse_comfyui_outputs,
+)
+
+
+logger = logging.getLogger(__name__)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -989,6 +1063,160 @@ class PrecheckRequest(BaseModel):
         return self
 
 
+class CompileRequest(BaseModel):
+    scope: str = Field(default="project")
+    scope_id: str | None = None
+    instance_count: int = Field(default=1, ge=1, le=100)
+    seed_strategy: str = Field(default="fixed")
+    seed_base: int | None = Field(default=None, ge=0)
+    workflow_id: str | None = None
+    workflow_version_id: str | None = None
+    skip_adopted: bool = False
+    only_failed: bool = False
+    resolve_slots: bool = Field(default=False, description="是否解析语义插槽")
+
+    @model_validator(mode="after")
+    def validate_fields(self):
+        valid_scopes = ("project", "chapter", "large_scene", "small_scene", "branch", "shot_pages")
+        if self.scope not in valid_scopes:
+            raise ValueError(f"scope 无效，允许值: {', '.join(valid_scopes)}")
+        if self.scope != "project" and not self.scope_id:
+            raise ValueError(f"scope={self.scope} 需要 scope_id")
+        valid_strategies = ("fixed", "random", "increment", "reuse_last")
+        if self.seed_strategy not in valid_strategies:
+            raise ValueError(f"seed_strategy 无效，允许值: {', '.join(valid_strategies)}")
+        return self
+
+
+# ── v0.7.0 阶段 3.2 批量配置请求模型 ───────────────────────────────
+
+
+_BATCH_VALID_SCOPES = ("project", "chapter", "large_scene", "small_scene", "branch", "shot_pages")
+_BATCH_VALID_STRATEGIES = ("fixed", "random", "increment", "reuse_last")
+
+
+class BatchConfigRequest(BaseModel):
+    """批量配置请求体。"""
+    instance_count: int = Field(default=1, ge=1, le=100)
+    seed_strategy: str = Field(default="fixed")
+    seed_base: int | None = Field(default=None, ge=0)
+    workflow_id: str | None = None
+    workflow_version_id: str | None = None
+    skip_adopted: bool = False
+    only_failed: bool = False
+
+    @model_validator(mode="after")
+    def validate_fields(self):
+        if self.seed_strategy not in _BATCH_VALID_STRATEGIES:
+            raise ValueError(f"seed_strategy 无效，允许值: {', '.join(_BATCH_VALID_STRATEGIES)}")
+        return self
+
+
+class CreateBatchDraftRequest(BaseModel):
+    name: str = Field(default="", max_length=120)
+    scope: str = Field(default="project")
+    scope_id: str | None = None
+    config: BatchConfigRequest = Field(default_factory=BatchConfigRequest)
+
+    @model_validator(mode="after")
+    def validate_scope(self):
+        if self.scope not in _BATCH_VALID_SCOPES:
+            raise ValueError(f"scope 无效，允许值: {', '.join(_BATCH_VALID_SCOPES)}")
+        if self.scope != "project" and not self.scope_id:
+            raise ValueError(f"scope={self.scope} 需要 scope_id")
+        return self
+
+
+class UpdateBatchDraftRequest(BaseModel):
+    name: str | None = Field(default=None, max_length=120)
+    scope: str | None = None
+    scope_id: str | None = None
+    config: BatchConfigRequest | None = None
+
+    @model_validator(mode="after")
+    def validate_scope(self):
+        if self.scope is not None:
+            if self.scope not in _BATCH_VALID_SCOPES:
+                raise ValueError(f"scope 无效，允许值: {', '.join(_BATCH_VALID_SCOPES)}")
+            if self.scope != "project" and not self.scope_id:
+                raise ValueError(f"scope={self.scope} 需要 scope_id")
+        return self
+
+
+class PreviewBatchDraftRequest(BaseModel):
+    force: bool = Field(default=False, description="强制重新编译，忽略缓存")
+    resolve_slots: bool = Field(default=False, description="解析语义插槽")
+
+
+class CommitBatchDraftRequest(BaseModel):
+    name: str | None = Field(default=None, max_length=120)
+
+
+class UpdateBatchStatusRequest(BaseModel):
+    status: str
+
+    @model_validator(mode="after")
+    def validate_status(self):
+        from .batch_drafts import VALID_BATCH_STATUSES
+        if self.status not in VALID_BATCH_STATUSES:
+            raise ValueError(f"status 无效，允许值: {', '.join(VALID_BATCH_STATUSES)}")
+        return self
+
+
+class CreateTasksRequest(BaseModel):
+    """从批次创建任务请求。"""
+    max_attempts: int = Field(default=DEFAULT_MAX_ATTEMPTS, ge=1, le=10)
+
+
+class ClaimTaskRequest(BaseModel):
+    """领取任务请求。"""
+    lease_holder: str = Field(min_length=1, max_length=120)
+    lease_seconds: int = Field(default=DEFAULT_LEASE_SECONDS, ge=10, le=3600)
+    batch_id: str | None = None
+
+
+class ClaimTasksBatchRequest(BaseModel):
+    """批量领取任务请求。"""
+    lease_holder: str = Field(min_length=1, max_length=120)
+    count: int = Field(default=1, ge=1, le=20)
+    lease_seconds: int = Field(default=DEFAULT_LEASE_SECONDS, ge=10, le=3600)
+    batch_id: str | None = None
+
+
+class AttemptSubmitRequest(BaseModel):
+    """标记 attempt 已提交。"""
+    prompt_id: str = Field(min_length=1)
+    api_json: str | None = None
+
+
+class AttemptFailRequest(BaseModel):
+    """标记 attempt 失败。"""
+    error_message: str = Field(default="", max_length=2000)
+    error_type: str = Field(default="unknown", max_length=120)
+
+
+class AttemptUnknownRequest(BaseModel):
+    """标记 attempt 状态未知。"""
+    reason: str = Field(default="", max_length=2000)
+
+
+class TaskPriorityRequest(BaseModel):
+    """设置任务优先级。"""
+    priority: int = Field(ge=0, le=1000)
+
+
+class TaskStatusUpdateRequest(BaseModel):
+    """任务状态控制（pause/resume/cancel/retry）。"""
+    action: str
+
+    @model_validator(mode="after")
+    def validate_action(self):
+        valid_actions = ("pause", "resume", "cancel", "retry")
+        if self.action not in valid_actions:
+            raise ValueError(f"action 无效，允许值: {', '.join(valid_actions)}")
+        return self
+
+
 # ── v0.4.1 Request Models ───────────────────────────────────────────
 
 class CreateScenePageRequest(BaseModel):
@@ -1165,18 +1393,11 @@ def create_app(
     locked_environment: Literal["production", "test"] | None = None,
     system_features_path: Path | None = None,
 ) -> FastAPI:
-    app = FastAPI(
-        title="Atelier API",
-        version="0.6.0",
-        docs_url="/api/docs",
-        redoc_url=None,
-    )
     manager = DatabaseManager(
         data_root or DEFAULT_DATA_ROOT,
         environment=environment,
         locked_environment=locked_environment,
     )
-    app.state.database_manager = manager
 
     # ComfyUI 客户端：基于数据库设置构造，运行时可更新配置
     def _build_comfyui_client() -> ComfyUIClient:
@@ -1189,7 +1410,39 @@ def create_app(
         return ComfyUIClient(config)
 
     comfyui_client = _build_comfyui_client()
+
+    # 阶段3.5 进度跟踪器和 WebSocket 监听器
+    progress_tracker = ProgressTracker()
+    ws_listener = ComfyUIWebSocketListener(
+        comfyui_client.config.derived_websocket_url(),
+        progress_tracker,
+        client_id=str(uuid.uuid4()),
+        reconnect_interval=5.0,
+    )
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        """应用生命周期：启动/停止 WebSocket 监听器。"""
+        if environment != "test":
+            await ws_listener.start()
+            logger.info("ComfyUI WebSocket 监听器已启动")
+        yield
+        if environment != "test":
+            await ws_listener.stop()
+            logger.info("ComfyUI WebSocket 监听器已停止")
+        comfyui_client.close()
+
+    app = FastAPI(
+        title="Atelier API",
+        version="0.7.0",
+        docs_url="/api/docs",
+        redoc_url=None,
+        lifespan=lifespan,
+    )
+    app.state.database_manager = manager
     app.state.comfyui_client = comfyui_client
+    app.state.progress_tracker = progress_tracker
+    app.state.ws_listener = ws_listener
 
     def _refresh_comfyui_client() -> ComfyUIClient:
         """根据数据库最新设置重建 ComfyUI 客户端。"""
@@ -1197,6 +1450,10 @@ def create_app(
         comfyui_client.close()
         comfyui_client = _build_comfyui_client()
         app.state.comfyui_client = comfyui_client
+        # 同步更新 WebSocket 监听器 URL
+        new_ws_url = comfyui_client.config.derived_websocket_url()
+        if environment != "test":
+            asyncio.create_task(ws_listener.update_url(new_ws_url))
         return comfyui_client
 
     resolved_development_todo_path = (
@@ -5345,6 +5602,848 @@ def create_app(
         return {
             "database_environment": manager.active_environment,
             **result,
+        }
+
+    @app.post("/api/projects/{project_id}/compile")
+    def compile_project_api(project_id: str, request: CompileRequest) -> dict[str, object]:
+        """编译项目为页级跑图项列表。
+
+        返回每个页面的完整输入快照、阻塞错误和警告。
+        """
+        try:
+            result = compile_project(
+                manager,
+                project_id,
+                scope=request.scope,
+                scope_id=request.scope_id,
+                instance_count=request.instance_count,
+                seed_strategy=request.seed_strategy,
+                seed_base=request.seed_base,
+                workflow_id_override=request.workflow_id,
+                workflow_version_id_override=request.workflow_version_id,
+                skip_adopted=request.skip_adopted,
+                only_failed=request.only_failed,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+        # 可选：解析语义插槽
+        if request.resolve_slots:
+            for item in result.items:
+                try:
+                    item.slot_resolutions = resolve_slots_for_item(manager, item)
+                except Exception:
+                    pass
+
+        return {
+            "database_environment": manager.active_environment,
+            **result.to_dict(),
+        }
+
+    # ── 阶段 3.2 跑图列表与批量配置 API ───────────────────────────────
+
+    @app.post("/api/projects/{project_id}/batch-drafts")
+    def create_batch_draft_api(project_id: str, request: CreateBatchDraftRequest) -> dict[str, object]:
+        """创建批量配置草稿。"""
+        config = BatchConfig(
+            instance_count=request.config.instance_count,
+            seed_strategy=request.config.seed_strategy,
+            seed_base=request.config.seed_base,
+            workflow_id=request.config.workflow_id,
+            workflow_version_id=request.config.workflow_version_id,
+            skip_adopted=request.config.skip_adopted,
+            only_failed=request.config.only_failed,
+        )
+        try:
+            draft = create_draft(
+                manager,
+                project_id,
+                name=request.name,
+                scope=request.scope,
+                scope_id=request.scope_id,
+                config=config,
+            )
+        except ValueError as error:
+            msg = str(error)
+            code = 404 if "不存在" in msg else 422
+            raise HTTPException(status_code=code, detail=msg) from error
+        return {
+            "database_environment": manager.active_environment,
+            "draft": draft,
+        }
+
+    @app.get("/api/projects/{project_id}/batch-drafts")
+    def list_batch_drafts_api(project_id: str, include_deleted: bool = False) -> dict[str, object]:
+        """列出项目的批量配置草稿。"""
+        drafts = list_drafts(manager, project_id, include_deleted=include_deleted)
+        return {
+            "database_environment": manager.active_environment,
+            "drafts": drafts,
+        }
+
+    @app.get("/api/batch-drafts/{draft_id}")
+    def get_batch_draft_api(draft_id: str) -> dict[str, object]:
+        """获取草稿详情。"""
+        draft = get_draft(manager, draft_id)
+        if not draft:
+            raise HTTPException(status_code=404, detail="草稿不存在")
+        return {
+            "database_environment": manager.active_environment,
+            "draft": draft,
+        }
+
+    @app.patch("/api/batch-drafts/{draft_id}")
+    def update_batch_draft_api(draft_id: str, request: UpdateBatchDraftRequest) -> dict[str, object]:
+        """更新草稿。"""
+        config = None
+        if request.config is not None:
+            config = BatchConfig(
+                instance_count=request.config.instance_count,
+                seed_strategy=request.config.seed_strategy,
+                seed_base=request.config.seed_base,
+                workflow_id=request.config.workflow_id,
+                workflow_version_id=request.config.workflow_version_id,
+                skip_adopted=request.config.skip_adopted,
+                only_failed=request.config.only_failed,
+            )
+        try:
+            draft = update_draft(
+                manager,
+                draft_id,
+                name=request.name,
+                scope=request.scope,
+                scope_id=request.scope_id,
+                config=config,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        if not draft:
+            raise HTTPException(status_code=404, detail="草稿不存在")
+        return {
+            "database_environment": manager.active_environment,
+            "draft": draft,
+        }
+
+    @app.delete("/api/batch-drafts/{draft_id}")
+    def delete_batch_draft_api(draft_id: str) -> dict[str, object]:
+        """软删除草稿。"""
+        deleted = delete_draft(manager, draft_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="草稿不存在或已删除")
+        return {
+            "database_environment": manager.active_environment,
+            "deleted": True,
+        }
+
+    @app.post("/api/batch-drafts/{draft_id}/preview")
+    def preview_batch_draft_api(draft_id: str, request: PreviewBatchDraftRequest) -> dict[str, object]:
+        """编译草稿并缓存预览。"""
+        try:
+            preview = preview_draft(manager, draft_id, force=request.force)
+        except ValueError as error:
+            msg = str(error)
+            code = 404 if "不存在" in msg else 422
+            raise HTTPException(status_code=code, detail=msg) from error
+        return {
+            "database_environment": manager.active_environment,
+            "preview": preview,
+        }
+
+    @app.post("/api/batch-drafts/{draft_id}/commit")
+    def commit_batch_draft_api(draft_id: str, request: CommitBatchDraftRequest) -> dict[str, object]:
+        """提交草稿为不可变批次快照。"""
+        try:
+            batch = commit_draft(manager, draft_id, name=request.name)
+        except ValueError as error:
+            msg = str(error)
+            code = 404 if "不存在" in msg else 422
+            raise HTTPException(status_code=code, detail=msg) from error
+        return {
+            "database_environment": manager.active_environment,
+            "batch": batch,
+        }
+
+    @app.get("/api/batches")
+    def list_batches_api(
+        project_id: str | None = None,
+        status: str | None = None,
+        include_deleted: bool = False,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, object]:
+        """列出批次。"""
+        try:
+            batches = list_batches(
+                manager,
+                project_id=project_id,
+                status=status,
+                include_deleted=include_deleted,
+                limit=limit,
+                offset=offset,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return {
+            "database_environment": manager.active_environment,
+            "batches": batches,
+        }
+
+    @app.get("/api/projects/{project_id}/batches")
+    def list_project_batches_api(
+        project_id: str,
+        status: str | None = None,
+        include_deleted: bool = False,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, object]:
+        """列出项目的批次。"""
+        try:
+            batches = list_batches(
+                manager,
+                project_id=project_id,
+                status=status,
+                include_deleted=include_deleted,
+                limit=limit,
+                offset=offset,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return {
+            "database_environment": manager.active_environment,
+            "batches": batches,
+        }
+
+    @app.get("/api/batches/{batch_id}")
+    def get_batch_api(batch_id: str, include_snapshot: bool = True) -> dict[str, object]:
+        """获取批次详情。"""
+        batch = get_batch(manager, batch_id, include_snapshot=include_snapshot)
+        if not batch:
+            raise HTTPException(status_code=404, detail="批次不存在")
+        return {
+            "database_environment": manager.active_environment,
+            "batch": batch,
+        }
+
+    @app.patch("/api/batches/{batch_id}/status")
+    def update_batch_status_api(batch_id: str, request: UpdateBatchStatusRequest) -> dict[str, object]:
+        """更新批次状态。"""
+        try:
+            batch = update_batch_status(manager, batch_id, request.status)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        if not batch:
+            raise HTTPException(status_code=404, detail="批次不存在")
+        return {
+            "database_environment": manager.active_environment,
+            "batch": batch,
+        }
+
+    @app.delete("/api/batches/{batch_id}")
+    def delete_batch_api(batch_id: str) -> dict[str, object]:
+        """软删除批次。"""
+        deleted = delete_batch(manager, batch_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="批次不存在或已删除")
+        return {
+            "database_environment": manager.active_environment,
+            "deleted": True,
+        }
+
+    # ── 阶段3.3 持久化任务队列 ──────────────────────────────────────
+
+    @app.post("/api/batches/{batch_id}/tasks")
+    def create_tasks_api(batch_id: str, request: CreateTasksRequest) -> dict[str, object]:
+        """从批次的不可变快照展开为页级任务。
+
+        幂等：若任务已存在则直接返回已有任务列表。
+        """
+        try:
+            tasks = create_tasks_from_batch(
+                manager,
+                batch_id,
+                max_attempts=request.max_attempts,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return {
+            "database_environment": manager.active_environment,
+            "batch_id": batch_id,
+            "tasks": tasks,
+            "count": len(tasks),
+        }
+
+    @app.get("/api/batches/{batch_id}/tasks")
+    def list_tasks_api(
+        batch_id: str,
+        task_status: str | None = None,
+        include_deleted: bool = False,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> dict[str, object]:
+        """列出批次内的任务。"""
+        if task_status is not None and task_status not in VALID_TASK_STATUSES:
+            raise HTTPException(
+                status_code=422,
+                detail=f"task_status 无效，允许值: {', '.join(VALID_TASK_STATUSES)}",
+            )
+        tasks = list_tasks(
+            manager,
+            batch_id,
+            status=task_status,
+            include_deleted=include_deleted,
+            limit=limit,
+            offset=offset,
+        )
+        return {
+            "database_environment": manager.active_environment,
+            "batch_id": batch_id,
+            "tasks": tasks,
+            "count": len(tasks),
+        }
+
+    @app.get("/api/batches/{batch_id}/progress")
+    def get_batch_progress_api(batch_id: str) -> dict[str, object]:
+        """获取批次的任务进度统计。"""
+        try:
+            progress = get_batch_progress(manager, batch_id)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        return {
+            "database_environment": manager.active_environment,
+            "progress": progress,
+        }
+
+    @app.get("/api/tasks/{task_id}")
+    def get_task_api(task_id: str, include_item: bool = True) -> dict[str, object]:
+        """获取任务详情。"""
+        task = get_task(manager, task_id, include_item=include_item)
+        if not task:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        return {
+            "database_environment": manager.active_environment,
+            "task": task,
+        }
+
+    @app.patch("/api/tasks/{task_id}")
+    def update_task_api(task_id: str, request: TaskStatusUpdateRequest) -> dict[str, object]:
+        """任务状态控制：pause / resume / cancel / retry。"""
+        action_map = {
+            "pause": pause_task,
+            "resume": resume_task,
+            "cancel": cancel_task,
+            "retry": retry_task,
+        }
+        handler = action_map[request.action]
+        task = handler(manager, task_id)
+        if not task:
+            raise HTTPException(
+                status_code=422,
+                detail=f"任务当前状态不允许执行 {request.action} 操作",
+            )
+        return {
+            "database_environment": manager.active_environment,
+            "task": task,
+        }
+
+    @app.patch("/api/tasks/{task_id}/priority")
+    def set_task_priority_api(task_id: str, request: TaskPriorityRequest) -> dict[str, object]:
+        """设置任务优先级。"""
+        task = set_task_priority(manager, task_id, request.priority)
+        if not task:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        return {
+            "database_environment": manager.active_environment,
+            "task": task,
+        }
+
+    @app.post("/api/tasks/claim")
+    def claim_task_api(request: ClaimTaskRequest) -> dict[str, object]:
+        """原子领取下一个可执行任务。
+
+        返回 task + attempt + lease 信息；无可领取任务时返回 null。
+        """
+        claim = claim_next_task(
+            manager,
+            lease_holder=request.lease_holder,
+            lease_seconds=request.lease_seconds,
+            batch_id=request.batch_id,
+        )
+        return {
+            "database_environment": manager.active_environment,
+            "claim": claim,
+        }
+
+    @app.post("/api/tasks/claim-batch")
+    def claim_tasks_batch_api(request: ClaimTasksBatchRequest) -> dict[str, object]:
+        """批量领取多个任务。"""
+        claims: list[dict[str, object]] = []
+        for _ in range(request.count):
+            claim = claim_next_task(
+                manager,
+                lease_holder=request.lease_holder,
+                lease_seconds=request.lease_seconds,
+                batch_id=request.batch_id,
+            )
+            if claim is None:
+                break
+            claims.append(claim)
+        return {
+            "database_environment": manager.active_environment,
+            "claims": claims,
+            "count": len(claims),
+        }
+
+    @app.post("/api/attempts/{attempt_id}/submit")
+    def mark_attempt_submitted_api(
+        attempt_id: str,
+        request: AttemptSubmitRequest,
+    ) -> dict[str, object]:
+        """标记 attempt 已提交到 ComfyUI。"""
+        attempt = mark_attempt_submitted(
+            manager,
+            attempt_id,
+            prompt_id=request.prompt_id,
+            api_json=request.api_json,
+        )
+        if not attempt:
+            raise HTTPException(status_code=404, detail="尝试记录不存在")
+        return {
+            "database_environment": manager.active_environment,
+            "attempt": attempt,
+        }
+
+    @app.post("/api/attempts/{attempt_id}/complete")
+    def mark_attempt_completed_api(attempt_id: str) -> dict[str, object]:
+        """标记 attempt 成功完成，同时更新任务状态为 completed。"""
+        attempt = mark_attempt_completed(manager, attempt_id)
+        if not attempt:
+            raise HTTPException(status_code=404, detail="尝试记录不存在")
+        return {
+            "database_environment": manager.active_environment,
+            "attempt": attempt,
+        }
+
+    @app.post("/api/attempts/{attempt_id}/fail")
+    def mark_attempt_failed_api(
+        attempt_id: str,
+        request: AttemptFailRequest,
+    ) -> dict[str, object]:
+        """标记 attempt 失败，根据重试次数决定任务状态。"""
+        attempt = mark_attempt_failed(
+            manager,
+            attempt_id,
+            error_message=request.error_message,
+            error_type=request.error_type,
+        )
+        if not attempt:
+            raise HTTPException(status_code=404, detail="尝试记录不存在")
+        return {
+            "database_environment": manager.active_environment,
+            "attempt": attempt,
+        }
+
+    @app.post("/api/attempts/{attempt_id}/unknown")
+    def mark_attempt_unknown_api(
+        attempt_id: str,
+        request: AttemptUnknownRequest,
+    ) -> dict[str, object]:
+        """标记 attempt 状态为 unknown（重启后无法判断）。"""
+        attempt = mark_attempt_unknown(manager, attempt_id, reason=request.reason)
+        if not attempt:
+            raise HTTPException(status_code=404, detail="尝试记录不存在")
+        return {
+            "database_environment": manager.active_environment,
+            "attempt": attempt,
+        }
+
+    @app.get("/api/attempts/{attempt_id}")
+    def get_attempt_api(attempt_id: str) -> dict[str, object]:
+        """获取 attempt 详情。"""
+        attempt = get_attempt(manager, attempt_id)
+        if not attempt:
+            raise HTTPException(status_code=404, detail="尝试记录不存在")
+        return {
+            "database_environment": manager.active_environment,
+            "attempt": attempt,
+        }
+
+    @app.get("/api/tasks/{task_id}/attempts")
+    def list_attempts_api(task_id: str) -> dict[str, object]:
+        """列出任务的所有 attempt（按尝试序号倒序）。"""
+        attempts = list_attempts(manager, task_id)
+        return {
+            "database_environment": manager.active_environment,
+            "task_id": task_id,
+            "attempts": attempts,
+            "count": len(attempts),
+        }
+
+    @app.get("/api/tasks/{task_id}/events")
+    def list_events_api(
+        task_id: str,
+        event_type: str | None = None,
+        limit: int = 100,
+    ) -> dict[str, object]:
+        """列出任务的事件。"""
+        events = list_events(
+            manager,
+            task_id,
+            event_type=event_type,
+            limit=limit,
+        )
+        return {
+            "database_environment": manager.active_environment,
+            "task_id": task_id,
+            "events": events,
+            "count": len(events),
+        }
+
+    @app.post("/api/leases/{lease_id}/release")
+    def release_lease_api(lease_id: str) -> dict[str, object]:
+        """手动释放租约。"""
+        released = release_lease(manager, lease_id)
+        if not released:
+            raise HTTPException(status_code=404, detail="租约不存在或已释放")
+        return {
+            "database_environment": manager.active_environment,
+            "released": True,
+        }
+
+    @app.post("/api/tasks/expire-stale-leases")
+    def expire_stale_leases_api() -> dict[str, object]:
+        """过期所有超时租约，将对应任务重置为 pending。"""
+        expired = expire_stale_leases(manager)
+        return {
+            "database_environment": manager.active_environment,
+            "expired_count": expired,
+        }
+
+    @app.post("/api/tasks/recover")
+    def recover_after_restart_api() -> dict[str, object]:
+        """应用重启后的任务恢复。
+
+        过期超时租约、重置 running 任务、标记 submitted attempt 为 unknown。
+        """
+        result = recover_after_restart(manager)
+        return {
+            "database_environment": manager.active_environment,
+            "recovery": result,
+        }
+
+    # ── 阶段3.4 ComfyUI 提交 ────────────────────────────────────────
+
+    @app.post("/api/tasks/{task_id}/attempts/{attempt_id}/submit-to-comfyui")
+    def submit_to_comfyui_api(task_id: str, attempt_id: str) -> dict[str, object]:
+        """提交任务到 ComfyUI 执行。
+
+        流程：构建 API JSON → 提交 /prompt → 持久化 prompt_id。
+        幂等：attempt 已有 prompt_id 时直接返回。
+        """
+        try:
+            result = submit_task_to_comfyui(
+                manager,
+                comfyui_client,
+                task_id,
+                attempt_id,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        except ComfyUIError as error:
+            raise HTTPException(status_code=502, detail=str(error)) from error
+        return {
+            "database_environment": manager.active_environment,
+            "result": result,
+        }
+
+    @app.post("/api/attempts/{attempt_id}/check-history")
+    def check_history_api(attempt_id: str) -> dict[str, object]:
+        """查询 ComfyUI 历史记录，判断任务是否已完成。"""
+        attempt = get_attempt(manager, attempt_id)
+        if not attempt:
+            raise HTTPException(status_code=404, detail="尝试记录不存在")
+        prompt_id = attempt.get("prompt_id")
+        if not prompt_id:
+            raise HTTPException(status_code=422, detail="尝试记录缺少 prompt_id")
+        history = check_comfyui_history(manager, comfyui_client, prompt_id)
+        return {
+            "database_environment": manager.active_environment,
+            "attempt_id": attempt_id,
+            "prompt_id": prompt_id,
+            "history": history,
+        }
+
+    @app.post("/api/tasks/{task_id}/preview-api-json")
+    def preview_api_json_api(task_id: str) -> dict[str, object]:
+        """预览任务的最终 API JSON（不提交到 ComfyUI）。"""
+        task = get_task(manager, task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        item = task.get("item", {})
+        if not item:
+            raise HTTPException(status_code=422, detail="任务快照为空")
+        try:
+            api_json = build_api_json_for_item(manager, item)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return {
+            "database_environment": manager.active_environment,
+            "task_id": task_id,
+            "api_json": api_json,
+        }
+
+    # ── 阶段3.5 实时进度与故障恢复 ──────────────────────────────────
+
+    @app.get("/api/attempts/{attempt_id}/progress/sse")
+    async def attempt_progress_sse(attempt_id: str):
+        """SSE 推送任务进度。
+
+        前端通过 EventSource 连接此端点，实时接收 ComfyUI 执行事件。
+        连接超时或任务完成时自动关闭。
+        """
+        attempt = get_attempt(manager, attempt_id)
+        if not attempt:
+            raise HTTPException(status_code=404, detail="尝试记录不存在")
+        prompt_id = attempt.get("prompt_id")
+        if not prompt_id:
+            raise HTTPException(status_code=422, detail="尝试记录缺少 prompt_id")
+        return StreamingResponse(
+            sse_progress_generator(progress_tracker, prompt_id, timeout_seconds=300.0),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    @app.post("/api/attempts/{attempt_id}/progress/poll")
+    def poll_attempt_progress(attempt_id: str) -> dict[str, object]:
+        """轮询任务进度（SSE 不可用时兜底）。
+
+        直接查询 ComfyUI 历史，返回当前进度快照。
+        """
+        attempt = get_attempt(manager, attempt_id)
+        if not attempt:
+            raise HTTPException(status_code=404, detail="尝试记录不存在")
+        result = poll_comfyui_history_for_attempt(
+            manager, comfyui_client, attempt_id
+        )
+        if result is None:
+            raise HTTPException(
+                status_code=404,
+                detail="尝试记录缺少 prompt_id 或 ComfyUI 历史中未找到",
+            )
+        return {
+            "database_environment": manager.active_environment,
+            "attempt_id": attempt_id,
+            "result": result,
+        }
+
+    @app.post("/api/tasks/recover-submitted")
+    def recover_submitted_tasks_api() -> dict[str, object]:
+        """重启后恢复所有 submitted 状态的 attempt。
+
+        核对 ComfyUI 历史，将已完成/失败的 attempt 更新状态，
+        无法判断的标记为 unknown。
+        """
+        result = recover_submitted_attempts(manager, comfyui_client)
+        return {
+            "database_environment": manager.active_environment,
+            "recovery": result,
+        }
+
+    @app.get("/api/attempts/{attempt_id}/progress")
+    def get_attempt_progress(attempt_id: str) -> dict[str, object]:
+        """获取 attempt 当前进度（从内存读取，不查询 ComfyUI）。"""
+        attempt = get_attempt(manager, attempt_id)
+        if not attempt:
+            raise HTTPException(status_code=404, detail="尝试记录不存在")
+        prompt_id = attempt.get("prompt_id")
+        if not prompt_id:
+            raise HTTPException(status_code=422, detail="尝试记录缺少 prompt_id")
+        progress = progress_tracker.get(prompt_id)
+        return {
+            "database_environment": manager.active_environment,
+            "attempt_id": attempt_id,
+            "prompt_id": prompt_id,
+            "progress": progress,
+        }
+
+    # ── 阶段3.6 输出和图片实例 ──────────────────────────────────────
+
+    @app.post("/api/attempts/{attempt_id}/collect-outputs")
+    def collect_outputs_api(attempt_id: str) -> dict[str, object]:
+        """收集 attempt 的所有输出图片。
+
+        从 ComfyUI 历史解析输出，下载图片，写入文件和图片实例记录。
+        """
+        try:
+            result = collect_attempt_outputs(
+                manager, comfyui_client, attempt_id
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        except ComfyUIError as error:
+            raise HTTPException(status_code=502, detail=str(error)) from error
+        return {
+            "database_environment": manager.active_environment,
+            "result": result,
+        }
+
+    @app.get("/api/image-instances")
+    def list_image_instances_api(
+        project_id: str | None = None,
+        shot_page_id: str | None = None,
+        task_id: str | None = None,
+        attempt_id: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, object]:
+        """列出图片实例。"""
+        instances = list_image_instances(
+            manager,
+            project_id=project_id,
+            shot_page_id=shot_page_id,
+            task_id=task_id,
+            attempt_id=attempt_id,
+            limit=limit,
+            offset=offset,
+        )
+        return {
+            "database_environment": manager.active_environment,
+            "image_instances": instances,
+            "count": len(instances),
+        }
+
+    @app.get("/api/image-instances/{instance_id}")
+    def get_image_instance_api(instance_id: str) -> dict[str, object]:
+        """获取单个图片实例详情。"""
+        instance = get_image_instance(manager, instance_id)
+        if not instance:
+            raise HTTPException(status_code=404, detail="图片实例不存在")
+        file_record = get_file_record(manager, instance.get("file_id", ""))
+        return {
+            "database_environment": manager.active_environment,
+            "image_instance": instance,
+            "file": file_record,
+        }
+
+    @app.get("/api/files/{file_id}/download")
+    def download_file_api(file_id: str):
+        """下载原始图片文件。"""
+        file_record = get_file_record(manager, file_id)
+        if not file_record:
+            raise HTTPException(status_code=404, detail="文件不存在")
+        file_path = get_file_path(manager, file_id)
+        if not file_path or not file_path.exists():
+            raise HTTPException(status_code=404, detail="文件存储不存在")
+        return FileResponse(
+            path=str(file_path),
+            filename=file_record.get("original_name", file_path.name),
+            media_type=file_record.get("mime_type", "application/octet-stream"),
+        )
+
+    @app.get("/api/background-jobs")
+    def list_background_jobs_api(
+        job_type: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, object]:
+        """列出后台任务。"""
+        jobs = list_background_jobs(
+            manager,
+            job_type=job_type,
+            status=status,
+            limit=limit,
+        )
+        return {
+            "database_environment": manager.active_environment,
+            "background_jobs": jobs,
+            "count": len(jobs),
+        }
+
+    # ── 阶段3.7 任务中心 API ────────────────────────────────────────
+
+    @app.get("/api/tasks")
+    def list_all_tasks_api(
+        status: str | None = None,
+        project_id: str | None = None,
+        batch_id: str | None = None,
+        has_error: bool | None = None,
+        created_after: str | None = None,
+        created_before: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, object]:
+        """任务中心：跨批次列出所有任务，支持多维度筛选。"""
+        tasks = list_all_tasks(
+            manager,
+            status=status,
+            project_id=project_id,
+            batch_id=batch_id,
+            has_error=has_error,
+            created_after=created_after,
+            created_before=created_before,
+            limit=limit,
+            offset=offset,
+        )
+        return {
+            "database_environment": manager.active_environment,
+            "tasks": tasks,
+            "count": len(tasks),
+        }
+
+    @app.get("/api/task-center/summary")
+    def task_center_summary_api(project_id: str | None = None) -> dict[str, object]:
+        """任务中心汇总统计：各状态任务数、错误任务数、批次统计。"""
+        summary = get_task_center_summary(manager, project_id=project_id)
+        return {
+            "database_environment": manager.active_environment,
+            "summary": summary,
+        }
+
+    @app.get("/api/tasks/{task_id}/error-detail")
+    def get_task_error_detail_api(task_id: str) -> dict[str, object]:
+        """获取任务错误详情和关联对象信息。"""
+        task = get_task(manager, task_id, include_item=True)
+        if not task:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        # 获取 attempt 列表
+        attempts = list_attempts(manager, task_id)
+        # 获取事件列表
+        events = list_events(manager, task_id, limit=20)
+        # 获取批次信息
+        batch = get_batch(manager, task.get("batch_id", ""), include_snapshot=False)
+        # 从 item 中提取关联对象
+        item = task.get("item", {})
+        if isinstance(item, str):
+            try:
+                item = json.loads(item)
+            except (TypeError, ValueError):
+                item = {}
+        return {
+            "database_environment": manager.active_environment,
+            "task": task,
+            "attempts": attempts,
+            "events": events,
+            "batch": batch,
+            "related": {
+                "project_id": item.get("project_id"),
+                "project_name": item.get("project_name"),
+                "chapter_id": item.get("chapter_id"),
+                "chapter_name": item.get("chapter_name"),
+                "large_scene_id": item.get("large_scene_id"),
+                "large_scene_name": item.get("large_scene_name"),
+                "small_scene_id": item.get("small_scene_id"),
+                "small_scene_name": item.get("small_scene_name"),
+                "shot_page_id": item.get("shot_page_id"),
+                "shot_page_title": item.get("shot_page_title"),
+                "workflow_id": item.get("workflow_id"),
+                "workflow_version_id": item.get("workflow_version_id"),
+                "workflow_label": item.get("workflow_label"),
+                "character_id": item.get("character_id"),
+                "character_name": item.get("character_name"),
+            },
         }
 
     # Warm the production lookup cache before the first page request. Test

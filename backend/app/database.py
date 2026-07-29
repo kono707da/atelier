@@ -602,6 +602,18 @@ class DatabaseManager:
                 connection, "v0.5.8", "Extend workflow_drafts with layout_state for regular layout",
                 self._migrate_workflow_draft_layout_extend,
             )
+            self._run_migration(
+                connection, "v0.7.0", "Add batch_drafts and batches tables for stage 3.2",
+                self._migrate_batch_drafts,
+            )
+            self._run_migration(
+                connection, "v0.7.1", "Add tasks/task_attempts/task_events/task_leases tables for stage 3.3",
+                self._migrate_task_queue,
+            )
+            self._run_migration(
+                connection, "v0.7.2", "Add files/image_instances/thumbnails/background_jobs tables for stage 3.6",
+                self._migrate_output_files,
+            )
             marker = connection.execute(
                 "SELECT value FROM atelier_meta WHERE key = 'environment'"
             ).fetchone()
@@ -1845,6 +1857,335 @@ class DatabaseManager:
             connection.execute(
                 "ALTER TABLE workflow_drafts ADD COLUMN layout_state TEXT"
             )
+
+    def _migrate_batch_drafts(self, connection) -> None:
+        """v0.7.0: 阶段3.2 跑图列表与批量配置。
+
+        - batch_drafts: 可编辑草稿（范围 + 配置 + 预览缓存）
+        - batches: 不可变批次快照（用户确认后固化）
+
+        幂等：CREATE TABLE IF NOT EXISTS。
+        """
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS batch_drafts (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                name TEXT NOT NULL DEFAULT '',
+                scope TEXT NOT NULL DEFAULT 'project',
+                scope_id TEXT,
+                config_json TEXT NOT NULL DEFAULT '{}',
+                preview_json TEXT,
+                preview_stale INTEGER NOT NULL DEFAULT 1,
+                revision INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                deleted_at TEXT,
+                FOREIGN KEY (project_id)
+                    REFERENCES projects(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_batch_drafts_project "
+            "ON batch_drafts(project_id, deleted_at, updated_at DESC)"
+        )
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS batches (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                draft_id TEXT,
+                name TEXT NOT NULL DEFAULT '',
+                scope TEXT NOT NULL DEFAULT 'project',
+                scope_id TEXT,
+                config_json TEXT NOT NULL DEFAULT '{}',
+                snapshot_json TEXT NOT NULL DEFAULT '{}',
+                item_count INTEGER NOT NULL DEFAULT 0,
+                blocking_count INTEGER NOT NULL DEFAULT 0,
+                warning_count INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'pending',
+                revision INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                deleted_at TEXT,
+                FOREIGN KEY (project_id)
+                    REFERENCES projects(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_batches_project "
+            "ON batches(project_id, deleted_at, created_at DESC)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_batches_status "
+            "ON batches(status, created_at DESC)"
+        )
+
+    def _migrate_task_queue(self, connection) -> None:
+        """v0.7.1: 阶段3.3 持久化任务队列。
+
+        - tasks: 批次内的页级任务（每个跑图项对应一个任务）
+        - task_attempts: 每次尝试的不可变记录（失败重试不覆盖旧记录）
+        - task_events: 任务事件日志
+        - task_leases: 任务租约（防止重复领取）
+
+        幂等：CREATE TABLE IF NOT EXISTS。
+        """
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tasks (
+                id TEXT PRIMARY KEY,
+                batch_id TEXT NOT NULL,
+                sort_key TEXT NOT NULL DEFAULT '0',
+                item_snapshot_json TEXT NOT NULL DEFAULT '{}',
+                status TEXT NOT NULL DEFAULT 'pending',
+                priority INTEGER NOT NULL DEFAULT 0,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                max_attempts INTEGER NOT NULL DEFAULT 3,
+                last_attempt_id TEXT,
+                error_message TEXT,
+                error_type TEXT,
+                revision INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                deleted_at TEXT,
+                FOREIGN KEY (batch_id)
+                    REFERENCES batches(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_batch "
+            "ON tasks(batch_id, sort_key)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_status "
+            "ON tasks(status, priority DESC, created_at)"
+        )
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS task_attempts (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                attempt_number INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'running',
+                prompt_id TEXT,
+                api_json TEXT,
+                error_message TEXT,
+                error_type TEXT,
+                started_at TEXT NOT NULL,
+                submitted_at TEXT,
+                completed_at TEXT,
+                revision INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (task_id)
+                    REFERENCES tasks(id) ON DELETE CASCADE,
+                UNIQUE (task_id, attempt_number)
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_task_attempts_task "
+            "ON task_attempts(task_id, attempt_number DESC)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_task_attempts_status "
+            "ON task_attempts(status, created_at DESC)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_task_attempts_prompt "
+            "ON task_attempts(prompt_id) WHERE prompt_id IS NOT NULL"
+        )
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS task_events (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                attempt_id TEXT,
+                event_type TEXT NOT NULL,
+                event_data_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (task_id)
+                    REFERENCES tasks(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_task_events_task "
+            "ON task_events(task_id, created_at DESC)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_task_events_type "
+            "ON task_events(event_type, created_at DESC)"
+        )
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS task_leases (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                attempt_id TEXT NOT NULL,
+                lease_holder TEXT NOT NULL,
+                acquired_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                released_at TEXT,
+                FOREIGN KEY (task_id)
+                    REFERENCES tasks(id) ON DELETE CASCADE,
+                FOREIGN KEY (attempt_id)
+                    REFERENCES task_attempts(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_task_leases_task "
+            "ON task_leases(task_id, acquired_at DESC)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_task_leases_active "
+            "ON task_leases(expires_at) WHERE released_at IS NULL"
+        )
+
+    def _migrate_output_files(self, connection) -> None:
+        """添加输出文件和图片实例表。
+
+        表：
+        - files: 原图文件存储记录（storage_key、哈希、状态）
+        - image_instances: 图片实例（关联任务、页面、文件）
+        - thumbnails: 缩略图记录（多级尺寸）
+        - background_jobs: 后台任务（缩略图生成等）
+
+        幂等：CREATE TABLE IF NOT EXISTS。
+        """
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS files (
+                id TEXT PRIMARY KEY,
+                storage_key TEXT NOT NULL UNIQUE,
+                original_name TEXT NOT NULL DEFAULT '',
+                mime_type TEXT NOT NULL DEFAULT '',
+                size_bytes INTEGER NOT NULL DEFAULT 0,
+                content_hash TEXT,
+                perceptual_hash TEXT,
+                state TEXT NOT NULL DEFAULT 'active',
+                error_message TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_files_content_hash "
+            "ON files(content_hash) WHERE content_hash IS NOT NULL"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_files_state "
+            "ON files(state, created_at DESC)"
+        )
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS image_instances (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                shot_page_id TEXT NOT NULL,
+                task_id TEXT,
+                attempt_id TEXT,
+                file_id TEXT NOT NULL,
+                node_id TEXT,
+                workflow_version_id TEXT,
+                prompt_id TEXT,
+                width INTEGER NOT NULL DEFAULT 0,
+                height INTEGER NOT NULL DEFAULT 0,
+                format TEXT NOT NULL DEFAULT '',
+                seed INTEGER,
+                resolved_json TEXT,
+                snapshot_json TEXT,
+                is_adopted INTEGER NOT NULL DEFAULT 0,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                revision INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (project_id)
+                    REFERENCES projects(id) ON DELETE CASCADE,
+                FOREIGN KEY (file_id)
+                    REFERENCES files(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_image_instances_project "
+            "ON image_instances(project_id, created_at DESC)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_image_instances_page "
+            "ON image_instances(shot_page_id, created_at DESC)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_image_instances_task "
+            "ON image_instances(task_id) WHERE task_id IS NOT NULL"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_image_instances_attempt "
+            "ON image_instances(attempt_id) WHERE attempt_id IS NOT NULL"
+        )
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS thumbnails (
+                id TEXT PRIMARY KEY,
+                file_id TEXT NOT NULL,
+                size_class TEXT NOT NULL,
+                storage_key TEXT NOT NULL,
+                width INTEGER NOT NULL DEFAULT 0,
+                height INTEGER NOT NULL DEFAULT 0,
+                state TEXT NOT NULL DEFAULT 'pending',
+                error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (file_id)
+                    REFERENCES files(id) ON DELETE CASCADE,
+                UNIQUE (file_id, size_class)
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_thumbnails_file "
+            "ON thumbnails(file_id, size_class)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_thumbnails_state "
+            "ON thumbnails(state, created_at DESC)"
+        )
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS background_jobs (
+                id TEXT PRIMARY KEY,
+                job_type TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                progress_json TEXT,
+                result_json TEXT,
+                lease_until TEXT,
+                error_json TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_background_jobs_status "
+            "ON background_jobs(status, created_at DESC)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_background_jobs_type "
+            "ON background_jobs(job_type, status)"
+        )
 
     def activate(self, environment: DatabaseEnvironment) -> None:
         target_environment = self._validate_environment(environment)

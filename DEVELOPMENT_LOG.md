@@ -1,6 +1,54 @@
 # Atelier 项目开发日志
 
-更新日期：2026-07-28
+更新日期：2026-07-29
+
+## v0.7.0 开发记录 — 阶段 3 编译、批量生成与任务中心
+
+### 开发目标
+
+按《Atelier 全功能产品与技术开发需求》阶段 3「编译、批量生成与任务中心」完成后端全链路：页级编译器、跑图列表和批量配置、持久化任务队列、ComfyUI 提交、实时进度与故障恢复、输出和图片实例、任务中心 API。
+
+### 开发分支
+
+`dev-260729-GLM5.2-全功能开发`（继续在同一开发分支，从 `GLM-MAIN` 拉取）
+
+### 实际解决方案
+
+1. **页级编译器（compiler.py）**：实现配置继承优先级（项目→章节→大场景→小场景→分支→页面），`_compile_page` 返回 (RenderItem, blocking_errors, warnings) 三元组收集阻塞错误，`_compute_input_hash` 基于完整输入快照生成稳定哈希，`sort_key` 确定性生成，支持六类素材页映射解析、工作流版本固定和语义插槽解析。
+2. **跑图列表和批量配置（batch_drafts.py）**：草稿 CRUD、范围选择预览、批量覆盖（实例数/工作流/尺寸/种子策略），`commit_batch` 从草稿生成不可变批次快照，阻塞错误和警告收集。
+3. **持久化任务队列（task_queue.py）**：批次/任务/attempt/事件/租约五表，`claim_next_task` 原子领取防止并发重复，失败重试创建新 attempt 不覆盖旧记录，`recover_submitted_attempts` 应用重启后核对 ComfyUI 队列和历史，标记 unknown 状态。修复了 `datetime.now(timezone.utc).timestamp` 缺少括号的 bug，修复了外键约束失败问题（先插入任务再插入事件）。
+4. **ComfyUI 提交（comfyui_submit.py）**：`build_api_json_for_item` 从跑图项构建 API JSON 并应用已解析插槽，`submit_task_to_comfyui` 调用 /prompt 提交，幂等性保护（已有 prompt_id 不重复提交），处理超时但可能已进入队列的情况。
+5. **实时进度与故障恢复（comfyui_progress.py）**：`ProgressTracker` 内存索引按 prompt_id 存储进度和事件，`ComfyUIWebSocketListener` 连接 ComfyUI WebSocket 自动重连，`sse_progress_generator` SSE 推送给前端，`poll_comfyui_history_for_attempt` 作为 WebSocket 断开时的兜底。
+6. **输出和图片实例（output_receiver.py）**：`collect_attempt_outputs` 查询 ComfyUI 历史解析所有输出节点和图片，`download_and_validate_image` 流式下载到临时文件后 PIL 校验格式和完整性，原子移动到目标目录。新增 files/image_instances/thumbnails/background_jobs 四表持久化文件元数据和图片实例关系。
+7. **任务中心 API**：`list_all_tasks` 跨批次任务列表支持状态/项目/批次/错误/时间多维筛选，`get_task_center_summary` 提供聚合统计，错误详情端点提供关联对象跳转。修复了 `batch_status_counts` 使用错误的 `rows` 而非 `batch_rows` 的 bug。
+8. **数据库迁移**：新增 v0.7.0 迁移，5 张任务队列表 + 4 张输出文件表，全部支持 `revision` 乐观并发控制和 `deleted_at` 软删除。
+9. **应用集成**：ProgressTracker 和 WebSocketListener 集成到应用生命周期，环境为 test 时不启动监听器避免测试阻塞。
+
+### 测试用例
+
+- `test_compiler.py`：页级编译器测试
+- `test_batch_drafts.py`：跑图列表和批量配置测试
+- `test_task_queue.py`：持久化任务队列测试
+- `test_comfyui_submit.py`：ComfyUI 提交测试
+- `test_comfyui_progress.py`：实时进度与故障恢复测试
+- `test_output_receiver.py`：输出和图片实例测试
+- `test_task_center.py`：任务中心 API 测试
+
+共 239 项新增测试，全量 1111 项测试通过（872 项回归 + 239 项新增 + 9 项 ComfyUI 真实集成跳过），无回归。
+
+### 测试结果
+
+- 后端自动化测试：1111/1111 通过（9 项 ComfyUI 真实集成跳过）
+- 真实 ComfyUI 端到端验收（§3.8）：未执行，需要真实 ComfyUI 服务（`192.168.3.5:8188`）和浏览器验收
+- 前端任务中心页面：未接入，待后续阶段实现
+
+### 未执行项
+
+- 需求 §3.8 阶段集成验收的真实 ComfyUI 端到端测试（编译多页多分支→提交→实时进度→断网恢复→重启恢复→重跑失败项）
+- 前端任务中心页面（`page=tasks`）接入
+- 浏览器端到端验收
+
+---
 
 ## v0.3.0 开发记录 — 素材库后端开发与前端对接
 
