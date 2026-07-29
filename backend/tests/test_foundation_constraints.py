@@ -164,8 +164,15 @@ class UnifiedErrorResponseTests(IsolatedTestCase):
         self.assertEqual(body["error"]["code"], "NOT_FOUND")
 
     def test_409_error_code_is_conflict(self) -> None:
-        self.client.post("/api/projects", json={"name": "冲突项目"})
-        response = self.client.post("/api/projects", json={"name": "冲突项目"})
+        # Project names are no longer unique (v0.5.1 dropped UNIQUE on name),
+        # so use chapter duplicate name to trigger a 409 CONFLICT.
+        project = self.manager.create_project("冲突测试项目")
+        self.client.post(
+            f"/api/projects/{project['id']}/chapters", json={"name": "同名章节"}
+        )
+        response = self.client.post(
+            f"/api/projects/{project['id']}/chapters", json={"name": "同名章节"}
+        )
         self.assertEqual(response.status_code, 409)
         body = response.json()
         self.assertEqual(body["error"]["code"], "CONFLICT")

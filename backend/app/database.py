@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -128,12 +129,21 @@ class DatabaseManager:
 
                 CREATE TABLE IF NOT EXISTS projects (
                     id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                    name TEXT NOT NULL COLLATE NOCASE,
+                    description TEXT NOT NULL DEFAULT '',
                     status TEXT NOT NULL DEFAULT 'draft',
+                    cover_path TEXT,
+                    archived_at TEXT,
+                    deleted_at TEXT,
                     revision INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+
+                CREATE INDEX IF NOT EXISTS idx_projects_status
+                    ON projects(status, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_projects_deleted
+                    ON projects(deleted_at);
 
                 CREATE TABLE IF NOT EXISTS chapters (
                     id TEXT PRIMARY KEY,
@@ -170,16 +180,41 @@ class DatabaseManager:
 
                 CREATE TABLE IF NOT EXISTS characters (
                     id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL,
+                    name TEXT NOT NULL COLLATE NOCASE,
+                    description TEXT NOT NULL DEFAULT '',
+                    cover_path TEXT,
+                    archived_at TEXT,
+                    deleted_at TEXT,
+                    source TEXT NOT NULL DEFAULT '',
+                    source_identifier TEXT,
+                    external_url TEXT,
                     sort_order INTEGER NOT NULL,
                     revision INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    UNIQUE (name)
+                    updated_at TEXT NOT NULL
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_characters_sort
                     ON characters(sort_order);
+
+                -- Note: idx_characters_deleted and idx_characters_archived are created
+                -- by _migrate_characters_extend to handle legacy tables missing columns.
+
+                CREATE TABLE IF NOT EXISTS character_tags (
+                    id TEXT PRIMARY KEY,
+                    character_id TEXT NOT NULL,
+                    tag TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (character_id)
+                        REFERENCES characters(id) ON DELETE CASCADE,
+                    UNIQUE (character_id, tag)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_character_tags_character
+                    ON character_tags(character_id);
+
+                CREATE INDEX IF NOT EXISTS idx_character_tags_tag
+                    ON character_tags(tag);
 
                 CREATE TABLE IF NOT EXISTS project_characters (
                     project_id TEXT NOT NULL,
@@ -199,14 +234,22 @@ class DatabaseManager:
                     id TEXT PRIMARY KEY,
                     character_id TEXT NOT NULL,
                     name TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
                     is_default INTEGER NOT NULL DEFAULT 0,
+                    default_prompt TEXT NOT NULL DEFAULT '',
+                    default_lora_name TEXT NOT NULL DEFAULT '',
+                    default_lora_weight REAL,
+                    default_model_override TEXT NOT NULL DEFAULT '',
+                    preview_original_path TEXT,
+                    preview_thumbnail_path TEXT,
+                    archived_at TEXT,
+                    source_variant_id TEXT,
                     sort_order INTEGER NOT NULL,
                     revision INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     FOREIGN KEY (character_id)
-                        REFERENCES characters(id) ON DELETE CASCADE,
-                    UNIQUE (character_id, name)
+                        REFERENCES characters(id) ON DELETE CASCADE
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_character_variants_character_sort
@@ -216,6 +259,9 @@ class DatabaseManager:
                     id TEXT PRIMARY KEY,
                     spec_type TEXT NOT NULL,
                     custom_label TEXT NOT NULL DEFAULT '',
+                    description TEXT NOT NULL DEFAULT '',
+                    is_required INTEGER NOT NULL DEFAULT 0,
+                    default_value TEXT NOT NULL DEFAULT '',
                     sort_order INTEGER NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
@@ -234,6 +280,8 @@ class DatabaseManager:
                     lora_weight REAL,
                     model_override TEXT NOT NULL DEFAULT '',
                     notes TEXT NOT NULL DEFAULT '',
+                    preview_original_path TEXT,
+                    preview_thumbnail_path TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     FOREIGN KEY (variant_id)
@@ -245,6 +293,27 @@ class DatabaseManager:
 
                 CREATE INDEX IF NOT EXISTS idx_character_spec_values_variant
                     ON character_spec_values(variant_id);
+
+                CREATE TABLE IF NOT EXISTS shot_page_characters (
+                    shot_page_id TEXT NOT NULL,
+                    character_id TEXT NOT NULL,
+                    variant_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (shot_page_id),
+                    FOREIGN KEY (shot_page_id)
+                        REFERENCES shot_pages(id) ON DELETE CASCADE,
+                    FOREIGN KEY (character_id)
+                        REFERENCES characters(id) ON DELETE CASCADE,
+                    FOREIGN KEY (variant_id)
+                        REFERENCES character_variants(id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_shot_page_characters_character
+                    ON shot_page_characters(character_id);
+
+                CREATE INDEX IF NOT EXISTS idx_shot_page_characters_variant
+                    ON shot_page_characters(variant_id);
 
                 CREATE TABLE IF NOT EXISTS materials (
                     id TEXT PRIMARY KEY,
@@ -258,10 +327,12 @@ class DatabaseManager:
                     notes TEXT NOT NULL DEFAULT '',
                     preview_original_path TEXT,
                     preview_thumbnail_path TEXT,
+                    archived_at TEXT,
+                    deleted_at TEXT,
+                    source_material_id TEXT,
                     revision INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
-                    UNIQUE (material_type, name),
                     CHECK (
                         material_type IN (
                             'composition',
@@ -280,6 +351,12 @@ class DatabaseManager:
 
                 CREATE INDEX IF NOT EXISTS idx_materials_status_updated
                     ON materials(validation_status, updated_at DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_materials_deleted
+                    ON materials(deleted_at);
+
+                CREATE INDEX IF NOT EXISTS idx_materials_archived
+                    ON materials(archived_at);
 
                 CREATE INDEX IF NOT EXISTS idx_materials_name
                     ON materials(name);
@@ -402,6 +479,9 @@ class DatabaseManager:
                     content TEXT NOT NULL DEFAULT '',
                     prompt_text TEXT NOT NULL DEFAULT '',
                     negative_prompt TEXT NOT NULL DEFAULT '',
+                    preview_original_path TEXT,
+                    preview_thumbnail_path TEXT,
+                    source_page_id TEXT,
                     sort_order INTEGER NOT NULL,
                     revision INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL,
@@ -413,6 +493,21 @@ class DatabaseManager:
 
                 CREATE INDEX IF NOT EXISTS idx_material_pages_material_sort
                     ON material_pages(material_id, sort_order);
+
+                CREATE TABLE IF NOT EXISTS material_versions (
+                    id TEXT PRIMARY KEY,
+                    material_id TEXT NOT NULL,
+                    version_number INTEGER NOT NULL,
+                    snapshot TEXT NOT NULL,
+                    label TEXT,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (material_id)
+                        REFERENCES materials(id) ON DELETE CASCADE,
+                    UNIQUE (material_id, version_number)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_material_versions_material
+                    ON material_versions(material_id, version_number DESC);
 
                 CREATE TABLE IF NOT EXISTS small_scene_page_mappings (
                     id TEXT PRIMARY KEY,
@@ -472,6 +567,22 @@ class DatabaseManager:
             self._run_migration(
                 connection, "v0.5.0", "Add revision column to core editing tables",
                 self._migrate_add_revision_columns,
+            )
+            self._run_migration(
+                connection, "v0.5.1", "Extend projects table: add description/cover/archived_at/deleted_at, drop UNIQUE on name",
+                self._migrate_projects_extend,
+            )
+            self._run_migration(
+                connection, "v0.5.2", "Extend materials/material_pages: add archived_at/deleted_at/source_material_id, page preview/source_page_id, material_versions table",
+                self._migrate_materials_extend,
+            )
+            self._run_migration(
+                connection, "v0.5.3", "Extend characters/character_variants/specs/character_spec_values: archive/delete/source/preview/cover/tags",
+                self._migrate_characters_extend,
+            )
+            self._run_migration(
+                connection, "v0.5.4", "Extend branches with condition fields; add branch_overrides/story_snapshots/operation_history tables",
+                self._migrate_branches_extend,
             )
             marker = connection.execute(
                 "SELECT value FROM atelier_meta WHERE key = 'environment'"
@@ -950,6 +1061,505 @@ class DatabaseManager:
             if "revision" not in cols:
                 connection.execute(f"ALTER TABLE {table} ADD COLUMN revision INTEGER NOT NULL DEFAULT 1")
 
+    def _migrate_projects_extend(self, connection) -> None:
+        """v0.5.1: 扩展 projects 表，添加 description/cover_path/archived_at/deleted_at 字段，
+        并去掉 name 的 UNIQUE 约束以支持同名项目。
+
+        幂等：通过 PRAGMA 检查列是否存在。UNIQUE 约束去除通过重建表实现。
+        重建表时保留原 revision 字段（v0.5.0 已添加）。
+        """
+        exists = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='projects'",
+        ).fetchone()
+        if not exists:
+            return
+
+        cols = [row["name"] for row in connection.execute("PRAGMA table_info(projects)").fetchall()]
+        needed = ["description", "cover_path", "archived_at", "deleted_at"]
+        missing = [c for c in needed if c not in cols]
+
+        # 检查 name 列是否仍有 UNIQUE 约束（通过查看 CREATE TABLE SQL）
+        create_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='projects'",
+        ).fetchone()["sql"]
+        has_unique = "UNIQUE" in create_sql.upper()
+
+        if missing or has_unique:
+            # 重建表：去掉 UNIQUE 约束，添加缺失字段
+            connection.execute("ALTER TABLE projects RENAME TO projects_old_v051")
+            connection.execute(
+                """
+                CREATE TABLE projects (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL COLLATE NOCASE,
+                    description TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'draft',
+                    cover_path TEXT,
+                    archived_at TEXT,
+                    deleted_at TEXT,
+                    revision INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            # 确定 SELECT 列：旧表可能没有 revision/description 等列
+            old_cols = [row["name"] for row in connection.execute("PRAGMA table_info(projects_old_v051)").fetchall()]
+            select_parts = ["id", "name"]
+            for col in ["description", "status", "cover_path", "archived_at", "deleted_at", "revision", "created_at", "updated_at"]:
+                if col in old_cols:
+                    select_parts.append(col)
+                else:
+                    # 旧表没有该列，用默认值
+                    if col == "description":
+                        select_parts.append("'' AS description")
+                    elif col == "status":
+                        select_parts.append("'draft' AS status")
+                    elif col == "revision":
+                        select_parts.append("1 AS revision")
+                    else:
+                        select_parts.append("NULL AS " + col)
+            select_clause = ", ".join(select_parts)
+            connection.execute(
+                f"INSERT INTO projects(id, name, description, status, cover_path, archived_at, deleted_at, revision, created_at, updated_at) "
+                f"SELECT {select_clause} FROM projects_old_v051"
+            )
+            connection.execute("DROP TABLE projects_old_v051")
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_projects_status ON projects(status, updated_at DESC)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_projects_deleted ON projects(deleted_at)"
+            )
+
+    def _migrate_materials_extend(self, connection) -> None:
+        """v0.5.2: 扩展 materials 和 material_pages 表。
+
+        materials: 添加 archived_at/deleted_at/source_material_id 字段，
+                   去掉 UNIQUE(material_type, name) 约束以支持同名素材（复制场景）。
+        material_pages: 添加 preview_original_path/preview_thumbnail_path/source_page_id 字段。
+        新增 material_versions 表（版本历史）。
+
+        幂等：通过 PRAGMA 检查列是否存在。UNIQUE 约束去除通过重建表实现。
+        """
+        # ── materials 表 ──
+        mat_exists = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='materials'",
+        ).fetchone()
+        if mat_exists:
+            cols = [row["name"] for row in connection.execute("PRAGMA table_info(materials)").fetchall()]
+            needed = ["archived_at", "deleted_at", "source_material_id"]
+            missing = [c for c in needed if c not in cols]
+            create_sql = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='materials'",
+            ).fetchone()["sql"]
+            # 检测 UNIQUE(material_type, name) 约束
+            has_unique = "UNIQUE" in create_sql.upper() and "MATERIAL_TYPE" in create_sql.upper()
+
+            if missing or has_unique:
+                connection.execute("ALTER TABLE materials RENAME TO materials_old_v052")
+                connection.execute(
+                    """
+                    CREATE TABLE materials (
+                        id TEXT PRIMARY KEY,
+                        name TEXT NOT NULL COLLATE NOCASE,
+                        material_type TEXT NOT NULL,
+                        description TEXT NOT NULL DEFAULT '',
+                        content TEXT NOT NULL,
+                        prompt_text TEXT NOT NULL DEFAULT '',
+                        negative_prompt TEXT NOT NULL DEFAULT '',
+                        validation_status TEXT NOT NULL DEFAULT 'unverified',
+                        notes TEXT NOT NULL DEFAULT '',
+                        preview_original_path TEXT,
+                        preview_thumbnail_path TEXT,
+                        archived_at TEXT,
+                        deleted_at TEXT,
+                        source_material_id TEXT,
+                        revision INTEGER NOT NULL DEFAULT 1,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        CHECK (
+                            material_type IN (
+                                'composition', 'expression', 'scene',
+                                'lighting', 'prompt', 'composite_template'
+                            )
+                        ),
+                        CHECK (validation_status IN ('unverified', 'verified'))
+                    )
+                    """
+                )
+                old_cols = [row["name"] for row in connection.execute("PRAGMA table_info(materials_old_v052)").fetchall()]
+                select_parts = ["id", "name", "material_type"]
+                for col in ["description", "content", "prompt_text", "negative_prompt",
+                            "validation_status", "notes", "preview_original_path",
+                            "preview_thumbnail_path", "archived_at", "deleted_at",
+                            "source_material_id", "revision", "created_at", "updated_at"]:
+                    if col in old_cols:
+                        select_parts.append(col)
+                    elif col == "description":
+                        select_parts.append("'' AS description")
+                    elif col == "content":
+                        select_parts.append("'' AS content")
+                    elif col == "prompt_text":
+                        select_parts.append("'' AS prompt_text")
+                    elif col == "negative_prompt":
+                        select_parts.append("'' AS negative_prompt")
+                    elif col == "validation_status":
+                        select_parts.append("'unverified' AS validation_status")
+                    elif col == "notes":
+                        select_parts.append("'' AS notes")
+                    elif col == "revision":
+                        select_parts.append("1 AS revision")
+                    else:
+                        select_parts.append("NULL AS " + col)
+                select_clause = ", ".join(select_parts)
+                connection.execute(
+                    f"INSERT INTO materials(id, name, material_type, description, content, "
+                    f"prompt_text, negative_prompt, validation_status, notes, "
+                    f"preview_original_path, preview_thumbnail_path, archived_at, deleted_at, "
+                    f"source_material_id, revision, created_at, updated_at) "
+                    f"SELECT {select_clause} FROM materials_old_v052"
+                )
+                connection.execute("DROP TABLE materials_old_v052")
+                connection.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_materials_type_updated "
+                    "ON materials(material_type, updated_at DESC)"
+                )
+                connection.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_materials_status_updated "
+                    "ON materials(validation_status, updated_at DESC)"
+                )
+                connection.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_materials_deleted ON materials(deleted_at)"
+                )
+                connection.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_materials_archived ON materials(archived_at)"
+                )
+
+        # ── material_pages 表：添加预览图和来源字段 ──
+        mp_exists = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='material_pages'",
+        ).fetchone()
+        if mp_exists:
+            mp_cols = [row["name"] for row in connection.execute("PRAGMA table_info(material_pages)").fetchall()]
+            for col in ["preview_original_path", "preview_thumbnail_path", "source_page_id"]:
+                if col not in mp_cols:
+                    connection.execute(
+                        f"ALTER TABLE material_pages ADD COLUMN {col} TEXT"
+                    )
+
+        # ── material_versions 表（版本历史）──
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS material_versions (
+                id TEXT PRIMARY KEY,
+                material_id TEXT NOT NULL,
+                version_number INTEGER NOT NULL,
+                snapshot TEXT NOT NULL,
+                label TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (material_id)
+                    REFERENCES materials(id) ON DELETE CASCADE,
+                UNIQUE (material_id, version_number)
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_material_versions_material "
+            "ON material_versions(material_id, version_number DESC)"
+        )
+
+    def _migrate_characters_extend(self, connection) -> None:
+        """v0.5.3: 扩展人物库相关表。
+
+        - characters: 添加 description/cover_path/archived_at/deleted_at/source/
+          source_identifier/external_url 字段，去除 UNIQUE(name) 约束（支持同名/复制），
+          name 列添加 COLLATE NOCASE。
+        - character_variants: 添加 description/default_prompt/default_lora_name/
+          default_lora_weight/default_model_override/preview_original_path/
+          preview_thumbnail_path/archived_at/source_variant_id 字段。
+        - specs: 添加 description/is_required/default_value 字段。
+        - character_spec_values: 添加 preview_original_path/preview_thumbnail_path 字段。
+        - 新增 character_tags 表。
+
+        幂等：通过 PRAGMA 检查列是否存在；UNIQUE 约束去除通过重建表实现。
+        """
+        # ── characters 表 ──
+        char_exists = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='characters'",
+        ).fetchone()
+        if char_exists:
+            cols = [row["name"] for row in connection.execute("PRAGMA table_info(characters)").fetchall()]
+            needed = [
+                "description", "cover_path", "archived_at", "deleted_at",
+                "source", "source_identifier", "external_url",
+            ]
+            missing = [c for c in needed if c not in cols]
+            create_sql = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='characters'",
+            ).fetchone()["sql"]
+            has_unique = "UNIQUE" in create_sql.upper() and "NAME" in create_sql.upper()
+            # 旧表 name 列没有 COLLATE NOCASE 时也需要重建
+            has_collate = "COLLATE NOCASE" in create_sql.upper()
+
+            if missing or has_unique or not has_collate:
+                connection.execute("ALTER TABLE characters RENAME TO characters_old_v053")
+                connection.execute(
+                    """
+                    CREATE TABLE characters (
+                        id TEXT PRIMARY KEY,
+                        name TEXT NOT NULL COLLATE NOCASE,
+                        description TEXT NOT NULL DEFAULT '',
+                        cover_path TEXT,
+                        archived_at TEXT,
+                        deleted_at TEXT,
+                        source TEXT NOT NULL DEFAULT '',
+                        source_identifier TEXT,
+                        external_url TEXT,
+                        sort_order INTEGER NOT NULL,
+                        revision INTEGER NOT NULL DEFAULT 1,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                    """
+                )
+                old_cols = [row["name"] for row in connection.execute("PRAGMA table_info(characters_old_v053)").fetchall()]
+                select_parts = ["id", "name"]
+                for col in [
+                    "description", "cover_path", "archived_at", "deleted_at",
+                    "source", "source_identifier", "external_url",
+                    "sort_order", "revision", "created_at", "updated_at",
+                ]:
+                    if col in old_cols:
+                        select_parts.append(col)
+                    elif col == "description":
+                        select_parts.append("'' AS description")
+                    elif col == "source":
+                        select_parts.append("'' AS source")
+                    elif col == "revision":
+                        select_parts.append("1 AS revision")
+                    else:
+                        select_parts.append(f"NULL AS {col}")
+                select_clause = ", ".join(select_parts)
+                connection.execute(
+                    f"INSERT INTO characters(id, name, description, cover_path, archived_at, "
+                    f"deleted_at, source, source_identifier, external_url, sort_order, "
+                    f"revision, created_at, updated_at) "
+                    f"SELECT {select_clause} FROM characters_old_v053"
+                )
+                connection.execute("DROP TABLE characters_old_v053")
+
+            # Ensure indexes exist (idempotent). Handles both rebuilt and pre-existing tables.
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_characters_sort ON characters(sort_order)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_characters_deleted ON characters(deleted_at)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_characters_archived ON characters(archived_at)"
+            )
+
+        # ── character_variants 表：添加新字段 ──
+        cv_exists = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='character_variants'",
+        ).fetchone()
+        if cv_exists:
+            cv_cols = [row["name"] for row in connection.execute("PRAGMA table_info(character_variants)").fetchall()]
+            cv_additions = {
+                "description": "TEXT NOT NULL DEFAULT ''",
+                "default_prompt": "TEXT NOT NULL DEFAULT ''",
+                "default_lora_name": "TEXT NOT NULL DEFAULT ''",
+                "default_lora_weight": "REAL",
+                "default_model_override": "TEXT NOT NULL DEFAULT ''",
+                "preview_original_path": "TEXT",
+                "preview_thumbnail_path": "TEXT",
+                "archived_at": "TEXT",
+                "source_variant_id": "TEXT",
+            }
+            for col, col_type in cv_additions.items():
+                if col not in cv_cols:
+                    connection.execute(
+                        f"ALTER TABLE character_variants ADD COLUMN {col} {col_type}"
+                    )
+
+        # ── specs 表：添加 description/is_required/default_value ──
+        specs_exists = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='specs'",
+        ).fetchone()
+        if specs_exists:
+            specs_cols = [row["name"] for row in connection.execute("PRAGMA table_info(specs)").fetchall()]
+            specs_additions = {
+                "description": "TEXT NOT NULL DEFAULT ''",
+                "is_required": "INTEGER NOT NULL DEFAULT 0",
+                "default_value": "TEXT NOT NULL DEFAULT ''",
+            }
+            for col, col_type in specs_additions.items():
+                if col not in specs_cols:
+                    connection.execute(
+                        f"ALTER TABLE specs ADD COLUMN {col} {col_type}"
+                    )
+
+        # ── character_spec_values 表：添加预览图字段 ──
+        csv_exists = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='character_spec_values'",
+        ).fetchone()
+        if csv_exists:
+            csv_cols = [row["name"] for row in connection.execute("PRAGMA table_info(character_spec_values)").fetchall()]
+            for col in ["preview_original_path", "preview_thumbnail_path"]:
+                if col not in csv_cols:
+                    connection.execute(
+                        f"ALTER TABLE character_spec_values ADD COLUMN {col} TEXT"
+                    )
+
+        # ── character_tags 表（新表）──
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS character_tags (
+                id TEXT PRIMARY KEY,
+                character_id TEXT NOT NULL,
+                tag TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (character_id)
+                    REFERENCES characters(id) ON DELETE CASCADE,
+                UNIQUE (character_id, tag)
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_character_tags_character ON character_tags(character_id)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_character_tags_tag ON character_tags(tag)"
+        )
+
+        # ── shot_page_characters 表（场景页人物引用，新表）──
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS shot_page_characters (
+                shot_page_id TEXT NOT NULL,
+                character_id TEXT NOT NULL,
+                variant_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (shot_page_id),
+                FOREIGN KEY (shot_page_id)
+                    REFERENCES shot_pages(id) ON DELETE CASCADE,
+                FOREIGN KEY (character_id)
+                    REFERENCES characters(id) ON DELETE CASCADE,
+                FOREIGN KEY (variant_id)
+                    REFERENCES character_variants(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_shot_page_characters_character "
+            "ON shot_page_characters(character_id)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_shot_page_characters_variant "
+            "ON shot_page_characters(variant_id)"
+        )
+
+    def _migrate_branches_extend(self, connection) -> None:
+        """v0.5.4: 扩展 branches 表（分支条件字段）并新增 3 张表。
+
+        - branches: 添加 condition_type/condition_value/return_point 字段
+        - branch_overrides: 分支覆盖数据（人物/素材/参数）
+        - story_snapshots: 剧本结构快照
+        - operation_history: 操作历史（撤销/重做基础）
+
+        幂等：通过 PRAGMA 检查列是否存在；CREATE TABLE IF NOT EXISTS。
+        """
+        # ── branches 表：添加条件字段 ──
+        branches_exists = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='branches'",
+        ).fetchone()
+        if branches_exists:
+            cols = [row["name"] for row in connection.execute("PRAGMA table_info(branches)").fetchall()]
+            additions = {
+                "condition_type": "TEXT NOT NULL DEFAULT ''",
+                "condition_value": "TEXT NOT NULL DEFAULT ''",
+                "return_point": "TEXT",
+            }
+            for col, col_type in additions.items():
+                if col not in cols:
+                    connection.execute(
+                        f"ALTER TABLE branches ADD COLUMN {col} {col_type}"
+                    )
+
+        # ── branch_overrides 表 ──
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS branch_overrides (
+                id TEXT PRIMARY KEY,
+                branch_id TEXT NOT NULL,
+                override_type TEXT NOT NULL,
+                target_id TEXT,
+                character_id TEXT,
+                variant_id TEXT,
+                material_id TEXT,
+                material_page_id TEXT,
+                param_key TEXT,
+                param_value TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (branch_id)
+                    REFERENCES branches(id) ON DELETE CASCADE,
+                UNIQUE (branch_id, override_type, target_id, param_key)
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_branch_overrides_branch "
+            "ON branch_overrides(branch_id, override_type)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_branch_overrides_target "
+            "ON branch_overrides(target_id)"
+        )
+
+        # ── story_snapshots 表 ──
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS story_snapshots (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                label TEXT NOT NULL DEFAULT '',
+                snapshot_data TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (project_id)
+                    REFERENCES projects(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_story_snapshots_project "
+            "ON story_snapshots(project_id, created_at DESC)"
+        )
+
+        # ── operation_history 表 ──
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS operation_history (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                operation_type TEXT NOT NULL,
+                entity_type TEXT NOT NULL,
+                entity_id TEXT,
+                before_state TEXT,
+                after_state TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (project_id)
+                    REFERENCES projects(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_operation_history_project "
+            "ON operation_history(project_id, created_at DESC)"
+        )
+
     def activate(self, environment: DatabaseEnvironment) -> None:
         target_environment = self._validate_environment(environment)
         with self._lock:
@@ -986,18 +1596,73 @@ class DatabaseManager:
             return int(row["count"])
 
     def list_projects(
-        self, environment: DatabaseEnvironment | None = None
-    ) -> list[dict[str, object]]:
+        self,
+        query: str | None = None,
+        status: str | None = None,
+        include_archived: bool = False,
+        include_deleted: bool = False,
+        sort: str = "updated",
+        limit: int = 50,
+        offset: int = 0,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        """List projects with search, filter, sort and pagination.
+
+        Returns a dict: {"items": [...], "total": N, "limit": L, "offset": O, "has_more": bool}.
+        Each item contains: id, name, description, status, cover_path, archived_at,
+        deleted_at, revision, created_at, updated_at.
+        """
         target_environment = environment or self._active_environment
+        conditions: list[str] = []
+        params: list[object] = []
+
+        if not include_archived:
+            conditions.append("archived_at IS NULL")
+        if not include_deleted:
+            conditions.append("deleted_at IS NULL")
+        if status is not None:
+            conditions.append("status = ?")
+            params.append(status)
+        if query:
+            conditions.append("(name LIKE ? OR description LIKE ?)")
+            like = f"%{query}%"
+            params.extend([like, like])
+
+        where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+        sort_mapping = {
+            "updated": "updated_at DESC, name ASC",
+            "name": "name ASC",
+            "created": "created_at DESC",
+        }
+        order_clause = sort_mapping.get(sort, sort_mapping["updated"])
+
+        select_cols = (
+            "id, name, description, status, cover_path, archived_at, "
+            "deleted_at, revision, created_at, updated_at"
+        )
+
         with self.connection(target_environment) as connection:
+            count_row = connection.execute(
+                f"SELECT COUNT(*) AS total FROM projects {where_clause}",
+                params,
+            ).fetchone()
+            total = int(count_row["total"])
+
             rows = connection.execute(
-                """
-                SELECT id, name, status, created_at, updated_at
-                FROM projects
-                ORDER BY updated_at DESC, name ASC
-                """
+                f"SELECT {select_cols} FROM projects {where_clause} "
+                f"ORDER BY {order_clause} LIMIT ? OFFSET ?",
+                [*params, limit, offset],
             ).fetchall()
-        return [dict(row) for row in rows]
+
+        items = [dict(row) for row in rows]
+        return {
+            "items": items,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "has_more": (offset + limit) < total,
+        }
 
     def get_project(
         self,
@@ -1008,7 +1673,8 @@ class DatabaseManager:
         with self.connection(target_environment) as connection:
             row = connection.execute(
                 """
-                SELECT id, name, status, created_at, updated_at
+                SELECT id, name, description, status, cover_path, archived_at,
+                       deleted_at, revision, created_at, updated_at
                 FROM projects
                 WHERE id = ?
                 """,
@@ -1019,6 +1685,7 @@ class DatabaseManager:
     def create_project(
         self,
         name: str,
+        description: str = "",
         environment: DatabaseEnvironment | None = None,
     ) -> dict[str, object]:
         target_environment = environment or self._active_environment
@@ -1031,22 +1698,554 @@ class DatabaseManager:
         project = {
             "id": str(uuid4()),
             "name": clean_name,
+            "description": description,
             "status": "draft",
+            "cover_path": None,
+            "archived_at": None,
+            "deleted_at": None,
+            "revision": 1,
             "created_at": now,
             "updated_at": now,
         }
-        try:
-            with self._lock, self.connection(target_environment) as connection:
+        with self._lock, self.connection(target_environment) as connection:
+            connection.execute(
+                """
+                INSERT INTO projects(
+                    id, name, description, status, cover_path, archived_at,
+                    deleted_at, revision, created_at, updated_at
+                )
+                VALUES(
+                    :id, :name, :description, :status, :cover_path, :archived_at,
+                    :deleted_at, :revision, :created_at, :updated_at
+                )
+                """,
+                project,
+            )
+        return project
+
+    def update_project(
+        self,
+        project_id: str,
+        name: str | None = None,
+        description: str | None = None,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        """Update a project's name and/or description.
+
+        Only provided fields are updated. Updates updated_at and increments revision.
+        Returns the updated project dict, or None if the project does not exist.
+        Runs in a single transaction.
+        """
+        target_environment = environment or self._active_environment
+        if name is None and description is None:
+            raise ValueError("至少需要提供一个更新字段。")
+        clean_name: str | None = None
+        if name is not None:
+            clean_name = " ".join(name.split())
+            if not clean_name:
+                raise ValueError("项目名称不能为空。")
+            if len(clean_name) > 80:
+                raise ValueError("项目名称不能超过 80 个字符。")
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self.connection(target_environment) as connection:
+            existing = connection.execute(
+                "SELECT id FROM projects WHERE id = ?",
+                (project_id,),
+            ).fetchone()
+            if existing is None:
+                return None
+            sets: list[str] = []
+            params: list[object] = []
+            if clean_name is not None:
+                sets.append("name = ?")
+                params.append(clean_name)
+            if description is not None:
+                sets.append("description = ?")
+                params.append(description)
+            sets.append("updated_at = ?")
+            params.append(now)
+            sets.append("revision = revision + 1")
+            params.append(project_id)
+            connection.execute(
+                f"UPDATE projects SET {', '.join(sets)} WHERE id = ?",
+                params,
+            )
+            row = connection.execute(
+                """
+                SELECT id, name, description, status, cover_path, archived_at,
+                       deleted_at, revision, created_at, updated_at
+                FROM projects
+                WHERE id = ?
+                """,
+                (project_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def archive_project(
+        self,
+        project_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        """Archive a project: set archived_at and status='archived'.
+
+        Returns the updated project dict, or None if the project does not exist.
+        """
+        target_environment = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self.connection(target_environment) as connection:
+            existing = connection.execute(
+                "SELECT id FROM projects WHERE id = ?",
+                (project_id,),
+            ).fetchone()
+            if existing is None:
+                return None
+            connection.execute(
+                "UPDATE projects SET archived_at = ?, status = ?, updated_at = ? WHERE id = ?",
+                (now, "archived", now, project_id),
+            )
+            row = connection.execute(
+                """
+                SELECT id, name, description, status, cover_path, archived_at,
+                       deleted_at, revision, created_at, updated_at
+                FROM projects
+                WHERE id = ?
+                """,
+                (project_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def restore_project(
+        self,
+        project_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        """Restore an archived or soft-deleted project.
+
+        Clears both archived_at and deleted_at, sets status='draft'.
+        Returns the updated project dict, or None if the project does not exist.
+        """
+        target_environment = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self.connection(target_environment) as connection:
+            existing = connection.execute(
+                "SELECT id FROM projects WHERE id = ?",
+                (project_id,),
+            ).fetchone()
+            if existing is None:
+                return None
+            connection.execute(
+                "UPDATE projects SET archived_at = NULL, deleted_at = NULL, status = ?, updated_at = ? WHERE id = ?",
+                ("draft", now, project_id),
+            )
+            row = connection.execute(
+                """
+                SELECT id, name, description, status, cover_path, archived_at,
+                       deleted_at, revision, created_at, updated_at
+                FROM projects
+                WHERE id = ?
+                """,
+                (project_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def soft_delete_project(
+        self,
+        project_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        """Soft-delete a project: set deleted_at to current UTC time.
+
+        Does not actually remove data. Returns the updated project dict,
+        or None if the project does not exist.
+        """
+        target_environment = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self.connection(target_environment) as connection:
+            existing = connection.execute(
+                "SELECT id FROM projects WHERE id = ?",
+                (project_id,),
+            ).fetchone()
+            if existing is None:
+                return None
+            connection.execute(
+                "UPDATE projects SET deleted_at = ?, updated_at = ? WHERE id = ?",
+                (now, now, project_id),
+            )
+            row = connection.execute(
+                """
+                SELECT id, name, description, status, cover_path, archived_at,
+                       deleted_at, revision, created_at, updated_at
+                FROM projects
+                WHERE id = ?
+                """,
+                (project_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def permanent_delete_project(
+        self,
+        project_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> bool:
+        """Permanently delete a project record.
+
+        Cascade-deletes chapters etc. via FK ON DELETE CASCADE.
+        Returns True if a row was deleted, False otherwise.
+        """
+        target_environment = environment or self._active_environment
+        with self._lock, self.connection(target_environment) as connection:
+            cursor = connection.execute(
+                "DELETE FROM projects WHERE id = ?",
+                (project_id,),
+            )
+            return cursor.rowcount > 0
+
+    def get_project_stats(
+        self,
+        project_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        """Gather statistics for a project in a single query.
+
+        Returns a dict with: chapter_count, large_scene_count, small_scene_count,
+        shot_page_count, material_count, character_count.
+        Returns None if the project does not exist.
+        Only counts non-deleted data (records that exist in the database).
+        """
+        target_environment = environment or self._active_environment
+        with self.connection(target_environment) as connection:
+            project = connection.execute(
+                "SELECT id FROM projects WHERE id = ?",
+                (project_id,),
+            ).fetchone()
+            if project is None:
+                return None
+            row = connection.execute(
+                """
+                SELECT
+                    (SELECT COUNT(*) FROM chapters c
+                     WHERE c.project_id = p.id) AS chapter_count,
+                    (SELECT COUNT(*) FROM large_scenes ls
+                     JOIN chapters c ON c.id = ls.chapter_id
+                     WHERE c.project_id = p.id) AS large_scene_count,
+                    (SELECT COUNT(*) FROM small_scenes ss
+                     JOIN large_scenes ls ON ls.id = ss.large_scene_id
+                     JOIN chapters c ON c.id = ls.chapter_id
+                     WHERE c.project_id = p.id) AS small_scene_count,
+                    (SELECT COUNT(*) FROM shot_pages sp
+                     JOIN small_scenes ss ON ss.id = sp.small_scene_id
+                     JOIN large_scenes ls ON ls.id = ss.large_scene_id
+                     JOIN chapters c ON c.id = ls.chapter_id
+                     WHERE c.project_id = p.id) AS shot_page_count,
+                    (SELECT COUNT(DISTINCT ssm.material_id)
+                     FROM small_scene_materials ssm
+                     JOIN small_scenes ss ON ss.id = ssm.small_scene_id
+                     JOIN large_scenes ls ON ls.id = ss.large_scene_id
+                     JOIN chapters c ON c.id = ls.chapter_id
+                     WHERE c.project_id = p.id) AS material_count,
+                    (SELECT COUNT(*) FROM project_characters pc
+                     WHERE pc.project_id = p.id) AS character_count
+                FROM projects p
+                WHERE p.id = ?
+                """,
+                (project_id,),
+            ).fetchone()
+        return {
+            "chapter_count": int(row["chapter_count"]),
+            "large_scene_count": int(row["large_scene_count"]),
+            "small_scene_count": int(row["small_scene_count"]),
+            "shot_page_count": int(row["shot_page_count"]),
+            "material_count": int(row["material_count"]),
+            "character_count": int(row["character_count"]),
+        }
+
+    def copy_project(
+        self,
+        project_id: str,
+        new_name: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        """Copy a project and its story tree structure.
+
+        Copies: project (name=new_name, description, status='draft'), chapters,
+        large_scenes, small_scenes, shot_pages, branches, material associations
+        (small_scene_materials, shot_page_materials), and page mappings
+        (small_scene_page_mappings).
+
+        Does NOT copy: images, task history, materials themselves, material_pages,
+        or character associations.
+
+        All new records get new UUIDs. sort_order is preserved. Runs in a single
+        transaction. Returns the new project dict.
+        """
+        target_environment = environment or self._active_environment
+        clean_name = " ".join(new_name.split())
+        if not clean_name:
+            raise ValueError("项目名称不能为空。")
+        if len(clean_name) > 80:
+            raise ValueError("项目名称不能超过 80 个字符。")
+        now = datetime.now(timezone.utc).isoformat()
+        new_project_id = str(uuid4())
+
+        with self._lock, self.connection(target_environment) as connection:
+            source = connection.execute(
+                """
+                SELECT id, name, description FROM projects WHERE id = ?
+                """,
+                (project_id,),
+            ).fetchone()
+            if source is None:
+                raise ValueError("项目不存在。")
+
+            connection.execute(
+                """
+                INSERT INTO projects(
+                    id, name, description, status, cover_path, archived_at,
+                    deleted_at, revision, created_at, updated_at
+                )
+                VALUES(?, ?, ?, 'draft', NULL, NULL, NULL, 1, ?, ?)
+                """,
+                (new_project_id, clean_name, source["description"], now, now),
+            )
+
+            # ID mapping tables
+            chapter_map: dict[str, str] = {}
+            large_scene_map: dict[str, str] = {}
+            small_scene_map: dict[str, str] = {}
+            branch_map: dict[str, str] = {}
+            shot_page_map: dict[str, str] = {}
+
+            # Copy chapters
+            chapters = connection.execute(
+                """
+                SELECT id, name, sort_order, revision
+                FROM chapters
+                WHERE project_id = ?
+                ORDER BY sort_order ASC
+                """,
+                (project_id,),
+            ).fetchall()
+            for ch in chapters:
+                new_ch_id = str(uuid4())
+                chapter_map[ch["id"]] = new_ch_id
                 connection.execute(
                     """
-                    INSERT INTO projects(id, name, status, created_at, updated_at)
-                    VALUES(:id, :name, :status, :created_at, :updated_at)
+                    INSERT INTO chapters(
+                        id, project_id, name, sort_order, revision, created_at, updated_at
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, ?)
                     """,
-                    project,
+                    (new_ch_id, new_project_id, ch["name"], ch["sort_order"],
+                     ch["revision"], now, now),
                 )
-        except sqlite3.IntegrityError as error:
-            raise ValueError("已经存在同名项目。") from error
-        return project
+
+            # Copy large_scenes
+            if chapter_map:
+                ch_placeholders = ",".join("?" * len(chapter_map))
+                large_scenes = connection.execute(
+                    f"""
+                    SELECT id, chapter_id, name, scene_type, sort_order, revision
+                    FROM large_scenes
+                    WHERE chapter_id IN ({ch_placeholders})
+                    ORDER BY sort_order ASC
+                    """,
+                    list(chapter_map.keys()),
+                ).fetchall()
+                for ls in large_scenes:
+                    new_ls_id = str(uuid4())
+                    large_scene_map[ls["id"]] = new_ls_id
+                    connection.execute(
+                        """
+                        INSERT INTO large_scenes(
+                            id, chapter_id, name, scene_type, sort_order,
+                            revision, created_at, updated_at
+                        )
+                        VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (new_ls_id, chapter_map[ls["chapter_id"]], ls["name"],
+                         ls["scene_type"], ls["sort_order"], ls["revision"], now, now),
+                    )
+
+            # Copy small_scenes
+            if large_scene_map:
+                ls_placeholders = ",".join("?" * len(large_scene_map))
+                small_scenes = connection.execute(
+                    f"""
+                    SELECT id, large_scene_id, name, scene_type, description,
+                           sort_order, revision
+                    FROM small_scenes
+                    WHERE large_scene_id IN ({ls_placeholders})
+                    ORDER BY sort_order ASC
+                    """,
+                    list(large_scene_map.keys()),
+                ).fetchall()
+                for ss in small_scenes:
+                    new_ss_id = str(uuid4())
+                    small_scene_map[ss["id"]] = new_ss_id
+                    connection.execute(
+                        """
+                        INSERT INTO small_scenes(
+                            id, large_scene_id, name, scene_type, description,
+                            sort_order, revision, created_at, updated_at
+                        )
+                        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (new_ss_id, large_scene_map[ss["large_scene_id"]],
+                         ss["name"], ss["scene_type"], ss["description"],
+                         ss["sort_order"], ss["revision"], now, now),
+                    )
+
+            # Copy branches (parent_type in ('large_scene', 'small_scene'))
+            parent_ids = list(large_scene_map.keys()) + list(small_scene_map.keys())
+            if parent_ids:
+                parent_placeholders = ",".join("?" * len(parent_ids))
+                branches = connection.execute(
+                    f"""
+                    SELECT id, parent_type, parent_id, name, description,
+                           is_enabled, sort_order
+                    FROM branches
+                    WHERE parent_type IN ('large_scene', 'small_scene')
+                      AND parent_id IN ({parent_placeholders})
+                    ORDER BY sort_order ASC
+                    """,
+                    parent_ids,
+                ).fetchall()
+                for br in branches:
+                    new_br_id = str(uuid4())
+                    branch_map[br["id"]] = new_br_id
+                    if br["parent_type"] == "large_scene":
+                        new_parent_id = large_scene_map[br["parent_id"]]
+                    else:
+                        new_parent_id = small_scene_map[br["parent_id"]]
+                    connection.execute(
+                        """
+                        INSERT INTO branches(
+                            id, parent_type, parent_id, name, description,
+                            is_enabled, sort_order, created_at, updated_at
+                        )
+                        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (new_br_id, br["parent_type"], new_parent_id, br["name"],
+                         br["description"], br["is_enabled"], br["sort_order"],
+                         now, now),
+                    )
+
+            # Copy shot_pages (both branch_id IS NULL and branch_id IS NOT NULL)
+            if small_scene_map:
+                ss_placeholders = ",".join("?" * len(small_scene_map))
+                shot_pages = connection.execute(
+                    f"""
+                    SELECT id, small_scene_id, branch_id, title, description,
+                           prompt_text, negative_prompt, sort_order, revision
+                    FROM shot_pages
+                    WHERE small_scene_id IN ({ss_placeholders})
+                    ORDER BY sort_order ASC
+                    """,
+                    list(small_scene_map.keys()),
+                ).fetchall()
+                for sp in shot_pages:
+                    new_sp_id = str(uuid4())
+                    shot_page_map[sp["id"]] = new_sp_id
+                    new_branch_id = (
+                        branch_map[sp["branch_id"]]
+                        if sp["branch_id"] is not None
+                        else None
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO shot_pages(
+                            id, small_scene_id, branch_id, title, description,
+                            prompt_text, negative_prompt, sort_order, revision,
+                            created_at, updated_at
+                        )
+                        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (new_sp_id, small_scene_map[sp["small_scene_id"]],
+                         new_branch_id, sp["title"], sp["description"],
+                         sp["prompt_text"], sp["negative_prompt"], sp["sort_order"],
+                         sp["revision"], now, now),
+                    )
+
+            # Copy small_scene_materials (material associations)
+            if small_scene_map:
+                ss_placeholders = ",".join("?" * len(small_scene_map))
+                ssm_rows = connection.execute(
+                    f"""
+                    SELECT small_scene_id, material_id, sort_order
+                    FROM small_scene_materials
+                    WHERE small_scene_id IN ({ss_placeholders})
+                    """,
+                    list(small_scene_map.keys()),
+                ).fetchall()
+                for ssm in ssm_rows:
+                    connection.execute(
+                        """
+                        INSERT INTO small_scene_materials(
+                            id, small_scene_id, material_id, sort_order, created_at
+                        )
+                        VALUES(?, ?, ?, ?, ?)
+                        """,
+                        (str(uuid4()), small_scene_map[ssm["small_scene_id"]],
+                         ssm["material_id"], ssm["sort_order"], now),
+                    )
+
+            # Copy shot_page_materials (material associations)
+            if shot_page_map:
+                sp_placeholders = ",".join("?" * len(shot_page_map))
+                spm_rows = connection.execute(
+                    f"""
+                    SELECT shot_page_id, material_id, sort_order
+                    FROM shot_page_materials
+                    WHERE shot_page_id IN ({sp_placeholders})
+                    """,
+                    list(shot_page_map.keys()),
+                ).fetchall()
+                for spm in spm_rows:
+                    connection.execute(
+                        """
+                        INSERT INTO shot_page_materials(
+                            shot_page_id, material_id, sort_order, created_at
+                        )
+                        VALUES(?, ?, ?, ?)
+                        """,
+                        (shot_page_map[spm["shot_page_id"]], spm["material_id"],
+                         spm["sort_order"], now),
+                    )
+
+            # Copy small_scene_page_mappings (page mappings)
+            if shot_page_map:
+                sp_placeholders = ",".join("?" * len(shot_page_map))
+                mapping_rows = connection.execute(
+                    f"""
+                    SELECT scene_page_id, material_page_id, material_type
+                    FROM small_scene_page_mappings
+                    WHERE scene_page_id IN ({sp_placeholders})
+                    """,
+                    list(shot_page_map.keys()),
+                ).fetchall()
+                for m in mapping_rows:
+                    connection.execute(
+                        """
+                        INSERT INTO small_scene_page_mappings(
+                            id, scene_page_id, material_page_id, material_type,
+                            created_at, updated_at
+                        )
+                        VALUES(?, ?, ?, ?, ?, ?)
+                        """,
+                        (str(uuid4()), shot_page_map[m["scene_page_id"]],
+                         m["material_page_id"], m["material_type"], now, now),
+                    )
+
+            new_project = connection.execute(
+                """
+                SELECT id, name, description, status, cover_path, archived_at,
+                       deleted_at, revision, created_at, updated_at
+                FROM projects
+                WHERE id = ?
+                """,
+                (new_project_id,),
+            ).fetchone()
+        return dict(new_project)
 
     def list_chapters(
         self,
@@ -1567,32 +2766,101 @@ class DatabaseManager:
     def list_characters(
         self,
         project_id: str | None = None,
+        *,
+        search: str | None = None,
+        tag: str | None = None,
+        include_archived: bool = False,
+        include_deleted: bool = False,
+        sort: str = "sort_asc",
+        limit: int = 100,
+        offset: int = 0,
         environment: DatabaseEnvironment | None = None,
-    ) -> list[dict[str, object]]:
-        """List characters. If project_id given, return characters linked to that project.
-        If project_id is None, return all global characters."""
+    ) -> dict[str, object]:
+        """List characters with search, filter, sort and pagination.
+
+        If project_id given, return characters linked to that project.
+        If project_id is None, return all global characters.
+
+        Returns {"items": [...], "total": N, "limit": L, "offset": O, "has_more": bool}.
+        Each item contains id/name/description/cover_path/source/archived_at/deleted_at/
+        sort_order/revision/created_at/updated_at/tags/variant_count.
+        """
         target_environment = environment or self._active_environment
+        conditions: list[str] = []
+        params: list[object] = []
+        base_select = """
+            SELECT c.id, c.name, c.description, c.cover_path,
+                   c.archived_at, c.deleted_at, c.source, c.source_identifier,
+                   c.external_url, c.sort_order, c.revision,
+                   c.created_at, c.updated_at,
+                   (SELECT COUNT(*) FROM character_variants cv
+                    WHERE cv.character_id = c.id AND cv.archived_at IS NULL) AS variant_count
+        """
+        if project_id is not None:
+            conditions.append(
+                "c.id IN (SELECT character_id FROM project_characters WHERE project_id = ?)"
+            )
+            params.append(project_id)
+        if not include_archived:
+            conditions.append("c.archived_at IS NULL")
+        if not include_deleted:
+            conditions.append("c.deleted_at IS NULL")
+        if search:
+            conditions.append("(c.name LIKE ? OR c.description LIKE ?)")
+            params.extend([f"%{search}%", f"%{search}%"])
+        if tag:
+            conditions.append(
+                "c.id IN (SELECT character_id FROM character_tags WHERE tag = ?)"
+            )
+            params.append(tag)
+
+        where_clause = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+        order_clause = {
+            "sort_asc": " ORDER BY c.sort_order ASC, c.created_at ASC",
+            "sort_desc": " ORDER BY c.sort_order DESC, c.created_at DESC",
+            "name_asc": " ORDER BY c.name ASC, c.created_at ASC",
+            "name_desc": " ORDER BY c.name DESC, c.created_at DESC",
+            "updated_desc": " ORDER BY c.updated_at DESC, c.created_at DESC",
+        }.get(sort, " ORDER BY c.sort_order ASC, c.created_at ASC")
+
         with self.connection(target_environment) as connection:
-            if project_id is None:
-                rows = connection.execute(
-                    """
-                    SELECT id, name, sort_order, created_at, updated_at
-                    FROM characters
-                    ORDER BY sort_order ASC, created_at ASC
-                    """
-                ).fetchall()
-            else:
-                rows = connection.execute(
-                    """
-                    SELECT c.id, c.name, c.sort_order, c.created_at, c.updated_at
-                    FROM characters c
-                    JOIN project_characters pc ON pc.character_id = c.id
-                    WHERE pc.project_id = ?
-                    ORDER BY c.sort_order ASC, c.created_at ASC
-                    """,
-                    (project_id,),
-                ).fetchall()
-        return [dict(row) for row in rows]
+            count_row = connection.execute(
+                f"SELECT COUNT(*) AS count FROM characters c{where_clause}",
+                params,
+            ).fetchone()
+            total = int(count_row["count"])
+            rows = connection.execute(
+                f"{base_select} FROM characters c{where_clause}{order_clause} LIMIT ? OFFSET ?",
+                [*params, limit, offset],
+            ).fetchall()
+            tag_rows = connection.execute(
+                f"""
+                SELECT ct.character_id, ct.tag
+                FROM character_tags ct
+                WHERE ct.character_id IN (
+                    SELECT c.id FROM characters c{where_clause}
+                )
+                ORDER BY ct.tag ASC
+                """,
+                params,
+            ).fetchall()
+            tags_by_char: dict[str, list[str]] = {}
+            for tr in tag_rows:
+                tags_by_char.setdefault(tr["character_id"], []).append(tr["tag"])
+
+        items = []
+        for row in rows:
+            item = dict(row)
+            item["tags"] = tags_by_char.get(item["id"], [])
+            item["variant_count"] = int(item.get("variant_count") or 0)
+            items.append(item)
+        return {
+            "items": items,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "has_more": (offset + len(items)) < total,
+        }
 
     def get_character_stats(
         self,
@@ -1623,24 +2891,46 @@ class DatabaseManager:
     def get_character(
         self,
         character_id: str,
+        *,
+        include_tags: bool = True,
         environment: DatabaseEnvironment | None = None,
     ) -> dict[str, object] | None:
         target_environment = environment or self._active_environment
         with self.connection(target_environment) as connection:
             row = connection.execute(
                 """
-                SELECT id, name, sort_order, created_at, updated_at
+                SELECT id, name, description, cover_path,
+                       archived_at, deleted_at, source, source_identifier,
+                       external_url, sort_order, revision,
+                       created_at, updated_at
                 FROM characters
                 WHERE id = ?
                 """,
                 (character_id,),
             ).fetchone()
-        return dict(row) if row else None
+            tags: list[str] = []
+            if row and include_tags:
+                tag_rows = connection.execute(
+                    "SELECT tag FROM character_tags WHERE character_id = ? ORDER BY tag ASC",
+                    (character_id,),
+                ).fetchall()
+                tags = [tr["tag"] for tr in tag_rows]
+        if row is None:
+            return None
+        result = dict(row)
+        result["tags"] = tags
+        return result
 
     def create_character(
         self,
         name: str,
         project_id: str | None = None,
+        *,
+        description: str = "",
+        source: str = "",
+        source_identifier: str | None = None,
+        external_url: str | None = None,
+        tags: list[str] | None = None,
         environment: DatabaseEnvironment | None = None,
     ) -> dict[str, object]:
         """Create a global character. If project_id given, also link to that project."""
@@ -1652,6 +2942,13 @@ class DatabaseManager:
             raise ValueError("人物名称不能超过 80 个字符。")
         if project_id is not None and self.get_project(project_id, target_environment) is None:
             raise ValueError("项目不存在。")
+        clean_description = " ".join(description.split())
+        if len(clean_description) > 500:
+            raise ValueError("人物说明不能超过 500 个字符。")
+        clean_source = " ".join(source.split())
+        clean_tags = sorted({
+            " ".join(t.split()) for t in (tags or []) if " ".join(t.split())
+        })
         now = datetime.now(timezone.utc).isoformat()
         character_id = str(uuid4())
         try:
@@ -1662,15 +2959,29 @@ class DatabaseManager:
                 next_sort = int(row["max_sort"]) + 1
                 connection.execute(
                     """
-                    INSERT INTO characters(id, name, sort_order, created_at, updated_at)
-                    VALUES(?, ?, ?, ?, ?)
+                    INSERT INTO characters(
+                        id, name, description, source, source_identifier,
+                        external_url, sort_order, revision, created_at, updated_at
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
                     """,
-                    (character_id, clean_name, next_sort, now, now),
+                    (
+                        character_id, clean_name, clean_description, clean_source,
+                        source_identifier, external_url, next_sort, now, now,
+                    ),
                 )
                 if project_id is not None:
                     connection.execute(
                         "INSERT INTO project_characters(project_id, character_id, created_at) VALUES (?, ?, ?)",
                         (project_id, character_id, now),
+                    )
+                for tag in clean_tags:
+                    connection.execute(
+                        """
+                        INSERT OR IGNORE INTO character_tags(id, character_id, tag, created_at)
+                        VALUES(?, ?, ?, ?)
+                        """,
+                        (str(uuid4()), character_id, tag, now),
                     )
                 variant_id = str(uuid4())
                 connection.execute(
@@ -1698,8 +3009,8 @@ class DatabaseManager:
                         (str(uuid4()), variant_id, spec["id"], now, now),
                     )
         except sqlite3.IntegrityError as error:
-            raise ValueError("已存在同名人物。") from error
-        return self.get_character(character_id, target_environment)  # type: ignore[return-value]
+            raise ValueError("人物创建失败，可能是数据冲突。") from error
+        return self.get_character(character_id, environment=target_environment)  # type: ignore[return-value]
 
     def link_character_to_project(
         self,
@@ -1708,7 +3019,7 @@ class DatabaseManager:
         environment: DatabaseEnvironment | None = None,
     ) -> None:
         target_environment = environment or self._active_environment
-        if self.get_character(character_id, target_environment) is None:
+        if self.get_character(character_id, environment=target_environment) is None:
             raise ValueError("人物不存在。")
         if self.get_project(project_id, target_environment) is None:
             raise ValueError("项目不存在。")
@@ -1732,64 +3043,394 @@ class DatabaseManager:
                 (project_id, character_id),
             )
 
+    def update_character(
+        self,
+        character_id: str,
+        *,
+        name: str | None = None,
+        description: str | None = None,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        """Update character name and/or description. revision auto-incremented."""
+        target_environment = environment or self._active_environment
+        sets: list[str] = []
+        params: list[object] = []
+        if name is not None:
+            clean_name = " ".join(name.split())
+            if not clean_name:
+                raise ValueError("人物名称不能为空。")
+            if len(clean_name) > 80:
+                raise ValueError("人物名称不能超过 80 个字符。")
+            sets.append("name = ?")
+            params.append(clean_name)
+        if description is not None:
+            clean_description = " ".join(description.split())
+            if len(clean_description) > 500:
+                raise ValueError("人物说明不能超过 500 个字符。")
+            sets.append("description = ?")
+            params.append(clean_description)
+        if not sets:
+            raise ValueError("至少需要提供一个更新字段。")
+        now = datetime.now(timezone.utc).isoformat()
+        sets.extend(["revision = revision + 1", "updated_at = ?"])
+        params.extend([now, character_id])
+        with self._lock, self.connection(target_environment) as connection:
+            cursor = connection.execute(
+                f"UPDATE characters SET {', '.join(sets)} WHERE id = ?",
+                params,
+            )
+            if cursor.rowcount == 0:
+                raise ValueError("人物不存在。")
+        character = self.get_character(character_id, environment=target_environment)
+        if character is None:
+            raise ValueError("人物不存在。")
+        return character
+
     def rename_character(
         self,
         character_id: str,
         name: str,
         environment: DatabaseEnvironment | None = None,
     ) -> dict[str, object]:
-        target_environment = environment or self._active_environment
-        clean_name = " ".join(name.split())
-        if not clean_name:
-            raise ValueError("人物名称不能为空。")
-        if len(clean_name) > 80:
-            raise ValueError("人物名称不能超过 80 个字符。")
-        now = datetime.now(timezone.utc).isoformat()
-        try:
-            with self._lock, self.connection(target_environment) as connection:
-                cursor = connection.execute(
-                    "UPDATE characters SET name = ?, updated_at = ? WHERE id = ?",
-                    (clean_name, now, character_id),
-                )
-                if cursor.rowcount == 0:
-                    raise ValueError("人物不存在。")
-        except sqlite3.IntegrityError as error:
-            raise ValueError("已存在同名人物。") from error
-        character = self.get_character(character_id, target_environment)
-        if character is None:
-            raise ValueError("人物不存在。")
-        return character
+        """Legacy rename wrapper, kept for backward compatibility."""
+        return self.update_character(
+            character_id, name=name, environment=environment
+        )
 
-    def delete_character(
+    def set_character_cover_path(
+        self,
+        character_id: str,
+        cover_path: str | None,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        """Set or clear character cover_path. revision auto-incremented."""
+        target_environment = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self.connection(target_environment) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE characters
+                SET cover_path = ?, revision = revision + 1, updated_at = ?
+                WHERE id = ?
+                """,
+                (cover_path, now, character_id),
+            )
+            if cursor.rowcount == 0:
+                return None
+        return self.get_character(character_id, environment=target_environment)
+
+    def set_character_tags(
+        self,
+        character_id: str,
+        tags: list[str],
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        """Replace all tags of a character."""
+        target_environment = environment or self._active_environment
+        clean_tags = sorted({
+            " ".join(t.split()) for t in tags if " ".join(t.split())
+        })
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self.connection(target_environment) as connection:
+            existing = connection.execute(
+                "SELECT id FROM characters WHERE id = ?", (character_id,)
+            ).fetchone()
+            if existing is None:
+                return None
+            connection.execute(
+                "DELETE FROM character_tags WHERE character_id = ?", (character_id,)
+            )
+            for tag in clean_tags:
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO character_tags(id, character_id, tag, created_at)
+                    VALUES(?, ?, ?, ?)
+                    """,
+                    (str(uuid4()), character_id, tag, now),
+                )
+        return self.get_character(character_id, environment=target_environment)
+
+    def archive_character(
         self,
         character_id: str,
         environment: DatabaseEnvironment | None = None,
-    ) -> dict[str, object]:
+    ) -> dict[str, object] | None:
         target_environment = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
         with self._lock, self.connection(target_environment) as connection:
-            character = connection.execute(
-                "SELECT id, name, sort_order, created_at, updated_at FROM characters WHERE id = ?",
-                (character_id,),
-            ).fetchone()
-            if character is None:
-                raise ValueError("人物不存在。")
-            connection.execute("DELETE FROM characters WHERE id = ?", (character_id,))
-        return dict(character)
+            cursor = connection.execute(
+                """
+                UPDATE characters
+                SET archived_at = ?, revision = revision + 1, updated_at = ?
+                WHERE id = ? AND deleted_at IS NULL
+                """,
+                (now, now, character_id),
+            )
+            if cursor.rowcount == 0:
+                return None
+        return self.get_character(character_id, environment=target_environment)
 
-    # ── Character Variants ──────────────────────────────────────
-
-    def list_character_variants(
+    def restore_character(
         self,
         character_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        """Clear both archived_at and deleted_at."""
+        target_environment = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self.connection(target_environment) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE characters
+                SET archived_at = NULL, deleted_at = NULL,
+                    revision = revision + 1, updated_at = ?
+                WHERE id = ?
+                """,
+                (now, character_id),
+            )
+            if cursor.rowcount == 0:
+                return None
+        return self.get_character(character_id, environment=target_environment)
+
+    def soft_delete_character(
+        self,
+        character_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        target_environment = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self.connection(target_environment) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE characters
+                SET deleted_at = ?, revision = revision + 1, updated_at = ?
+                WHERE id = ?
+                """,
+                (now, now, character_id),
+            )
+            if cursor.rowcount == 0:
+                return None
+        return self.get_character(character_id, environment=target_environment)
+
+    def list_deleted_characters(
+        self,
         environment: DatabaseEnvironment | None = None,
     ) -> list[dict[str, object]]:
         target_environment = environment or self._active_environment
         with self.connection(target_environment) as connection:
             rows = connection.execute(
                 """
-                SELECT id, character_id, name, is_default, sort_order, created_at, updated_at
+                SELECT id, name, description, cover_path,
+                       archived_at, deleted_at, source, source_identifier,
+                       external_url, sort_order, revision,
+                       created_at, updated_at
+                FROM characters
+                WHERE deleted_at IS NOT NULL
+                ORDER BY deleted_at DESC
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def permanent_delete_character(
+        self,
+        character_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> bool:
+        """Permanently delete a character and all related data (cascade)."""
+        target_environment = environment or self._active_environment
+        with self._lock, self.connection(target_environment) as connection:
+            existing = connection.execute(
+                "SELECT id FROM characters WHERE id = ?", (character_id,)
+            ).fetchone()
+            if existing is None:
+                return False
+            # Cascade delete covers character_variants/character_spec_values/character_tags/project_characters
+            connection.execute(
+                "DELETE FROM characters WHERE id = ?", (character_id,)
+            )
+        return True
+
+    def get_character_references(
+        self,
+        character_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        """Return project/scene-page references of a character."""
+        target_environment = environment or self._active_environment
+        with self.connection(target_environment) as connection:
+            project_rows = connection.execute(
+                """
+                SELECT p.id AS project_id, p.name AS project_name
+                FROM project_characters pc
+                JOIN projects p ON p.id = pc.project_id
+                WHERE pc.character_id = ?
+                ORDER BY p.name ASC
+                """,
+                (character_id,),
+            ).fetchall()
+            page_rows = connection.execute(
+                """
+                SELECT sp.id AS shot_page_id, sp.title AS shot_page_title,
+                       ss.id AS small_scene_id, ss.name AS small_scene_name
+                FROM shot_page_characters spc
+                JOIN shot_pages sp ON sp.id = spc.shot_page_id
+                JOIN small_scenes ss ON ss.id = sp.small_scene_id
+                WHERE spc.character_id = ?
+                ORDER BY sp.title ASC
+                """,
+                (character_id,),
+            ).fetchall()
+        return {
+            "projects": [dict(r) for r in project_rows],
+            "shot_pages": [dict(r) for r in page_rows],
+            "project_count": len(project_rows),
+            "shot_page_count": len(page_rows),
+        }
+
+    def copy_character(
+        self,
+        character_id: str,
+        new_name: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        """Copy a character (with variants, spec values, tags) as an independent copy."""
+        target_environment = environment or self._active_environment
+        source = self.get_character(character_id, environment=target_environment)
+        if source is None:
+            raise ValueError("人物不存在。")
+        clean_name = " ".join(new_name.split())
+        if not clean_name:
+            raise ValueError("新人物名称不能为空。")
+        if len(clean_name) > 80:
+            raise ValueError("人物名称不能超过 80 个字符。")
+        now = datetime.now(timezone.utc).isoformat()
+        new_id = str(uuid4())
+        with self._lock, self.connection(target_environment) as connection:
+            row = connection.execute(
+                "SELECT COALESCE(MAX(sort_order), 0) AS max_sort FROM characters"
+            ).fetchone()
+            next_sort = int(row["max_sort"]) + 1
+            connection.execute(
+                """
+                INSERT INTO characters(
+                    id, name, description, cover_path, source, source_identifier,
+                    external_url, sort_order, revision, created_at, updated_at
+                )
+                VALUES(?, ?, ?, ?, 'copy', ?, NULL, ?, 1, ?, ?)
+                """,
+                (
+                    new_id, clean_name, source.get("description", ""), None,
+                    character_id, next_sort, now, now,
+                ),
+            )
+            # Copy tags
+            tag_rows = connection.execute(
+                "SELECT tag FROM character_tags WHERE character_id = ?",
+                (character_id,),
+            ).fetchall()
+            for tr in tag_rows:
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO character_tags(id, character_id, tag, created_at)
+                    VALUES(?, ?, ?, ?)
+                    """,
+                    (str(uuid4()), new_id, tr["tag"], now),
+                )
+            # Copy variants and their spec values
+            variant_rows = connection.execute(
+                """
+                SELECT id, name, description, is_default, default_prompt,
+                       default_lora_name, default_lora_weight, default_model_override,
+                       preview_original_path, preview_thumbnail_path,
+                       archived_at, sort_order
                 FROM character_variants
                 WHERE character_id = ?
+                ORDER BY sort_order ASC
+                """,
+                (character_id,),
+            ).fetchall()
+            for vr in variant_rows:
+                new_variant_id = str(uuid4())
+                connection.execute(
+                    """
+                    INSERT INTO character_variants(
+                        id, character_id, name, description, is_default,
+                        default_prompt, default_lora_name, default_lora_weight,
+                        default_model_override, preview_original_path, preview_thumbnail_path,
+                        archived_at, source_variant_id, sort_order, revision,
+                        created_at, updated_at
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, 1, ?, ?)
+                    """,
+                    (
+                        new_variant_id, new_id, vr["name"], vr["description"],
+                        vr["is_default"], vr["default_prompt"], vr["default_lora_name"],
+                        vr["default_lora_weight"], vr["default_model_override"],
+                        vr["id"], vr["sort_order"], now, now,
+                    ),
+                )
+                csv_rows = connection.execute(
+                    """
+                    SELECT spec_id, prompt, lora_name, lora_weight,
+                           model_override, notes
+                    FROM character_spec_values
+                    WHERE variant_id = ?
+                    """,
+                    (vr["id"],),
+                ).fetchall()
+                for csv in csv_rows:
+                    connection.execute(
+                        """
+                        INSERT INTO character_spec_values(
+                            id, variant_id, spec_id, prompt, lora_name,
+                            lora_weight, model_override, notes,
+                            preview_original_path, preview_thumbnail_path,
+                            created_at, updated_at
+                        )
+                        VALUES(?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
+                        """,
+                        (
+                            str(uuid4()), new_variant_id, csv["spec_id"], csv["prompt"],
+                            csv["lora_name"], csv["lora_weight"], csv["model_override"],
+                            csv["notes"], now, now,
+                        ),
+                    )
+        result = self.get_character(new_id, environment=target_environment)
+        if result is None:
+            raise ValueError("人物复制失败。")
+        return result
+
+    def delete_character(
+        self,
+        character_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        """Soft delete a character (alias for soft_delete_character for backward compat)."""
+        result = self.soft_delete_character(character_id, environment)
+        if result is None:
+            raise ValueError("人物不存在。")
+        return result
+
+    # ── Character Variants ──────────────────────────────────────
+
+    def list_character_variants(
+        self,
+        character_id: str,
+        *,
+        include_archived: bool = False,
+        environment: DatabaseEnvironment | None = None,
+    ) -> list[dict[str, object]]:
+        target_environment = environment or self._active_environment
+        with self.connection(target_environment) as connection:
+            rows = connection.execute(
+                """
+                SELECT id, character_id, name, description, is_default,
+                       default_prompt, default_lora_name, default_lora_weight,
+                       default_model_override, preview_original_path, preview_thumbnail_path,
+                       archived_at, source_variant_id, sort_order, revision,
+                       created_at, updated_at
+                FROM character_variants
+                WHERE character_id = ? AND archived_at IS NULL
                 ORDER BY sort_order ASC, created_at ASC
                 """,
                 (character_id,),
@@ -1805,7 +3446,11 @@ class DatabaseManager:
         with self.connection(target_environment) as connection:
             row = connection.execute(
                 """
-                SELECT id, character_id, name, is_default, sort_order, created_at, updated_at
+                SELECT id, character_id, name, description, is_default,
+                       default_prompt, default_lora_name, default_lora_weight,
+                       default_model_override, preview_original_path, preview_thumbnail_path,
+                       archived_at, source_variant_id, sort_order, revision,
+                       created_at, updated_at
                 FROM character_variants
                 WHERE id = ?
                 """,
@@ -1817,6 +3462,12 @@ class DatabaseManager:
         self,
         character_id: str,
         name: str,
+        *,
+        description: str = "",
+        default_prompt: str = "",
+        default_lora_name: str = "",
+        default_lora_weight: float | None = None,
+        default_model_override: str = "",
         environment: DatabaseEnvironment | None = None,
     ) -> dict[str, object]:
         target_environment = environment or self._active_environment
@@ -1825,7 +3476,12 @@ class DatabaseManager:
             raise ValueError("形象变体名称不能为空。")
         if len(clean_name) > 80:
             raise ValueError("形象变体名称不能超过 80 个字符。")
-        character = self.get_character(character_id, target_environment)
+        clean_description = " ".join(description.split())
+        if len(clean_description) > 500:
+            raise ValueError("变体说明不能超过 500 个字符。")
+        if default_lora_weight is not None and (default_lora_weight < 0 or default_lora_weight > 2):
+            raise ValueError("LoRA 权重必须在 0 到 2 之间。")
+        character = self.get_character(character_id, environment=target_environment)
         if character is None:
             raise ValueError("人物不存在。")
         now = datetime.now(timezone.utc).isoformat()
@@ -1844,11 +3500,17 @@ class DatabaseManager:
                 connection.execute(
                     """
                     INSERT INTO character_variants(
-                        id, character_id, name, is_default, sort_order, created_at, updated_at
+                        id, character_id, name, description, is_default,
+                        default_prompt, default_lora_name, default_lora_weight,
+                        default_model_override, sort_order, revision, created_at, updated_at
                     )
-                    VALUES(?, ?, ?, 0, ?, ?, ?)
+                    VALUES(?, ?, ?, ?, 0, ?, ?, ?, ?, ?, 1, ?, ?)
                     """,
-                    (variant_id, character_id, clean_name, next_sort, now, now),
+                    (
+                        variant_id, character_id, clean_name, clean_description,
+                        default_prompt, default_lora_name, default_lora_weight,
+                        default_model_override, next_sort, now, now,
+                    ),
                 )
                 spec_rows = connection.execute(
                     "SELECT id FROM specs ORDER BY sort_order ASC"
@@ -1869,28 +3531,61 @@ class DatabaseManager:
             raise ValueError("该人物下已经存在同名形象变体。") from error
         return self.get_character_variant(variant_id, target_environment)  # type: ignore[return-value]
 
-    def rename_character_variant(
+    def update_character_variant(
         self,
         variant_id: str,
-        name: str,
+        *,
+        name: str | None = None,
+        description: str | None = None,
+        default_prompt: str | None = None,
+        default_lora_name: str | None = None,
+        default_lora_weight: float | None | object = _UNSET,
+        default_model_override: str | None = None,
         environment: DatabaseEnvironment | None = None,
     ) -> dict[str, object]:
         target_environment = environment or self._active_environment
-        clean_name = " ".join(name.split())
-        if not clean_name:
-            raise ValueError("形象变体名称不能为空。")
-        if len(clean_name) > 80:
-            raise ValueError("形象变体名称不能超过 80 个字符。")
+        sets: list[str] = []
+        params: list[object] = []
+        if name is not None:
+            clean_name = " ".join(name.split())
+            if not clean_name:
+                raise ValueError("形象变体名称不能为空。")
+            if len(clean_name) > 80:
+                raise ValueError("形象变体名称不能超过 80 个字符。")
+            sets.append("name = ?")
+            params.append(clean_name)
+        if description is not None:
+            clean_description = " ".join(description.split())
+            if len(clean_description) > 500:
+                raise ValueError("变体说明不能超过 500 个字符。")
+            sets.append("description = ?")
+            params.append(clean_description)
+        if default_prompt is not None:
+            sets.append("default_prompt = ?")
+            params.append(default_prompt)
+        if default_lora_name is not None:
+            sets.append("default_lora_name = ?")
+            params.append(default_lora_name)
+        if default_lora_weight is not _UNSET:
+            if default_lora_weight is not None and (
+                default_lora_weight < 0 or default_lora_weight > 2
+            ):
+                raise ValueError("LoRA 权重必须在 0 到 2 之间。")
+            sets.append("default_lora_weight = ?")
+            params.append(default_lora_weight)
+        if default_model_override is not None:
+            sets.append("default_model_override = ?")
+            params.append(default_model_override)
+        if not sets:
+            raise ValueError("至少需要提供一个更新字段。")
         now = datetime.now(timezone.utc).isoformat()
+        sets.extend(["revision = revision + 1", "updated_at = ?"])
+        params.extend([now, variant_id])
         try:
             with self._lock, self.connection(target_environment) as connection:
                 cursor = connection.execute(
-                    """
-                    UPDATE character_variants
-                    SET name = ?, updated_at = ?
-                    WHERE id = ?
-                    """,
-                    (clean_name, now, variant_id),
+                    f"UPDATE character_variants SET {', '.join(sets)} WHERE id = ?",
+                    params,
                 )
                 if cursor.rowcount == 0:
                     raise ValueError("形象变体不存在。")
@@ -1900,6 +3595,188 @@ class DatabaseManager:
         if variant is None:
             raise ValueError("形象变体不存在。")
         return variant
+
+    def rename_character_variant(
+        self,
+        variant_id: str,
+        name: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        """Legacy rename wrapper."""
+        return self.update_character_variant(
+            variant_id, name=name, environment=environment
+        )
+
+    def set_character_variant_preview_paths(
+        self,
+        variant_id: str,
+        preview_original_path: str | None,
+        preview_thumbnail_path: str | None,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        target_environment = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self.connection(target_environment) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE character_variants
+                SET preview_original_path = ?, preview_thumbnail_path = ?,
+                    revision = revision + 1, updated_at = ?
+                WHERE id = ?
+                """,
+                (preview_original_path, preview_thumbnail_path, now, variant_id),
+            )
+            if cursor.rowcount == 0:
+                return None
+        return self.get_character_variant(variant_id, target_environment)
+
+    def reorder_character_variants(
+        self,
+        character_id: str,
+        variant_ids: list[str],
+        environment: DatabaseEnvironment | None = None,
+    ) -> list[dict[str, object]]:
+        """Reorder variants of a character. variant_ids must include all non-archived variants."""
+        target_environment = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self.connection(target_environment) as connection:
+            existing_rows = connection.execute(
+                """
+                SELECT id FROM character_variants
+                WHERE character_id = ? AND archived_at IS NULL
+                """,
+                (character_id,),
+            ).fetchall()
+            existing_ids = {r["id"] for r in existing_rows}
+            if set(variant_ids) != existing_ids:
+                raise ValueError("变体 ID 列表必须包含全部未归档变体。")
+            for index, vid in enumerate(variant_ids, start=1):
+                connection.execute(
+                    """
+                    UPDATE character_variants
+                    SET sort_order = ?, revision = revision + 1, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (index, now, vid),
+                )
+        return self.list_character_variants(character_id, environment=target_environment)
+
+    def copy_character_variant(
+        self,
+        variant_id: str,
+        new_name: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        """Copy a variant as an independent variant under the same character."""
+        target_environment = environment or self._active_environment
+        source = self.get_character_variant(variant_id, target_environment)
+        if source is None:
+            raise ValueError("形象变体不存在。")
+        clean_name = " ".join(new_name.split())
+        if not clean_name:
+            raise ValueError("新变体名称不能为空。")
+        if len(clean_name) > 80:
+            raise ValueError("形象变体名称不能超过 80 个字符。")
+        now = datetime.now(timezone.utc).isoformat()
+        new_id = str(uuid4())
+        with self._lock, self.connection(target_environment) as connection:
+            row = connection.execute(
+                """
+                SELECT COALESCE(MAX(sort_order), 0) AS max_sort
+                FROM character_variants
+                WHERE character_id = ?
+                """,
+                (source["character_id"],),
+            ).fetchone()
+            next_sort = int(row["max_sort"]) + 1
+            connection.execute(
+                """
+                INSERT INTO character_variants(
+                    id, character_id, name, description, is_default,
+                    default_prompt, default_lora_name, default_lora_weight,
+                    default_model_override, preview_original_path, preview_thumbnail_path,
+                    archived_at, source_variant_id, sort_order, revision,
+                    created_at, updated_at
+                )
+                VALUES(?, ?, ?, ?, 0, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, 1, ?, ?)
+                """,
+                (
+                    new_id, source["character_id"], clean_name, source.get("description", ""),
+                    source.get("default_prompt", ""), source.get("default_lora_name", ""),
+                    source.get("default_lora_weight"), source.get("default_model_override", ""),
+                    variant_id, next_sort, now, now,
+                ),
+            )
+            csv_rows = connection.execute(
+                """
+                SELECT spec_id, prompt, lora_name, lora_weight,
+                       model_override, notes
+                FROM character_spec_values
+                WHERE variant_id = ?
+                """,
+                (variant_id,),
+            ).fetchall()
+            for csv in csv_rows:
+                connection.execute(
+                    """
+                    INSERT INTO character_spec_values(
+                        id, variant_id, spec_id, prompt, lora_name,
+                        lora_weight, model_override, notes,
+                        preview_original_path, preview_thumbnail_path,
+                        created_at, updated_at
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
+                    """,
+                    (
+                        str(uuid4()), new_id, csv["spec_id"], csv["prompt"],
+                        csv["lora_name"], csv["lora_weight"], csv["model_override"],
+                        csv["notes"], now, now,
+                    ),
+                )
+        result = self.get_character_variant(new_id, target_environment)
+        if result is None:
+            raise ValueError("变体复制失败。")
+        return result
+
+    def archive_character_variant(
+        self,
+        variant_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        target_environment = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self.connection(target_environment) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE character_variants
+                SET archived_at = ?, revision = revision + 1, updated_at = ?
+                WHERE id = ?
+                """,
+                (now, now, variant_id),
+            )
+            if cursor.rowcount == 0:
+                return None
+        return self.get_character_variant(variant_id, target_environment)
+
+    def restore_character_variant(
+        self,
+        variant_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        target_environment = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self.connection(target_environment) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE character_variants
+                SET archived_at = NULL, revision = revision + 1, updated_at = ?
+                WHERE id = ?
+                """,
+                (now, variant_id),
+            )
+            if cursor.rowcount == 0:
+                return None
+        return self.get_character_variant(variant_id, target_environment)
 
     def delete_character_variant(
         self,
@@ -1923,6 +3800,33 @@ class DatabaseManager:
             )
         return dict(variant)
 
+    def get_character_variant_references(
+        self,
+        variant_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        """Return shot_pages that reference this variant."""
+        target_environment = environment or self._active_environment
+        with self.connection(target_environment) as connection:
+            page_rows = connection.execute(
+                """
+                SELECT sp.id AS shot_page_id, sp.title AS shot_page_title,
+                       ss.id AS small_scene_id, ss.name AS small_scene_name,
+                       ls.id AS large_scene_id, ls.name AS large_scene_name
+                FROM shot_page_characters spc
+                JOIN shot_pages sp ON sp.id = spc.shot_page_id
+                JOIN small_scenes ss ON ss.id = sp.small_scene_id
+                JOIN large_scenes ls ON ls.id = ss.large_scene_id
+                WHERE spc.variant_id = ?
+                ORDER BY sp.title ASC
+                """,
+                (variant_id,),
+            ).fetchall()
+        return {
+            "shot_pages": [dict(r) for r in page_rows],
+            "shot_page_count": len(page_rows),
+        }
+
     # ── Specs (global) ──────────────────────────────────────────
 
     def list_specs(
@@ -1933,7 +3837,9 @@ class DatabaseManager:
         with self.connection(target_environment) as connection:
             rows = connection.execute(
                 """
-                SELECT id, spec_type, custom_label, sort_order, created_at, updated_at
+                SELECT id, spec_type, custom_label, description,
+                       is_required, default_value, sort_order,
+                       created_at, updated_at
                 FROM specs
                 ORDER BY sort_order ASC, created_at ASC
                 """
@@ -1949,7 +3855,9 @@ class DatabaseManager:
         with self.connection(target_environment) as connection:
             row = connection.execute(
                 """
-                SELECT id, spec_type, custom_label, sort_order, created_at, updated_at
+                SELECT id, spec_type, custom_label, description,
+                       is_required, default_value, sort_order,
+                       created_at, updated_at
                 FROM specs
                 WHERE id = ?
                 """,
@@ -1961,6 +3869,10 @@ class DatabaseManager:
         self,
         spec_type: str,
         custom_label: str = "",
+        *,
+        description: str = "",
+        is_required: bool = False,
+        default_value: str = "",
         environment: DatabaseEnvironment | None = None,
     ) -> dict[str, object]:
         target_environment = environment or self._active_environment
@@ -1971,6 +3883,12 @@ class DatabaseManager:
             raise ValueError("自定义规格必须提供标签名称。")
         if spec_type != "custom":
             custom_label = ""
+        clean_description = " ".join(description.split())
+        if len(clean_description) > 500:
+            raise ValueError("规格说明不能超过 500 个字符。")
+        clean_default = " ".join(default_value.split())
+        if len(clean_default) > 500:
+            raise ValueError("默认值不能超过 500 个字符。")
         now = datetime.now(timezone.utc).isoformat()
         spec_id = str(uuid4())
         try:
@@ -1981,10 +3899,16 @@ class DatabaseManager:
                 next_sort = int(row["max_sort"]) + 1
                 connection.execute(
                     """
-                    INSERT INTO specs(id, spec_type, custom_label, sort_order, created_at, updated_at)
-                    VALUES(?, ?, ?, ?, ?, ?)
+                    INSERT INTO specs(
+                        id, spec_type, custom_label, description,
+                        is_required, default_value, sort_order, created_at, updated_at
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (spec_id, spec_type, custom_label, next_sort, now, now),
+                    (
+                        spec_id, spec_type, custom_label, clean_description,
+                        1 if is_required else 0, clean_default, next_sort, now, now,
+                    ),
                 )
                 # Create empty spec values for all existing variants
                 variant_rows = connection.execute(
@@ -2009,26 +3933,54 @@ class DatabaseManager:
     def update_spec(
         self,
         spec_id: str,
+        *,
         custom_label: str | None = None,
+        description: str | None = None,
+        is_required: bool | None = None,
+        default_value: str | None = None,
         environment: DatabaseEnvironment | None = None,
     ) -> dict[str, object]:
         target_environment = environment or self._active_environment
         spec = self.get_spec(spec_id, target_environment)
         if spec is None:
             raise ValueError("规格不存在。")
-        if spec["spec_type"] != "custom":
-            raise ValueError("只有自定义规格可以修改标签。")
+        sets: list[str] = []
+        params: list[object] = []
+        if custom_label is not None:
+            if spec["spec_type"] != "custom":
+                raise ValueError("只有自定义规格可以修改标签。")
+            clean_label = " ".join(custom_label.split())
+            if not clean_label:
+                raise ValueError("自定义规格标签不能为空。")
+            if len(clean_label) > 80:
+                raise ValueError("自定义规格标签不能超过 80 个字符。")
+            sets.append("custom_label = ?")
+            params.append(clean_label)
+        if description is not None:
+            clean_description = " ".join(description.split())
+            if len(clean_description) > 500:
+                raise ValueError("规格说明不能超过 500 个字符。")
+            sets.append("description = ?")
+            params.append(clean_description)
+        if is_required is not None:
+            sets.append("is_required = ?")
+            params.append(1 if is_required else 0)
+        if default_value is not None:
+            clean_default = " ".join(default_value.split())
+            if len(clean_default) > 500:
+                raise ValueError("默认值不能超过 500 个字符。")
+            sets.append("default_value = ?")
+            params.append(clean_default)
+        if not sets:
+            raise ValueError("至少需要提供一个更新字段。")
         now = datetime.now(timezone.utc).isoformat()
-        clean_label = " ".join((custom_label or "").split())
-        if not clean_label:
-            raise ValueError("自定义规格标签不能为空。")
-        if len(clean_label) > 80:
-            raise ValueError("自定义规格标签不能超过 80 个字符。")
+        sets.append("updated_at = ?")
+        params.extend([now, spec_id])
         try:
             with self._lock, self.connection(target_environment) as connection:
                 cursor = connection.execute(
-                    "UPDATE specs SET custom_label = ?, updated_at = ? WHERE id = ?",
-                    (clean_label, now, spec_id),
+                    f"UPDATE specs SET {', '.join(sets)} WHERE id = ?",
+                    params,
                 )
                 if cursor.rowcount == 0:
                     raise ValueError("规格不存在。")
@@ -2045,7 +3997,9 @@ class DatabaseManager:
         with self._lock, self.connection(target_environment) as connection:
             spec = connection.execute(
                 """
-                SELECT id, spec_type, custom_label, sort_order, created_at, updated_at
+                SELECT id, spec_type, custom_label, description,
+                       is_required, default_value, sort_order,
+                       created_at, updated_at
                 FROM specs
                 WHERE id = ?
                 """,
@@ -2055,6 +4009,136 @@ class DatabaseManager:
                 raise ValueError("规格不存在。")
             connection.execute("DELETE FROM specs WHERE id = ?", (spec_id,))
         return dict(spec)
+
+    def get_character_spec_matrix(
+        self,
+        character_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        """Return the variant × spec matrix of a character.
+
+        Returns:
+        {
+            "character": {...},
+            "specs": [{id, spec_type, custom_label, is_required, default_value, sort_order}],
+            "variants": [{id, name, is_default, sort_order}],
+            "values": {variant_id: {spec_id: {id, prompt, lora_name, lora_weight, model_override, notes}}},
+            "missing_required": [{variant_id, variant_name, spec_id, spec_label}]
+        }
+        """
+        target_environment = environment or self._active_environment
+        with self.connection(target_environment) as connection:
+            character = connection.execute(
+                """
+                SELECT id, name FROM characters WHERE id = ?
+                """,
+                (character_id,),
+            ).fetchone()
+            if character is None:
+                raise ValueError("人物不存在。")
+            spec_rows = connection.execute(
+                """
+                SELECT id, spec_type, custom_label, description,
+                       is_required, default_value, sort_order
+                FROM specs
+                ORDER BY sort_order ASC, created_at ASC
+                """
+            ).fetchall()
+            variant_rows = connection.execute(
+                """
+                SELECT id, name, is_default, sort_order
+                FROM character_variants
+                WHERE character_id = ? AND archived_at IS NULL
+                ORDER BY sort_order ASC
+                """,
+                (character_id,),
+            ).fetchall()
+            csv_rows = connection.execute(
+                """
+                SELECT csv.id, csv.variant_id, csv.spec_id,
+                       csv.prompt, csv.lora_name, csv.lora_weight,
+                       csv.model_override, csv.notes,
+                       csv.preview_original_path, csv.preview_thumbnail_path
+                FROM character_spec_values csv
+                JOIN character_variants cv ON cv.id = csv.variant_id
+                WHERE cv.character_id = ? AND cv.archived_at IS NULL
+                """,
+                (character_id,),
+            ).fetchall()
+        values: dict[str, dict[str, dict[str, object]]] = {
+            vr["id"]: {} for vr in variant_rows
+        }
+        for csv in csv_rows:
+            values.setdefault(csv["variant_id"], {})[csv["spec_id"]] = {
+                "id": csv["id"],
+                "prompt": csv["prompt"],
+                "lora_name": csv["lora_name"],
+                "lora_weight": csv["lora_weight"],
+                "model_override": csv["model_override"],
+                "notes": csv["notes"],
+                "preview_original_path": csv["preview_original_path"],
+                "preview_thumbnail_path": csv["preview_thumbnail_path"],
+            }
+        missing_required: list[dict[str, object]] = []
+        required_specs = [s for s in spec_rows if s["is_required"]]
+        for vr in variant_rows:
+            for sp in required_specs:
+                v = values.get(vr["id"], {}).get(sp["id"])
+                if v is None or (not v.get("prompt") and not v.get("lora_name")):
+                    missing_required.append({
+                        "variant_id": vr["id"],
+                        "variant_name": vr["name"],
+                        "spec_id": sp["id"],
+                        "spec_label": sp["custom_label"] or sp["spec_type"],
+                    })
+        return {
+            "character": dict(character),
+            "specs": [dict(s) for s in spec_rows],
+            "variants": [dict(v) for v in variant_rows],
+            "values": values,
+            "missing_required": missing_required,
+        }
+
+    def batch_update_spec_values(
+        self,
+        updates: list[dict[str, object]],
+        environment: DatabaseEnvironment | None = None,
+    ) -> int:
+        """Batch update spec values. Each update must contain spec_value_id and fields to update.
+
+        Returns count of updated rows.
+        """
+        target_environment = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        count = 0
+        with self._lock, self.connection(target_environment) as connection:
+            for update in updates:
+                spec_value_id = update.get("spec_value_id")
+                if not spec_value_id:
+                    continue
+                sets: list[str] = []
+                params: list[object] = []
+                for field in ("prompt", "lora_name", "model_override", "notes"):
+                    if field in update:
+                        sets.append(f"{field} = ?")
+                        params.append(update[field])
+                if "lora_weight" in update:
+                    lw = update["lora_weight"]
+                    if lw is not None and (lw < 0 or lw > 2):
+                        raise ValueError("LoRA 权重必须在 0 到 2 之间。")
+                    sets.append("lora_weight = ?")
+                    params.append(lw)
+                if not sets:
+                    continue
+                sets.append("updated_at = ?")
+                params.extend([now, spec_value_id])
+                cursor = connection.execute(
+                    f"UPDATE character_spec_values SET {', '.join(sets)} WHERE id = ?",
+                    params,
+                )
+                if cursor.rowcount:
+                    count += 1
+        return count
 
     # ── Character Spec Values ───────────────────────────────────
 
@@ -2069,6 +4153,7 @@ class DatabaseManager:
                 """
                 SELECT id, variant_id, spec_id,
                        prompt, lora_name, lora_weight, model_override, notes,
+                       preview_original_path, preview_thumbnail_path,
                        created_at, updated_at
                 FROM character_spec_values
                 WHERE id = ?
@@ -2076,6 +4161,28 @@ class DatabaseManager:
                 (spec_value_id,),
             ).fetchone()
         return dict(row) if row else None
+
+    def set_character_spec_value_preview_paths(
+        self,
+        spec_value_id: str,
+        preview_original_path: str | None,
+        preview_thumbnail_path: str | None,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        target_environment = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self.connection(target_environment) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE character_spec_values
+                SET preview_original_path = ?, preview_thumbnail_path = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (preview_original_path, preview_thumbnail_path, now, spec_value_id),
+            )
+            if cursor.rowcount == 0:
+                return None
+        return self.get_character_spec_value(spec_value_id, target_environment)
 
     def update_character_spec_value(
         self,
@@ -2129,6 +4236,111 @@ class DatabaseManager:
         if result is None:
             raise ValueError("规格值不存在。")
         return result
+
+    # ── Shot Page Character References ──────────────────────────
+
+    def get_shot_page_character(
+        self,
+        shot_page_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        """Return the character/variant bound to a shot page, or None."""
+        target_environment = environment or self._active_environment
+        with self.connection(target_environment) as connection:
+            row = connection.execute(
+                """
+                SELECT spc.shot_page_id, spc.character_id, spc.variant_id,
+                       c.name AS character_name,
+                       cv.name AS variant_name,
+                       cv.default_prompt, cv.default_lora_name,
+                       cv.default_lora_weight, cv.default_model_override
+                FROM shot_page_characters spc
+                JOIN characters c ON c.id = spc.character_id
+                JOIN character_variants cv ON cv.id = spc.variant_id
+                WHERE spc.shot_page_id = ?
+                """,
+                (shot_page_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def set_shot_page_character(
+        self,
+        shot_page_id: str,
+        character_id: str,
+        variant_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        """Bind a character variant to a shot page (upsert)."""
+        target_environment = environment or self._active_environment
+        # Validate variant belongs to character
+        variant = self.get_character_variant(variant_id, target_environment)
+        if variant is None:
+            raise ValueError("形象变体不存在。")
+        if variant["character_id"] != character_id:
+            raise ValueError("形象变体不属于该人物。")
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self.connection(target_environment) as connection:
+            page = connection.execute(
+                "SELECT id FROM shot_pages WHERE id = ?", (shot_page_id,)
+            ).fetchone()
+            if page is None:
+                raise ValueError("场景页不存在。")
+            connection.execute(
+                """
+                INSERT INTO shot_page_characters(
+                    shot_page_id, character_id, variant_id, created_at, updated_at
+                )
+                VALUES(?, ?, ?, ?, ?)
+                ON CONFLICT(shot_page_id) DO UPDATE SET
+                    character_id = excluded.character_id,
+                    variant_id = excluded.variant_id,
+                    updated_at = excluded.updated_at
+                """,
+                (shot_page_id, character_id, variant_id, now, now),
+            )
+        result = self.get_shot_page_character(shot_page_id, target_environment)
+        if result is None:
+            raise ValueError("场景页人物绑定失败。")
+        return result
+
+    def clear_shot_page_character(
+        self,
+        shot_page_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> bool:
+        """Remove the character binding from a shot page. Returns True if a row was deleted."""
+        target_environment = environment or self._active_environment
+        with self._lock, self.connection(target_environment) as connection:
+            cursor = connection.execute(
+                "DELETE FROM shot_page_characters WHERE shot_page_id = ?",
+                (shot_page_id,),
+            )
+            return cursor.rowcount > 0
+
+    def list_shot_pages_by_variant(
+        self,
+        variant_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> list[dict[str, object]]:
+        target_environment = environment or self._active_environment
+        with self.connection(target_environment) as connection:
+            rows = connection.execute(
+                """
+                SELECT sp.id AS shot_page_id, sp.title AS shot_page_title,
+                       ss.id AS small_scene_id, ss.name AS small_scene_name,
+                       ls.id AS large_scene_id, ls.name AS large_scene_name,
+                       c.id AS chapter_id, c.name AS chapter_name
+                FROM shot_page_characters spc
+                JOIN shot_pages sp ON sp.id = spc.shot_page_id
+                JOIN small_scenes ss ON ss.id = sp.small_scene_id
+                JOIN large_scenes ls ON ls.id = ss.large_scene_id
+                JOIN chapters c ON c.id = ls.chapter_id
+                WHERE spc.variant_id = ?
+                ORDER BY c.sort_order ASC, ls.sort_order ASC, ss.sort_order ASC, sp.sort_order ASC
+                """,
+                (variant_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def list_spec_values_for_variant(
         self,
@@ -2293,6 +4505,8 @@ class DatabaseManager:
         material_type: str = "",
         validation_status: str = "",
         tag: str = "",
+        include_archived: bool = False,
+        include_deleted: bool = False,
         limit: int = 60,
         offset: int = 0,
         sort: str = "updated_desc",
@@ -2317,6 +4531,10 @@ class DatabaseManager:
 
         where_parts: list[str] = []
         params: list[object] = []
+        if not include_archived:
+            where_parts.append("m.archived_at IS NULL")
+        if not include_deleted:
+            where_parts.append("m.deleted_at IS NULL")
         if query:
             q = query.strip()
             if q:
@@ -2365,6 +4583,7 @@ class DatabaseManager:
                 f"""
                 SELECT m.id, m.name, m.material_type, m.description,
                        m.validation_status, m.preview_thumbnail_path,
+                       m.archived_at, m.deleted_at, m.source_material_id,
                        m.created_at, m.updated_at
                 FROM materials m
                 {where_sql}
@@ -2405,9 +4624,10 @@ class DatabaseManager:
                 SELECT id, name, material_type, description, content,
                        prompt_text, negative_prompt, validation_status, notes,
                        preview_original_path, preview_thumbnail_path,
+                       archived_at, deleted_at, source_material_id,
                        created_at, updated_at
                 FROM materials
-                WHERE id = ?
+                WHERE id = ? AND deleted_at IS NULL
                 """,
                 (material_id,),
             ).fetchone()
@@ -2590,6 +4810,7 @@ class DatabaseManager:
                 raise ValueError("该类型下已存在同名素材。") from error
             if tag_list is not None:
                 self._sync_material_tags(connection, material_id, tag_list, now)
+        self.create_material_version(material_id, environment=target_environment)
         return self.get_material(material_id, target_environment)
 
     def delete_material(
@@ -2679,6 +4900,38 @@ class DatabaseManager:
                 (original_path, thumbnail_path, now, material_id),
             )
         return self.get_material(material_id, target_environment)
+
+    def set_project_cover_path(
+        self,
+        project_id: str,
+        *,
+        cover_path: str | None,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        """Set or clear a project's cover_path.
+
+        Passing cover_path=None clears the cover. Updates updated_at and
+        increments revision. Returns the updated project dict, or None if
+        the project does not exist.
+        """
+        target_environment = environment or self._active_environment
+        with self._lock, self.connection(target_environment) as connection:
+            row = connection.execute(
+                "SELECT id FROM projects WHERE id = ?",
+                (project_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            now = datetime.now(timezone.utc).isoformat()
+            connection.execute(
+                """
+                UPDATE projects
+                SET cover_path = ?, updated_at = ?, revision = revision + 1
+                WHERE id = ?
+                """,
+                (cover_path, now, project_id),
+            )
+        return self.get_project(project_id, target_environment)
 
     # ── Small Scenes ───────────────────────────────────────────────────
 
@@ -3317,6 +5570,7 @@ class DatabaseManager:
                 """
                 SELECT b.id, b.parent_type, b.parent_id, b.name,
                        b.description, b.is_enabled, b.sort_order,
+                       b.condition_type, b.condition_value, b.return_point,
                        b.created_at, b.updated_at,
                        (SELECT COUNT(*) FROM shot_pages sp
                         WHERE sp.branch_id = b.id) AS shot_page_count
@@ -3339,6 +5593,7 @@ class DatabaseManager:
                 """
                 SELECT id, parent_type, parent_id, name,
                        description, is_enabled, sort_order,
+                       condition_type, condition_value, return_point,
                        created_at, updated_at
                 FROM branches WHERE id = ?
                 """,
@@ -3362,6 +5617,9 @@ class DatabaseManager:
         *,
         description: str = "",
         is_enabled: bool = True,
+        condition_type: str = "",
+        condition_value: str = "",
+        return_point: str | None = None,
         environment: DatabaseEnvironment | None = None,
     ) -> dict[str, object]:
         if parent_type not in ("large_scene", "small_scene"):
@@ -3399,12 +5657,16 @@ class DatabaseManager:
             connection.execute(
                 """
                 INSERT INTO branches (id, parent_type, parent_id, name,
-                    description, is_enabled, sort_order, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    description, is_enabled, sort_order,
+                    condition_type, condition_value, return_point,
+                    created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (branch_id, parent_type, parent_id, name,
                  description, 1 if is_enabled else 0,
-                 max_order + 1, now, now),
+                 max_order + 1,
+                 condition_type, condition_value, return_point,
+                 now, now),
             )
         return self.get_branch(branch_id, environment=target_environment)  # type: ignore[return-value]
 
@@ -3415,9 +5677,13 @@ class DatabaseManager:
         name: str | None = None,
         description: str | None = None,
         is_enabled: bool | None = None,
+        condition_type: str | None = None,
+        condition_value: str | None = None,
+        return_point: str | None = None,
         environment: DatabaseEnvironment | None = None,
     ) -> dict[str, object] | None:
-        if all(v is None for v in (name, description, is_enabled)):
+        if all(v is None for v in (name, description, is_enabled,
+                                   condition_type, condition_value, return_point)):
             raise ValueError("至少提供一个更新字段")
         target_environment = environment or self._active_environment
         now = datetime.now(timezone.utc).isoformat()
@@ -3451,6 +5717,15 @@ class DatabaseManager:
             if is_enabled is not None:
                 sets.append("is_enabled = ?")
                 params.append(1 if is_enabled else 0)
+            if condition_type is not None:
+                sets.append("condition_type = ?")
+                params.append(condition_type)
+            if condition_value is not None:
+                sets.append("condition_value = ?")
+                params.append(condition_value)
+            if return_point is not None:
+                sets.append("return_point = ?")
+                params.append(return_point)
             sets.append("updated_at = ?")
             params.append(now)
             params.append(branch_id)
@@ -3675,7 +5950,7 @@ class DatabaseManager:
             "initialized_at": initialized["value"] if initialized else None,
             "journal_mode": str(journal_mode).upper(),
             "event_count": self.event_count(environment),
-            "project_count": len(self.list_projects(environment)),
+            "project_count": self.list_projects(environment=environment)["total"],
         }
 
     def verify_isolation(self) -> dict[str, object]:
@@ -3769,6 +6044,8 @@ class DatabaseManager:
             shot_pages: list[dict[str, object]] = []
             scene_resources: list[dict[str, object]] = []
             material_page_rows: list[dict[str, object]] = []
+            branches_rows: list[sqlite3.Row] = []
+            branch_pages_map: dict[str, list[dict[str, object]]] = {}
 
             if chapter_ids:
                 placeholders = ",".join("?" * len(chapter_ids))
@@ -3807,6 +6084,33 @@ class DatabaseManager:
                             p["name"] = p.pop("title")
                             shot_pages.append(p)
 
+                        # Fetch branches under these small_scenes (v0.5.4 story-tree enhancement)
+                        branches_rows = connection.execute(
+                            f"""SELECT id, parent_type, parent_id, name,
+                                       condition_type, condition_value, is_enabled,
+                                       sort_order, created_at, updated_at
+                                FROM branches
+                                WHERE parent_type = 'small_scene'
+                                  AND parent_id IN ({placeholders_ss})
+                                ORDER BY sort_order ASC""",
+                            small_scene_ids,
+                        ).fetchall()
+                        all_branch_ids = [b["id"] for b in branches_rows]
+                        if all_branch_ids:
+                            placeholders_b = ",".join("?" * len(all_branch_ids))
+                            bp_rows = connection.execute(
+                                f"""SELECT id, small_scene_id, branch_id, title, description, prompt_text, negative_prompt,
+                                           sort_order, created_at, updated_at
+                                    FROM shot_pages
+                                    WHERE branch_id IN ({placeholders_b})
+                                    ORDER BY sort_order ASC""",
+                                    all_branch_ids,
+                            ).fetchall()
+                            for r in bp_rows:
+                                p = dict(r)
+                                p["name"] = p.pop("title")
+                                branch_pages_map.setdefault(p["branch_id"], []).append(p)
+
                         # Batch query resources (small_scene_materials + materials)
                         resources_rows = connection.execute(
                             f"""SELECT ssm.id AS link_id, ssm.small_scene_id, ssm.material_id, ssm.sort_order,
@@ -3839,6 +6143,14 @@ class DatabaseManager:
             for p in shot_pages:
                 pages_by_scene.setdefault(p["small_scene_id"], []).append(p)
 
+            # Group branches by parent small_scene (v0.5.4 story-tree enhancement)
+            branches_by_scene: dict[str, list[dict[str, object]]] = {}
+            for b in branches_rows:
+                b_dict = dict(b)
+                b_dict["is_enabled"] = bool(b_dict["is_enabled"])
+                b_dict["pages"] = branch_pages_map.get(b_dict["id"], [])
+                branches_by_scene.setdefault(b_dict["parent_id"], []).append(b_dict)
+
             # Group material_pages by material_id
             mp_by_material: dict[str, list[dict[str, object]]] = {}
             for mp in material_page_rows:
@@ -3856,8 +6168,10 @@ class DatabaseManager:
             for s in small_scenes:
                 s_pages = pages_by_scene.get(s["id"], [])
                 s_resources = resources_by_scene.get(s["id"], [])
+                s_branches = branches_by_scene.get(s["id"], [])
                 s["pages"] = s_pages
                 s["resources"] = s_resources
+                s["branches"] = s_branches
                 s["page_count"] = len(s_pages)
                 s["resource_count"] = len(s_resources)
                 scenes_by_large.setdefault(s["large_scene_id"], []).append(s)
@@ -4003,6 +6317,7 @@ class DatabaseManager:
         with self.connection(target_environment) as connection:
             rows = connection.execute(
                 """SELECT id, material_id, name, description, content, prompt_text, negative_prompt,
+                          preview_original_path, preview_thumbnail_path, source_page_id,
                           sort_order, created_at, updated_at
                    FROM material_pages
                    WHERE material_id = ?
@@ -4020,6 +6335,7 @@ class DatabaseManager:
         with self.connection(target_environment) as connection:
             row = connection.execute(
                 """SELECT id, material_id, name, description, content, prompt_text, negative_prompt,
+                          preview_original_path, preview_thumbnail_path, source_page_id,
                           sort_order, created_at, updated_at
                    FROM material_pages WHERE id = ?""",
                 (material_page_id,),
@@ -4399,4 +6715,1850 @@ class DatabaseManager:
                 (scene_page_id, material_type),
             )
         return dict(existing)
+
+    # ── Material Lifecycle (v0.5.2) ───────────────────────────────────
+
+    _MATERIAL_SELECT_COLUMNS = (
+        "id, name, material_type, description, content, "
+        "prompt_text, negative_prompt, validation_status, notes, "
+        "preview_original_path, preview_thumbnail_path, "
+        "archived_at, deleted_at, source_material_id, "
+        "revision, created_at, updated_at"
+    )
+
+    def archive_material(
+        self,
+        material_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        """Archive a material: set archived_at.
+
+        Returns the updated material dict, or None if the material does not exist.
+        """
+        target_environment = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self.connection(target_environment) as connection:
+            existing = connection.execute(
+                "SELECT id FROM materials WHERE id = ? AND deleted_at IS NULL",
+                (material_id,),
+            ).fetchone()
+            if existing is None:
+                return None
+            connection.execute(
+                "UPDATE materials SET archived_at = ?, updated_at = ? WHERE id = ?",
+                (now, now, material_id),
+            )
+            row = connection.execute(
+                f"SELECT {self._MATERIAL_SELECT_COLUMNS} FROM materials WHERE id = ?",
+                (material_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def restore_material(
+        self,
+        material_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        """Restore an archived or soft-deleted material.
+
+        Clears both archived_at and deleted_at.
+        Returns the updated material dict, or None if the material does not exist.
+        """
+        target_environment = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self.connection(target_environment) as connection:
+            existing = connection.execute(
+                "SELECT id FROM materials WHERE id = ?",
+                (material_id,),
+            ).fetchone()
+            if existing is None:
+                return None
+            connection.execute(
+                "UPDATE materials SET archived_at = NULL, deleted_at = NULL, updated_at = ? WHERE id = ?",
+                (now, material_id),
+            )
+            row = connection.execute(
+                f"SELECT {self._MATERIAL_SELECT_COLUMNS} FROM materials WHERE id = ?",
+                (material_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def soft_delete_material(
+        self,
+        material_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        """Soft-delete a material: set deleted_at to current UTC time.
+
+        Does not actually remove data. Returns the updated material dict,
+        or None if the material does not exist.
+        """
+        target_environment = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self.connection(target_environment) as connection:
+            existing = connection.execute(
+                "SELECT id FROM materials WHERE id = ? AND deleted_at IS NULL",
+                (material_id,),
+            ).fetchone()
+            if existing is None:
+                return None
+            connection.execute(
+                "UPDATE materials SET deleted_at = ?, updated_at = ? WHERE id = ?",
+                (now, now, material_id),
+            )
+            row = connection.execute(
+                f"SELECT {self._MATERIAL_SELECT_COLUMNS} FROM materials WHERE id = ?",
+                (material_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_deleted_materials(
+        self,
+        environment: DatabaseEnvironment | None = None,
+    ) -> list[dict[str, object]]:
+        """List all soft-deleted materials (deleted_at IS NOT NULL)."""
+        target_environment = environment or self._active_environment
+        with self.connection(target_environment) as connection:
+            rows = connection.execute(
+                f"""
+                SELECT {self._MATERIAL_SELECT_COLUMNS}
+                FROM materials
+                WHERE deleted_at IS NOT NULL
+                ORDER BY deleted_at DESC
+                """,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def permanent_delete_material(
+        self,
+        material_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        """Permanently delete a material and all its dependencies.
+
+        Explicitly deletes: small_scene_page_mappings (via material_page_id),
+        material_pages, material_versions, small_scene_materials,
+        shot_page_materials, material_tag_links, and the material itself.
+        Returns a dict with deleted info and preview paths, or None if not found.
+        """
+        target_environment = environment or self._active_environment
+        with self._lock, self.connection(target_environment) as connection:
+            row = connection.execute(
+                "SELECT id, preview_original_path, preview_thumbnail_path FROM materials WHERE id = ?",
+                (material_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            # Collect material_page ids for mapping cleanup
+            page_ids = [r["id"] for r in connection.execute(
+                "SELECT id FROM material_pages WHERE material_id = ?",
+                (material_id,),
+            ).fetchall()]
+            if page_ids:
+                placeholders = ",".join("?" * len(page_ids))
+                connection.execute(
+                    f"DELETE FROM small_scene_page_mappings WHERE material_page_id IN ({placeholders})",
+                    page_ids,
+                )
+            connection.execute(
+                "DELETE FROM material_pages WHERE material_id = ?",
+                (material_id,),
+            )
+            connection.execute(
+                "DELETE FROM material_versions WHERE material_id = ?",
+                (material_id,),
+            )
+            connection.execute(
+                "DELETE FROM small_scene_materials WHERE material_id = ?",
+                (material_id,),
+            )
+            connection.execute(
+                "DELETE FROM shot_page_materials WHERE material_id = ?",
+                (material_id,),
+            )
+            connection.execute(
+                "DELETE FROM material_tag_links WHERE material_id = ?",
+                (material_id,),
+            )
+            connection.execute(
+                "DELETE FROM materials WHERE id = ?",
+                (material_id,),
+            )
+        return {
+            "deleted": True,
+            "material_id": material_id,
+            "preview_original_path": row["preview_original_path"],
+            "preview_thumbnail_path": row["preview_thumbnail_path"],
+        }
+
+    def get_material_references(
+        self,
+        material_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        """Return all references to a material from projects, small scenes, and scene pages.
+
+        Returns None if the material does not exist.
+        """
+        target_environment = environment or self._active_environment
+        with self.connection(target_environment) as connection:
+            existing = connection.execute(
+                "SELECT id FROM materials WHERE id = ?",
+                (material_id,),
+            ).fetchone()
+            if existing is None:
+                return None
+            small_scenes = [dict(r) for r in connection.execute(
+                """
+                SELECT DISTINCT ss.id, ss.name,
+                       ls.id AS large_scene_id, ls.name AS large_scene_name,
+                       c.id AS chapter_id, c.name AS chapter_name,
+                       p.id AS project_id, p.name AS project_name
+                FROM small_scene_materials ssm
+                JOIN small_scenes ss ON ss.id = ssm.small_scene_id
+                JOIN large_scenes ls ON ls.id = ss.large_scene_id
+                JOIN chapters c ON c.id = ls.chapter_id
+                JOIN projects p ON p.id = c.project_id
+                WHERE ssm.material_id = ?
+                ORDER BY p.name, ss.name
+                """,
+                (material_id,),
+            ).fetchall()]
+            scene_pages = [dict(r) for r in connection.execute(
+                """
+                SELECT DISTINCT sp.id, sp.title AS name,
+                       ss.id AS small_scene_id, ss.name AS small_scene_name,
+                       sspm.material_type
+                FROM small_scene_page_mappings sspm
+                JOIN material_pages mp ON mp.id = sspm.material_page_id
+                JOIN shot_pages sp ON sp.id = sspm.scene_page_id
+                JOIN small_scenes ss ON ss.id = sp.small_scene_id
+                WHERE mp.material_id = ?
+                ORDER BY ss.name, sp.title
+                """,
+                (material_id,),
+            ).fetchall()]
+        # Deduplicate projects
+        seen_projects: set[str] = set()
+        projects: list[dict[str, object]] = []
+        for ss in small_scenes:
+            pid = ss["project_id"]
+            if pid not in seen_projects:
+                seen_projects.add(pid)
+                projects.append({"id": pid, "name": ss["project_name"]})
+        total_count = len(small_scenes) + len(scene_pages)
+        return {
+            "small_scenes": small_scenes,
+            "scene_pages": scene_pages,
+            "projects": projects,
+            "total_count": total_count,
+        }
+
+    # ── Material Page Preview (v0.5.2) ─────────────────────────────────
+
+    def set_material_page_preview_paths(
+        self,
+        material_page_id: str,
+        *,
+        original_path: str | None,
+        thumbnail_path: str | None,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        """Set preview paths for a material page. Returns the updated page, or None."""
+        target_environment = environment or self._active_environment
+        with self._lock, self.connection(target_environment) as connection:
+            row = connection.execute(
+                "SELECT id FROM material_pages WHERE id = ?",
+                (material_page_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            now = datetime.now(timezone.utc).isoformat()
+            connection.execute(
+                """
+                UPDATE material_pages
+                SET preview_original_path = ?, preview_thumbnail_path = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (original_path, thumbnail_path, now, material_page_id),
+            )
+        return self.get_material_page(material_page_id, environment=target_environment)
+
+    def copy_material_page(
+        self,
+        material_page_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        """Copy a material page. Returns the new page, or None if source not found.
+
+        Name gets " 副本" suffix; if that exists, a sequence number is appended.
+        sort_order is set to max+1. source_page_id is set to the source page id.
+        """
+        target_environment = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        new_page_id = str(uuid4())
+        with self._lock, self.connection(target_environment) as connection:
+            source = connection.execute(
+                """SELECT id, material_id, name, description, content, prompt_text,
+                          negative_prompt, sort_order
+                   FROM material_pages WHERE id = ?""",
+                (material_page_id,),
+            ).fetchone()
+            if source is None:
+                return None
+            material_id = source["material_id"]
+            base_name = source["name"]
+            candidate = f"{base_name} 副本"
+            suffix = 2
+            while connection.execute(
+                "SELECT id FROM material_pages WHERE material_id = ? AND name = ? COLLATE NOCASE",
+                (material_id, candidate),
+            ).fetchone():
+                candidate = f"{base_name} 副本 {suffix}"
+                suffix += 1
+            max_order = connection.execute(
+                "SELECT COALESCE(MAX(sort_order), 0) FROM material_pages WHERE material_id = ?",
+                (material_id,),
+            ).fetchone()[0]
+            connection.execute(
+                """INSERT INTO material_pages
+                   (id, material_id, name, description, content, prompt_text,
+                    negative_prompt, preview_original_path, preview_thumbnail_path,
+                    source_page_id, sort_order, revision, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, 1, ?, ?)""",
+                (new_page_id, material_id, candidate, source["description"],
+                 source["content"], source["prompt_text"], source["negative_prompt"],
+                 source["id"], max_order + 1, now, now),
+            )
+        return self.get_material_page(new_page_id, environment=target_environment)
+
+    # ── Material Versions (v0.5.2) ─────────────────────────────────────
+
+    def create_material_version(
+        self,
+        material_id: str,
+        *,
+        label: str | None = None,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        """Create a version snapshot of the material and its pages.
+
+        snapshot is a JSON string containing all material fields and pages list.
+        version_number auto-increments. Returns the version record, or None if not found.
+        """
+        target_environment = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        version_id = str(uuid4())
+        with self._lock, self.connection(target_environment) as connection:
+            existing = connection.execute(
+                "SELECT id FROM materials WHERE id = ?",
+                (material_id,),
+            ).fetchone()
+            if existing is None:
+                return None
+            material_row = connection.execute(
+                f"SELECT {self._MATERIAL_SELECT_COLUMNS} FROM materials WHERE id = ?",
+                (material_id,),
+            ).fetchone()
+            if material_row is None:
+                return None
+            material_data = dict(material_row)
+            pages = [dict(r) for r in connection.execute(
+                """SELECT id, name, description, content, prompt_text, negative_prompt,
+                          preview_original_path, preview_thumbnail_path, source_page_id,
+                          sort_order, created_at, updated_at
+                   FROM material_pages WHERE material_id = ?
+                   ORDER BY sort_order ASC""",
+                (material_id,),
+            ).fetchall()]
+            snapshot = json.dumps(
+                {"material": material_data, "pages": pages},
+                ensure_ascii=False,
+            )
+            max_version = connection.execute(
+                "SELECT COALESCE(MAX(version_number), 0) FROM material_versions WHERE material_id = ?",
+                (material_id,),
+            ).fetchone()[0]
+            version_number = max_version + 1
+            connection.execute(
+                """INSERT INTO material_versions (id, material_id, version_number, snapshot, label, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (version_id, material_id, version_number, snapshot, label, now),
+            )
+        return {
+            "id": version_id,
+            "material_id": material_id,
+            "version_number": version_number,
+            "label": label,
+            "created_at": now,
+        }
+
+    def list_material_versions(
+        self,
+        material_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> list[dict[str, object]]:
+        """List all versions of a material (without snapshot)."""
+        target_environment = environment or self._active_environment
+        with self.connection(target_environment) as connection:
+            rows = connection.execute(
+                """SELECT id, material_id, version_number, label, created_at
+                   FROM material_versions
+                   WHERE material_id = ?
+                   ORDER BY version_number DESC""",
+                (material_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_material_version(
+        self,
+        material_id: str,
+        version_number: int,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        """Get a specific version with full snapshot. Returns None if not found."""
+        target_environment = environment or self._active_environment
+        with self.connection(target_environment) as connection:
+            row = connection.execute(
+                """SELECT id, material_id, version_number, snapshot, label, created_at
+                   FROM material_versions
+                   WHERE material_id = ? AND version_number = ?""",
+                (material_id, version_number),
+            ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["snapshot"] = json.loads(row["snapshot"])
+        return result
+
+    def restore_material_version(
+        self,
+        material_id: str,
+        version_number: int,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        """Restore a material from a version snapshot.
+
+        Updates material fields, deletes all current pages, and rebuilds pages from snapshot.
+        Returns the restored material, or None if material or version not found.
+        """
+        target_environment = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self.connection(target_environment) as connection:
+            existing = connection.execute(
+                "SELECT id FROM materials WHERE id = ?",
+                (material_id,),
+            ).fetchone()
+            if existing is None:
+                return None
+            version_row = connection.execute(
+                "SELECT snapshot FROM material_versions WHERE material_id = ? AND version_number = ?",
+                (material_id, version_number),
+            ).fetchone()
+            if version_row is None:
+                return None
+            snapshot = json.loads(version_row["snapshot"])
+            mat = snapshot["material"]
+            connection.execute(
+                """UPDATE materials
+                   SET name = ?, material_type = ?, description = ?, content = ?,
+                       prompt_text = ?, negative_prompt = ?, validation_status = ?,
+                       notes = ?, updated_at = ?
+                   WHERE id = ?""",
+                (mat["name"], mat["material_type"], mat["description"],
+                 mat["content"], mat["prompt_text"], mat["negative_prompt"],
+                 mat["validation_status"], mat["notes"], now, material_id),
+            )
+            # Delete all current pages
+            connection.execute(
+                "DELETE FROM material_pages WHERE material_id = ?",
+                (material_id,),
+            )
+            # Rebuild pages from snapshot
+            for page in snapshot.get("pages", []):
+                new_page_id = str(uuid4())
+                connection.execute(
+                    """INSERT INTO material_pages
+                       (id, material_id, name, description, content, prompt_text,
+                        negative_prompt, preview_original_path, preview_thumbnail_path,
+                        source_page_id, sort_order, revision, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)""",
+                    (new_page_id, material_id, page["name"], page["description"],
+                     page["content"], page["prompt_text"], page["negative_prompt"],
+                     page.get("preview_original_path"), page.get("preview_thumbnail_path"),
+                     page.get("source_page_id"), page["sort_order"], now, now),
+                )
+        return self.get_material(material_id, environment=target_environment)
+
+    # ── Material Copy (v0.5.2) ─────────────────────────────────────────
+
+    def copy_material(
+        self,
+        material_id: str,
+        *,
+        new_name: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        """Copy a material and its pages. Returns the new material.
+
+        The new material has: name=new_name, source_material_id=source_id,
+        status='unverified', no preview images. Pages are copied with
+        source_page_id set to the source page id.
+        """
+        target_environment = environment or self._active_environment
+        clean_name = self._normalize_material_name(new_name)
+        now = datetime.now(timezone.utc).isoformat()
+        new_material_id = str(uuid4())
+        with self._lock, self.connection(target_environment) as connection:
+            source = connection.execute(
+                f"SELECT {self._MATERIAL_SELECT_COLUMNS} FROM materials WHERE id = ?",
+                (material_id,),
+            ).fetchone()
+            if source is None:
+                raise ValueError("素材不存在。")
+            connection.execute(
+                """INSERT INTO materials(
+                    id, name, material_type, description, content,
+                    prompt_text, negative_prompt, validation_status, notes,
+                    preview_original_path, preview_thumbnail_path,
+                    archived_at, deleted_at, source_material_id,
+                    revision, created_at, updated_at
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, 'unverified', ?, NULL, NULL, NULL, NULL, ?, 1, ?, ?)""",
+                (new_material_id, clean_name, source["material_type"],
+                 source["description"], source["content"],
+                 source["prompt_text"], source["negative_prompt"],
+                 source["notes"], material_id, now, now),
+            )
+            # Copy tags
+            tags = self._get_material_tags(connection, material_id)
+            if tags:
+                self._sync_material_tags(connection, new_material_id, tags, now)
+            # Copy pages
+            pages = connection.execute(
+                """SELECT id, name, description, content, prompt_text, negative_prompt,
+                          sort_order
+                   FROM material_pages WHERE material_id = ?
+                   ORDER BY sort_order ASC""",
+                (material_id,),
+            ).fetchall()
+            for page in pages:
+                new_page_id = str(uuid4())
+                connection.execute(
+                    """INSERT INTO material_pages
+                       (id, material_id, name, description, content, prompt_text,
+                        negative_prompt, preview_original_path, preview_thumbnail_path,
+                        source_page_id, sort_order, revision, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, 1, ?, ?)""",
+                    (new_page_id, new_material_id, page["name"], page["description"],
+                     page["content"], page["prompt_text"], page["negative_prompt"],
+                     page["id"], page["sort_order"], now, now),
+                )
+        return self.get_material(new_material_id, environment=target_environment)
+
+    # ── Branch Overrides (v0.5.4) ──────────────────────────────────────
+
+    _BRANCH_OVERRIDE_SELECT_COLUMNS = (
+        "id, branch_id, override_type, target_id, character_id, variant_id, "
+        "material_id, material_page_id, param_key, param_value, created_at, updated_at"
+    )
+
+    def list_branch_overrides(
+        self,
+        branch_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> list[dict[str, object]]:
+        target_environment = environment or self._active_environment
+        with self.connection(target_environment) as connection:
+            rows = connection.execute(
+                f"""SELECT {self._BRANCH_OVERRIDE_SELECT_COLUMNS}
+                    FROM branch_overrides
+                    WHERE branch_id = ?
+                    ORDER BY override_type ASC, created_at ASC""",
+                (branch_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def create_branch_override(
+        self,
+        branch_id: str,
+        override_type: str,
+        *,
+        target_id: str | None = None,
+        character_id: str | None = None,
+        variant_id: str | None = None,
+        material_id: str | None = None,
+        material_page_id: str | None = None,
+        param_key: str | None = None,
+        param_value: str | None = None,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        if override_type not in ("character", "material", "parameter"):
+            raise ValueError("override_type 必须为 character/material/parameter")
+        target_environment = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        override_id = str(uuid4())
+        with self._lock, self.connection(target_environment) as connection:
+            branch = connection.execute(
+                "SELECT id FROM branches WHERE id = ?", (branch_id,)
+            ).fetchone()
+            if not branch:
+                raise ValueError("分支不存在")
+            try:
+                connection.execute(
+                    f"""INSERT INTO branch_overrides (
+                        id, branch_id, override_type, target_id,
+                        character_id, variant_id, material_id, material_page_id,
+                        param_key, param_value, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (override_id, branch_id, override_type, target_id,
+                     character_id, variant_id, material_id, material_page_id,
+                     param_key, param_value, now, now),
+                )
+            except sqlite3.IntegrityError as error:
+                raise ValueError("同一分支下已存在相同的覆盖配置") from error
+        return self._get_branch_override(override_id, environment=target_environment)  # type: ignore[return-value]
+
+    def _get_branch_override(
+        self,
+        override_id: str,
+        *,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        target_environment = environment or self._active_environment
+        with self.connection(target_environment) as connection:
+            row = connection.execute(
+                f"""SELECT {self._BRANCH_OVERRIDE_SELECT_COLUMNS}
+                    FROM branch_overrides WHERE id = ?""",
+                (override_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def update_branch_override(
+        self,
+        override_id: str,
+        *,
+        target_id: str | None = None,
+        character_id: str | None = None,
+        variant_id: str | None = None,
+        material_id: str | None = None,
+        material_page_id: str | None = None,
+        param_key: str | None = None,
+        param_value: str | None = None,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        target_environment = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self.connection(target_environment) as connection:
+            existing = connection.execute(
+                "SELECT id FROM branch_overrides WHERE id = ?",
+                (override_id,),
+            ).fetchone()
+            if not existing:
+                return None
+            sets: list[str] = []
+            params: list[object] = []
+            field_map = {
+                "target_id": target_id,
+                "character_id": character_id,
+                "variant_id": variant_id,
+                "material_id": material_id,
+                "material_page_id": material_page_id,
+                "param_key": param_key,
+                "param_value": param_value,
+            }
+            for col, val in field_map.items():
+                if val is not None:
+                    sets.append(f"{col} = ?")
+                    params.append(val)
+            if not sets:
+                raise ValueError("至少提供一个更新字段")
+            sets.append("updated_at = ?")
+            params.append(now)
+            params.append(override_id)
+            try:
+                connection.execute(
+                    f"UPDATE branch_overrides SET {', '.join(sets)} WHERE id = ?",
+                    params,
+                )
+            except sqlite3.IntegrityError as error:
+                raise ValueError("同一分支下已存在相同的覆盖配置") from error
+        return self._get_branch_override(override_id, environment=target_environment)
+
+    def delete_branch_override(
+        self,
+        override_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        target_environment = environment or self._active_environment
+        with self._lock, self.connection(target_environment) as connection:
+            existing = connection.execute(
+                "SELECT id FROM branch_overrides WHERE id = ?",
+                (override_id,),
+            ).fetchone()
+            if not existing:
+                return None
+            connection.execute(
+                "DELETE FROM branch_overrides WHERE id = ?",
+                (override_id,),
+            )
+        return {"id": override_id, "deleted": True}
+
+    def get_effective_overrides(
+        self,
+        shot_page_id: str,
+        branch_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        """Return overrides that apply to a shot_page under a given branch.
+
+        Page-specific overrides (target_id = shot_page_id) take precedence over
+        branch-wide overrides (target_id IS NULL). Returns a dict with keys
+        'character', 'material', 'parameter' containing the effective override rows.
+        """
+        target_environment = environment or self._active_environment
+        with self.connection(target_environment) as connection:
+            page = connection.execute(
+                "SELECT id FROM shot_pages WHERE id = ?", (shot_page_id,)
+            ).fetchone()
+            if not page:
+                raise ValueError("场景页不存在")
+            branch = connection.execute(
+                "SELECT id FROM branches WHERE id = ?", (branch_id,)
+            ).fetchone()
+            if not branch:
+                raise ValueError("分支不存在")
+            # Page-specific overrides (target_id = shot_page_id)
+            page_rows = connection.execute(
+                f"""SELECT {self._BRANCH_OVERRIDE_SELECT_COLUMNS}
+                    FROM branch_overrides
+                    WHERE branch_id = ? AND target_id = ?
+                    ORDER BY override_type ASC, created_at ASC""",
+                (branch_id, shot_page_id),
+            ).fetchall()
+            # Branch-wide overrides (target_id IS NULL)
+            branch_rows = connection.execute(
+                f"""SELECT {self._BRANCH_OVERRIDE_SELECT_COLUMNS}
+                    FROM branch_overrides
+                    WHERE branch_id = ? AND target_id IS NULL
+                    ORDER BY override_type ASC, created_at ASC""",
+                (branch_id,),
+            ).fetchall()
+
+        # Build effective map: key = (override_type, param_key or material_id or character_id)
+        effective: dict[str, dict[str, dict[str, object]]] = {
+            "character": {},
+            "material": {},
+            "parameter": {},
+        }
+        # Branch-wide first (lower priority)
+        for row in branch_rows:
+            r = dict(row)
+            key = self._override_key(r)
+            effective[r["override_type"]][key] = r
+        # Page-specific overrides (higher priority, replace branch-wide)
+        for row in page_rows:
+            r = dict(row)
+            key = self._override_key(r)
+            effective[r["override_type"]][key] = r
+
+        return {
+            "shot_page_id": shot_page_id,
+            "branch_id": branch_id,
+            "character": list(effective["character"].values()),
+            "material": list(effective["material"].values()),
+            "parameter": list(effective["parameter"].values()),
+        }
+
+    @staticmethod
+    def _override_key(row: dict[str, object]) -> str:
+        """Build a dedup key for an override row."""
+        if row["override_type"] == "character":
+            return str(row.get("character_id") or "")
+        if row["override_type"] == "material":
+            return str(row.get("material_id") or "") + ":" + str(row.get("material_page_id") or "")
+        # parameter
+        return str(row.get("param_key") or "")
+
+    # ── Story Snapshots (v0.5.4) ───────────────────────────────────────
+
+    def create_story_snapshot(
+        self,
+        project_id: str,
+        label: str = "",
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        """Serialize the full story structure (chapters/scenes/pages/branches/mappings/overrides)
+        into a JSON snapshot. Returns the snapshot record, or None if project not found.
+        """
+        target_environment = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        snapshot_id = str(uuid4())
+        with self._lock, self.connection(target_environment) as connection:
+            proj = connection.execute(
+                "SELECT id FROM projects WHERE id = ?", (project_id,)
+            ).fetchone()
+            if not proj:
+                return None
+            chapters = [dict(r) for r in connection.execute(
+                """SELECT id, project_id, name, sort_order, created_at, updated_at
+                   FROM chapters WHERE project_id = ? ORDER BY sort_order ASC""",
+                (project_id,),
+            ).fetchall()]
+            chapter_ids = [c["id"] for c in chapters]
+            large_scenes: list[dict[str, object]] = []
+            small_scenes: list[dict[str, object]] = []
+            shot_pages: list[dict[str, object]] = []
+            branches: list[dict[str, object]] = []
+            mappings: list[dict[str, object]] = []
+            overrides: list[dict[str, object]] = []
+
+            if chapter_ids:
+                ph_c = ",".join("?" * len(chapter_ids))
+                large_scenes = [dict(r) for r in connection.execute(
+                    f"""SELECT id, chapter_id, name, scene_type, sort_order, created_at, updated_at
+                        FROM large_scenes WHERE chapter_id IN ({ph_c}) ORDER BY sort_order ASC""",
+                    chapter_ids,
+                ).fetchall()]
+                large_scene_ids = [ls["id"] for ls in large_scenes]
+                if large_scene_ids:
+                    ph_ls = ",".join("?" * len(large_scene_ids))
+                    small_scenes = [dict(r) for r in connection.execute(
+                        f"""SELECT id, large_scene_id, name, scene_type, description, sort_order, created_at, updated_at
+                            FROM small_scenes WHERE large_scene_id IN ({ph_ls}) ORDER BY sort_order ASC""",
+                        large_scene_ids,
+                    ).fetchall()]
+                    small_scene_ids = [ss["id"] for ss in small_scenes]
+                    if small_scene_ids:
+                        ph_ss = ",".join("?" * len(small_scene_ids))
+                        shot_pages = [dict(r) for r in connection.execute(
+                            f"""SELECT id, small_scene_id, branch_id, title, description, prompt_text, negative_prompt,
+                                       sort_order, revision, created_at, updated_at
+                                FROM shot_pages WHERE small_scene_id IN ({ph_ss}) ORDER BY sort_order ASC""",
+                            small_scene_ids,
+                        ).fetchall()]
+                        branches = [dict(r) for r in connection.execute(
+                            f"""SELECT id, parent_type, parent_id, name, description, is_enabled,
+                                       sort_order, condition_type, condition_value, return_point,
+                                       created_at, updated_at
+                                FROM branches
+                                WHERE parent_type = 'small_scene' AND parent_id IN ({ph_ss})
+                                ORDER BY sort_order ASC""",
+                            small_scene_ids,
+                        ).fetchall()]
+                        page_ids = [p["id"] for p in shot_pages]
+                        if page_ids:
+                            ph_p = ",".join("?" * len(page_ids))
+                            mappings = [dict(r) for r in connection.execute(
+                                f"""SELECT id, scene_page_id, material_page_id, material_type, created_at, updated_at
+                                    FROM small_scene_page_mappings
+                                    WHERE scene_page_id IN ({ph_p}) ORDER BY created_at ASC""",
+                                page_ids,
+                            ).fetchall()]
+                        branch_ids = [b["id"] for b in branches]
+                        if branch_ids:
+                            ph_b = ",".join("?" * len(branch_ids))
+                            overrides = [dict(r) for r in connection.execute(
+                                f"""SELECT {self._BRANCH_OVERRIDE_SELECT_COLUMNS}
+                                    FROM branch_overrides
+                                    WHERE branch_id IN ({ph_b})
+                                    ORDER BY override_type ASC, created_at ASC""",
+                                branch_ids,
+                            ).fetchall()]
+
+            snapshot_data = json.dumps(
+                {
+                    "project_id": project_id,
+                    "chapters": chapters,
+                    "large_scenes": large_scenes,
+                    "small_scenes": small_scenes,
+                    "shot_pages": shot_pages,
+                    "branches": branches,
+                    "mappings": mappings,
+                    "branch_overrides": overrides,
+                },
+                ensure_ascii=False,
+            )
+            connection.execute(
+                """INSERT INTO story_snapshots (id, project_id, label, snapshot_data, created_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (snapshot_id, project_id, label, snapshot_data, now),
+            )
+        return {
+            "id": snapshot_id,
+            "project_id": project_id,
+            "label": label,
+            "created_at": now,
+        }
+
+    def list_story_snapshots(
+        self,
+        project_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> list[dict[str, object]]:
+        """List all snapshots for a project (without snapshot_data)."""
+        target_environment = environment or self._active_environment
+        with self.connection(target_environment) as connection:
+            rows = connection.execute(
+                """SELECT id, project_id, label, created_at
+                   FROM story_snapshots
+                   WHERE project_id = ?
+                   ORDER BY created_at DESC""",
+                (project_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_story_snapshot(
+        self,
+        snapshot_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        """Get a snapshot with full snapshot_data parsed as JSON."""
+        target_environment = environment or self._active_environment
+        with self.connection(target_environment) as connection:
+            row = connection.execute(
+                """SELECT id, project_id, label, snapshot_data, created_at
+                   FROM story_snapshots WHERE id = ?""",
+                (snapshot_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["snapshot_data"] = json.loads(row["snapshot_data"])
+        return result
+
+    def restore_story_snapshot(
+        self,
+        snapshot_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        """Restore story structure from a snapshot.
+
+        Strategy: first create a snapshot of the current state (for redo), then
+        delete all current story-related rows for the project and rebuild from
+        the snapshot. Returns the restore record with the new backup snapshot id.
+        """
+        target_environment = environment or self._active_environment
+        snapshot = self.get_story_snapshot(snapshot_id, environment=target_environment)
+        if snapshot is None:
+            return None
+        project_id = str(snapshot["project_id"])
+        data = snapshot["snapshot_data"]
+        # Create a backup snapshot of the current state before restore
+        backup = self.create_story_snapshot(
+            project_id, label=f"恢复前自动备份 (源: {snapshot_id[:8]})",
+            environment=target_environment,
+        )
+        backup_id = str(backup["id"]) if backup else None
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self.connection(target_environment) as connection:
+            # Delete current story structure (cascade handles child rows)
+            # Order: mappings → shot_pages → branches → small_scenes → large_scenes → chapters
+            connection.execute(
+                """DELETE FROM small_scene_page_mappings
+                   WHERE scene_page_id IN (
+                       SELECT sp.id FROM shot_pages sp
+                       JOIN small_scenes ss ON ss.id = sp.small_scene_id
+                       JOIN large_scenes ls ON ls.id = ss.large_scene_id
+                       JOIN chapters c ON c.id = ls.chapter_id
+                       WHERE c.project_id = ?
+                   )""",
+                (project_id,),
+            )
+            connection.execute(
+                """DELETE FROM shot_pages WHERE small_scene_id IN (
+                       SELECT ss.id FROM small_scenes ss
+                       JOIN large_scenes ls ON ls.id = ss.large_scene_id
+                       JOIN chapters c ON c.id = ls.chapter_id
+                       WHERE c.project_id = ?
+                   )""",
+                (project_id,),
+            )
+            connection.execute(
+                """DELETE FROM branches WHERE parent_type = 'small_scene' AND parent_id IN (
+                       SELECT ss.id FROM small_scenes ss
+                       JOIN large_scenes ls ON ls.id = ss.large_scene_id
+                       JOIN chapters c ON c.id = ls.chapter_id
+                       WHERE c.project_id = ?
+                   )""",
+                (project_id,),
+            )
+            connection.execute(
+                """DELETE FROM small_scenes WHERE large_scene_id IN (
+                       SELECT ls.id FROM large_scenes ls
+                       JOIN chapters c ON c.id = ls.chapter_id
+                       WHERE c.project_id = ?
+                   )""",
+                (project_id,),
+            )
+            connection.execute(
+                "DELETE FROM large_scenes WHERE chapter_id IN (SELECT id FROM chapters WHERE project_id = ?)",
+                (project_id,),
+            )
+            connection.execute(
+                "DELETE FROM chapters WHERE project_id = ?",
+                (project_id,),
+            )
+
+            # Rebuild from snapshot
+            for c in data.get("chapters", []):
+                connection.execute(
+                    """INSERT INTO chapters (id, project_id, name, sort_order, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (c["id"], project_id, c["name"], c["sort_order"],
+                     c["created_at"], c["updated_at"]),
+                )
+            for ls in data.get("large_scenes", []):
+                connection.execute(
+                    """INSERT INTO large_scenes (id, chapter_id, name, scene_type, sort_order, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (ls["id"], ls["chapter_id"], ls["name"], ls["scene_type"],
+                     ls["sort_order"], ls["created_at"], ls["updated_at"]),
+                )
+            for ss in data.get("small_scenes", []):
+                connection.execute(
+                    """INSERT INTO small_scenes (id, large_scene_id, name, scene_type, description, sort_order, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (ss["id"], ss["large_scene_id"], ss["name"], ss["scene_type"],
+                     ss["description"], ss["sort_order"], ss["created_at"], ss["updated_at"]),
+                )
+            for b in data.get("branches", []):
+                connection.execute(
+                    """INSERT INTO branches (id, parent_type, parent_id, name, description, is_enabled,
+                                              sort_order, condition_type, condition_value, return_point,
+                                              created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (b["id"], b["parent_type"], b["parent_id"], b["name"], b["description"],
+                     b["is_enabled"], b["sort_order"],
+                     b.get("condition_type", ""), b.get("condition_value", ""),
+                     b.get("return_point"), b["created_at"], b["updated_at"]),
+                )
+            for p in data.get("shot_pages", []):
+                connection.execute(
+                    """INSERT INTO shot_pages (id, small_scene_id, branch_id, title, description,
+                                                prompt_text, negative_prompt, sort_order, revision,
+                                                created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (p["id"], p["small_scene_id"], p["branch_id"], p["title"], p["description"],
+                     p["prompt_text"], p["negative_prompt"], p["sort_order"], p.get("revision", 1),
+                     p["created_at"], p["updated_at"]),
+                )
+            for m in data.get("mappings", []):
+                connection.execute(
+                    """INSERT INTO small_scene_page_mappings
+                       (id, scene_page_id, material_page_id, material_type, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (m["id"], m["scene_page_id"], m["material_page_id"], m["material_type"],
+                     m["created_at"], m["updated_at"]),
+                )
+            for o in data.get("branch_overrides", []):
+                connection.execute(
+                    """INSERT INTO branch_overrides
+                       (id, branch_id, override_type, target_id, character_id, variant_id,
+                        material_id, material_page_id, param_key, param_value, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (o["id"], o["branch_id"], o["override_type"], o["target_id"],
+                     o["character_id"], o["variant_id"], o["material_id"], o["material_page_id"],
+                     o["param_key"], o["param_value"], o["created_at"], o["updated_at"]),
+                )
+        return {
+            "restored_snapshot_id": snapshot_id,
+            "project_id": project_id,
+            "backup_snapshot_id": backup_id,
+            "restored_at": now,
+        }
+
+    # ── Operation History (v0.5.4) ─────────────────────────────────────
+
+    def record_operation(
+        self,
+        project_id: str,
+        operation_type: str,
+        entity_type: str,
+        entity_id: str | None = None,
+        *,
+        before_state: dict | None = None,
+        after_state: dict | None = None,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        if operation_type not in ("move", "create", "delete", "rename", "reorder", "map", "unmap"):
+            raise ValueError("operation_type 无效")
+        if entity_type not in ("chapter", "large_scene", "small_scene", "shot_page", "branch", "mapping"):
+            raise ValueError("entity_type 无效")
+        target_environment = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        op_id = str(uuid4())
+        before_json = json.dumps(before_state, ensure_ascii=False) if before_state is not None else None
+        after_json = json.dumps(after_state, ensure_ascii=False) if after_state is not None else None
+        with self._lock, self.connection(target_environment) as connection:
+            proj = connection.execute(
+                "SELECT id FROM projects WHERE id = ?", (project_id,)
+            ).fetchone()
+            if not proj:
+                raise ValueError("项目不存在")
+            connection.execute(
+                """INSERT INTO operation_history
+                   (id, project_id, operation_type, entity_type, entity_id,
+                    before_state, after_state, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (op_id, project_id, operation_type, entity_type, entity_id,
+                 before_json, after_json, now),
+            )
+        return {
+            "id": op_id,
+            "project_id": project_id,
+            "operation_type": operation_type,
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "before_state": before_state,
+            "after_state": after_state,
+            "created_at": now,
+        }
+
+    def list_operations(
+        self,
+        project_id: str,
+        limit: int = 50,
+        environment: DatabaseEnvironment | None = None,
+    ) -> list[dict[str, object]]:
+        target_environment = environment or self._active_environment
+        with self.connection(target_environment) as connection:
+            rows = connection.execute(
+                """SELECT id, project_id, operation_type, entity_type, entity_id,
+                          before_state, after_state, created_at
+                   FROM operation_history
+                   WHERE project_id = ?
+                   ORDER BY created_at DESC
+                   LIMIT ?""",
+                (project_id, limit),
+            ).fetchall()
+        results: list[dict[str, object]] = []
+        for row in rows:
+            r = dict(row)
+            if r["before_state"]:
+                r["before_state"] = json.loads(r["before_state"])
+            if r["after_state"]:
+                r["after_state"] = json.loads(r["after_state"])
+            results.append(r)
+        return results
+
+    def undo_operation(
+        self,
+        operation_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        """Undo a single operation by restoring before_state.
+
+        Records a new operation capturing the current state as after_state for redo.
+        Returns the undo record, or None if operation not found.
+        """
+        target_environment = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self.connection(target_environment) as connection:
+            op = connection.execute(
+                """SELECT id, project_id, operation_type, entity_type, entity_id,
+                          before_state, after_state, created_at
+                   FROM operation_history WHERE id = ?""",
+                (operation_id,),
+            ).fetchone()
+            if op is None:
+                return None
+            before = json.loads(op["before_state"]) if op["before_state"] else None
+            if not before:
+                raise ValueError("无法撤销：缺少 before_state")
+            entity_type = op["entity_type"]
+            entity_id = op["entity_id"]
+            # Capture current state for redo
+            current_state = self._capture_entity_state(
+                connection, entity_type, entity_id
+            )
+            # Apply before_state to revert the entity
+            self._apply_entity_state(
+                connection, entity_type, entity_id, before, op["operation_type"]
+            )
+            # Record redo entry
+            redo_id = str(uuid4())
+            connection.execute(
+                """INSERT INTO operation_history
+                   (id, project_id, operation_type, entity_type, entity_id,
+                    before_state, after_state, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (redo_id, op["project_id"], op["operation_type"], entity_type, entity_id,
+                 json.dumps(current_state, ensure_ascii=False) if current_state else None,
+                 json.dumps(before, ensure_ascii=False), now),
+            )
+        return {
+            "undone_operation_id": operation_id,
+            "redo_operation_id": redo_id,
+            "project_id": op["project_id"],
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "restored_at": now,
+        }
+
+    def redo_operation(
+        self,
+        operation_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        """Redo an operation by applying after_state.
+
+        Records a new operation capturing the current state as before_state for undo.
+        Returns the redo record, or None if operation not found.
+        """
+        target_environment = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self.connection(target_environment) as connection:
+            op = connection.execute(
+                """SELECT id, project_id, operation_type, entity_type, entity_id,
+                          before_state, after_state, created_at
+                   FROM operation_history WHERE id = ?""",
+                (operation_id,),
+            ).fetchone()
+            if op is None:
+                return None
+            after = json.loads(op["after_state"]) if op["after_state"] else None
+            if not after:
+                raise ValueError("无法重做：缺少 after_state")
+            entity_type = op["entity_type"]
+            entity_id = op["entity_id"]
+            # Capture current state for undo
+            current_state = self._capture_entity_state(
+                connection, entity_type, entity_id
+            )
+            # Apply after_state to redo the entity
+            self._apply_entity_state(
+                connection, entity_type, entity_id, after, op["operation_type"]
+            )
+            # Record undo entry
+            undo_id = str(uuid4())
+            connection.execute(
+                """INSERT INTO operation_history
+                   (id, project_id, operation_type, entity_type, entity_id,
+                    before_state, after_state, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (undo_id, op["project_id"], op["operation_type"], entity_type, entity_id,
+                 json.dumps(current_state, ensure_ascii=False) if current_state else None,
+                 json.dumps(after, ensure_ascii=False), now),
+            )
+        return {
+            "redone_operation_id": operation_id,
+            "undo_operation_id": undo_id,
+            "project_id": op["project_id"],
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "restored_at": now,
+        }
+
+    def _capture_entity_state(
+        self, connection, entity_type: str, entity_id: str | None
+    ) -> dict | None:
+        """Capture the current state of an entity as a dict (for undo/redo)."""
+        if not entity_id:
+            return None
+        if entity_type == "chapter":
+            row = connection.execute(
+                "SELECT id, project_id, name, sort_order FROM chapters WHERE id = ?",
+                (entity_id,),
+            ).fetchone()
+        elif entity_type == "large_scene":
+            row = connection.execute(
+                "SELECT id, chapter_id, name, scene_type, sort_order FROM large_scenes WHERE id = ?",
+                (entity_id,),
+            ).fetchone()
+        elif entity_type == "small_scene":
+            row = connection.execute(
+                "SELECT id, large_scene_id, name, scene_type, sort_order FROM small_scenes WHERE id = ?",
+                (entity_id,),
+            ).fetchone()
+        elif entity_type == "shot_page":
+            row = connection.execute(
+                """SELECT id, small_scene_id, branch_id, title, description,
+                          prompt_text, negative_prompt, sort_order
+                   FROM shot_pages WHERE id = ?""",
+                (entity_id,),
+            ).fetchone()
+        elif entity_type == "branch":
+            row = connection.execute(
+                """SELECT id, parent_type, parent_id, name, description, is_enabled,
+                          sort_order, condition_type, condition_value, return_point
+                   FROM branches WHERE id = ?""",
+                (entity_id,),
+            ).fetchone()
+        elif entity_type == "mapping":
+            row = connection.execute(
+                """SELECT id, scene_page_id, material_page_id, material_type
+                   FROM small_scene_page_mappings WHERE id = ?""",
+                (entity_id,),
+            ).fetchone()
+        else:
+            return None
+        return dict(row) if row else None
+
+    def _apply_entity_state(
+        self, connection, entity_type: str, entity_id: str | None,
+        state: dict, operation_type: str,
+    ) -> None:
+        """Apply a captured state to revert or redo an entity.
+
+        For 'delete' operations: re-insert the row using the captured state.
+        For 'create' operations: delete the row.
+        For other operations (rename/move/reorder/map): upsert the captured state.
+        """
+        if not entity_id:
+            return
+        if operation_type == "delete":
+            # Re-insert the row from state
+            self._insert_entity_from_state(connection, entity_type, state)
+            return
+        if operation_type == "create":
+            # Delete the row
+            table_map = {
+                "chapter": "chapters",
+                "large_scene": "large_scenes",
+                "small_scene": "small_scenes",
+                "shot_page": "shot_pages",
+                "branch": "branches",
+                "mapping": "small_scene_page_mappings",
+            }
+            table = table_map.get(entity_type)
+            if table:
+                connection.execute(
+                    f"DELETE FROM {table} WHERE id = ?", (entity_id,)
+                )
+            return
+        # rename/move/reorder/map/unmap: upsert
+        self._upsert_entity_from_state(connection, entity_type, state)
+
+    def _insert_entity_from_state(
+        self, connection, entity_type: str, state: dict
+    ) -> None:
+        if entity_type == "chapter":
+            connection.execute(
+                """INSERT OR IGNORE INTO chapters (id, project_id, name, sort_order, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (state["id"], state["project_id"], state["name"], state["sort_order"],
+                 datetime.now(timezone.utc).isoformat(),
+                 datetime.now(timezone.utc).isoformat()),
+            )
+        elif entity_type == "large_scene":
+            connection.execute(
+                """INSERT OR IGNORE INTO large_scenes (id, chapter_id, name, scene_type, sort_order, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (state["id"], state["chapter_id"], state["name"], state["scene_type"],
+                 state["sort_order"], datetime.now(timezone.utc).isoformat(),
+                 datetime.now(timezone.utc).isoformat()),
+            )
+        elif entity_type == "small_scene":
+            connection.execute(
+                """INSERT OR IGNORE INTO small_scenes (id, large_scene_id, name, scene_type, sort_order, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (state["id"], state["large_scene_id"], state["name"], state["scene_type"],
+                 state["sort_order"], datetime.now(timezone.utc).isoformat(),
+                 datetime.now(timezone.utc).isoformat()),
+            )
+        elif entity_type == "shot_page":
+            connection.execute(
+                """INSERT OR IGNORE INTO shot_pages (id, small_scene_id, branch_id, title, description,
+                                                      prompt_text, negative_prompt, sort_order, revision,
+                                                      created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (state["id"], state["small_scene_id"], state.get("branch_id"),
+                 state["title"], state.get("description", ""), state.get("prompt_text", ""),
+                 state.get("negative_prompt", ""), state["sort_order"], 1,
+                 datetime.now(timezone.utc).isoformat(),
+                 datetime.now(timezone.utc).isoformat()),
+            )
+        elif entity_type == "branch":
+            connection.execute(
+                """INSERT OR IGNORE INTO branches (id, parent_type, parent_id, name, description, is_enabled,
+                                                    sort_order, condition_type, condition_value, return_point,
+                                                    created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (state["id"], state["parent_type"], state["parent_id"], state["name"],
+                 state.get("description", ""), state.get("is_enabled", 1), state["sort_order"],
+                 state.get("condition_type", ""), state.get("condition_value", ""),
+                 state.get("return_point"), datetime.now(timezone.utc).isoformat(),
+                 datetime.now(timezone.utc).isoformat()),
+            )
+        elif entity_type == "mapping":
+            now_ts = datetime.now(timezone.utc).isoformat()
+            connection.execute(
+                """INSERT OR IGNORE INTO small_scene_page_mappings
+                   (id, scene_page_id, material_page_id, material_type, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (state["id"], state["scene_page_id"], state["material_page_id"],
+                 state["material_type"], now_ts, now_ts),
+            )
+
+    def _upsert_entity_from_state(
+        self, connection, entity_type: str, state: dict
+    ) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        if entity_type == "chapter":
+            connection.execute(
+                """INSERT INTO chapters (id, project_id, name, sort_order, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET name = excluded.name, sort_order = excluded.sort_order, updated_at = excluded.updated_at""",
+                (state["id"], state["project_id"], state["name"], state["sort_order"], now, now),
+            )
+        elif entity_type == "large_scene":
+            connection.execute(
+                """INSERT INTO large_scenes (id, chapter_id, name, scene_type, sort_order, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET name = excluded.name, scene_type = excluded.scene_type,
+                                                    sort_order = excluded.sort_order, updated_at = excluded.updated_at""",
+                (state["id"], state["chapter_id"], state["name"], state["scene_type"],
+                 state["sort_order"], now, now),
+            )
+        elif entity_type == "small_scene":
+            connection.execute(
+                """INSERT INTO small_scenes (id, large_scene_id, name, scene_type, sort_order, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET name = excluded.name, scene_type = excluded.scene_type,
+                                                   sort_order = excluded.sort_order, updated_at = excluded.updated_at""",
+                (state["id"], state["large_scene_id"], state["name"], state["scene_type"],
+                 state["sort_order"], now, now),
+            )
+        elif entity_type == "shot_page":
+            connection.execute(
+                """INSERT INTO shot_pages (id, small_scene_id, branch_id, title, description,
+                                            prompt_text, negative_prompt, sort_order, revision,
+                                            created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET title = excluded.title, description = excluded.description,
+                                                   prompt_text = excluded.prompt_text, negative_prompt = excluded.negative_prompt,
+                                                   sort_order = excluded.sort_order, updated_at = excluded.updated_at""",
+                (state["id"], state["small_scene_id"], state.get("branch_id"),
+                 state["title"], state.get("description", ""), state.get("prompt_text", ""),
+                 state.get("negative_prompt", ""), state["sort_order"], 1, now, now),
+            )
+        elif entity_type == "branch":
+            connection.execute(
+                """INSERT INTO branches (id, parent_type, parent_id, name, description, is_enabled,
+                                          sort_order, condition_type, condition_value, return_point,
+                                          created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET name = excluded.name, description = excluded.description,
+                                                   is_enabled = excluded.is_enabled, sort_order = excluded.sort_order,
+                                                   condition_type = excluded.condition_type,
+                                                   condition_value = excluded.condition_value,
+                                                   return_point = excluded.return_point,
+                                                   updated_at = excluded.updated_at""",
+                (state["id"], state["parent_type"], state["parent_id"], state["name"],
+                 state.get("description", ""), state.get("is_enabled", 1), state["sort_order"],
+                 state.get("condition_type", ""), state.get("condition_value", ""),
+                 state.get("return_point"), now, now),
+            )
+        elif entity_type == "mapping":
+            connection.execute(
+                """INSERT INTO small_scene_page_mappings
+                   (id, scene_page_id, material_page_id, material_type, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET scene_page_id = excluded.scene_page_id,
+                                                   material_page_id = excluded.material_page_id,
+                                                   material_type = excluded.material_type,
+                                                   updated_at = excluded.updated_at""",
+                (state["id"], state["scene_page_id"], state["material_page_id"],
+                 state["material_type"], now, now),
+            )
+
+    # ── Shot Page Inheritance (v0.5.4) ─────────────────────────────────
+
+    def get_shot_page_inheritance(
+        self,
+        shot_page_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        """Return the inheritance chain for a shot page.
+
+        Chain: project → chapter → large_scene → small_scene → branch → shot_page.
+        Each level includes id/name and inheritable attributes. The final
+        effective values are computed with closer levels taking precedence.
+        """
+        target_environment = environment or self._active_environment
+        with self.connection(target_environment) as connection:
+            page = connection.execute(
+                """SELECT id, small_scene_id, branch_id, title, description, prompt_text, negative_prompt,
+                          sort_order, created_at, updated_at
+                   FROM shot_pages WHERE id = ?""",
+                (shot_page_id,),
+            ).fetchone()
+            if not page:
+                return None
+            small_scene = None
+            large_scene = None
+            chapter = None
+            project = None
+            branch = None
+
+            ss_row = connection.execute(
+                """SELECT id, large_scene_id, name, scene_type, description
+                   FROM small_scenes WHERE id = ?""",
+                (page["small_scene_id"],),
+            ).fetchone()
+            if ss_row:
+                small_scene = dict(ss_row)
+                ls_row = connection.execute(
+                    """SELECT id, chapter_id, name, scene_type
+                       FROM large_scenes WHERE id = ?""",
+                    (small_scene["large_scene_id"],),
+                ).fetchone()
+                if ls_row:
+                    large_scene = dict(ls_row)
+                    c_row = connection.execute(
+                        """SELECT id, project_id, name
+                           FROM chapters WHERE id = ?""",
+                        (large_scene["chapter_id"],),
+                    ).fetchone()
+                    if c_row:
+                        chapter = dict(c_row)
+                        p_row = connection.execute(
+                            """SELECT id, name, description, status
+                               FROM projects WHERE id = ?""",
+                            (chapter["project_id"],),
+                        ).fetchone()
+                        if p_row:
+                            project = dict(p_row)
+            if page["branch_id"]:
+                b_row = connection.execute(
+                    """SELECT id, parent_type, parent_id, name, description, is_enabled,
+                              condition_type, condition_value, return_point
+                       FROM branches WHERE id = ?""",
+                    (page["branch_id"],),
+                ).fetchone()
+                if b_row:
+                    branch = dict(b_row)
+
+            # Fetch character binding at the page level (only level that has it directly)
+            page_character = connection.execute(
+                """SELECT spc.character_id, spc.variant_id,
+                          c.name AS character_name, cv.name AS variant_name,
+                          cv.default_prompt, cv.default_lora_name,
+                          cv.default_lora_weight, cv.default_model_override
+                   FROM shot_page_characters spc
+                   JOIN characters c ON c.id = spc.character_id
+                   JOIN character_variants cv ON cv.id = spc.variant_id
+                   WHERE spc.shot_page_id = ?""",
+                (shot_page_id,),
+            ).fetchone()
+
+        # Build chain
+        chain: list[dict[str, object]] = []
+        if project:
+            chain.append({
+                "level": "project",
+                "id": project["id"],
+                "name": project["name"],
+                "attributes": {
+                    "description": project.get("description", ""),
+                    "status": project.get("status", ""),
+                },
+            })
+        if chapter:
+            chain.append({
+                "level": "chapter",
+                "id": chapter["id"],
+                "name": chapter["name"],
+                "attributes": {},
+            })
+        if large_scene:
+            chain.append({
+                "level": "large_scene",
+                "id": large_scene["id"],
+                "name": large_scene["name"],
+                "attributes": {"scene_type": large_scene.get("scene_type", "")},
+            })
+        if small_scene:
+            chain.append({
+                "level": "small_scene",
+                "id": small_scene["id"],
+                "name": small_scene["name"],
+                "attributes": {
+                    "scene_type": small_scene.get("scene_type", ""),
+                    "description": small_scene.get("description", ""),
+                },
+            })
+        if branch:
+            chain.append({
+                "level": "branch",
+                "id": branch["id"],
+                "name": branch["name"],
+                "attributes": {
+                    "condition_type": branch.get("condition_type", ""),
+                    "condition_value": branch.get("condition_value", ""),
+                    "return_point": branch.get("return_point"),
+                    "is_enabled": bool(branch.get("is_enabled", 1)),
+                },
+            })
+        page_dict = dict(page)
+        page_dict["name"] = page_dict.pop("title")
+        page_attributes = {
+            "description": page_dict.get("description", ""),
+            "prompt_text": page_dict.get("prompt_text", ""),
+            "negative_prompt": page_dict.get("negative_prompt", ""),
+        }
+        if page_character:
+            page_attributes["character"] = dict(page_character)
+        chain.append({
+            "level": "shot_page",
+            "id": page_dict["id"],
+            "name": page_dict["name"],
+            "attributes": page_attributes,
+        })
+
+        # Compute effective values (closer level wins)
+        effective: dict[str, object] = {}
+        source_map: dict[str, str] = {}
+        for level in chain:
+            for key, val in level["attributes"].items():
+                if val in (None, "", []):
+                    continue
+                effective[key] = val
+                source_map[key] = level["level"]
+
+        return {
+            "shot_page_id": shot_page_id,
+            "chain": chain,
+            "effective": effective,
+            "sources": source_map,
+        }
+
+    # ── Compilation Precheck (v0.5.4) ──────────────────────────────────
+
+    def precheck_compilation(
+        self,
+        project_id: str,
+        scope: str = "project",
+        scope_id: str | None = None,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        """Pre-check a project (or sub-scope) for compilation readiness.
+
+        Returns blocking/warnings/summary, or None if project not found.
+        scope: 'project' / 'chapter' / 'large_scene' / 'small_scene' / 'branch' / 'shot_pages'
+        """
+        valid_scopes = ("project", "chapter", "large_scene", "small_scene", "branch", "shot_pages")
+        if scope not in valid_scopes:
+            raise ValueError(f"scope 无效，允许值: {', '.join(valid_scopes)}")
+        target_environment = environment or self._active_environment
+        with self.connection(target_environment) as connection:
+            proj = connection.execute(
+                "SELECT id FROM projects WHERE id = ?", (project_id,)
+            ).fetchone()
+            if not proj:
+                return None
+
+            # Determine the set of chapters/large_scenes/small_scenes to inspect
+            chapter_ids: list[str] = []
+            large_scene_ids: list[str] = []
+            small_scene_ids: list[str] = []
+            branch_ids: list[str] = []
+
+            if scope == "project":
+                chapter_ids = [r["id"] for r in connection.execute(
+                    "SELECT id FROM chapters WHERE project_id = ?", (project_id,)
+                ).fetchall()]
+            elif scope == "chapter":
+                if not scope_id:
+                    raise ValueError("scope=chapter 需要 scope_id")
+                chapter_ids = [scope_id]
+            elif scope == "large_scene":
+                if not scope_id:
+                    raise ValueError("scope=large_scene 需要 scope_id")
+                large_scene_ids = [scope_id]
+            elif scope == "small_scene":
+                if not scope_id:
+                    raise ValueError("scope=small_scene 需要 scope_id")
+                small_scene_ids = [scope_id]
+            elif scope == "branch":
+                if not scope_id:
+                    raise ValueError("scope=branch 需要 scope_id")
+                branch_ids = [scope_id]
+            elif scope == "shot_pages":
+                if not scope_id:
+                    raise ValueError("scope=shot_pages 需要 scope_id")
+                # scope_id is a comma-separated list of shot_page ids
+                pass
+
+            if chapter_ids:
+                ph = ",".join("?" * len(chapter_ids))
+                large_scene_ids = [r["id"] for r in connection.execute(
+                    f"SELECT id FROM large_scenes WHERE chapter_id IN ({ph})", chapter_ids
+                ).fetchall()]
+            if large_scene_ids:
+                ph = ",".join("?" * len(large_scene_ids))
+                small_scene_ids = [r["id"] for r in connection.execute(
+                    f"SELECT id FROM small_scenes WHERE large_scene_id IN ({ph})", large_scene_ids
+                ).fetchall()]
+            if small_scene_ids and not branch_ids:
+                ph = ",".join("?" * len(small_scene_ids))
+                branch_ids = [r["id"] for r in connection.execute(
+                    f"""SELECT id FROM branches
+                        WHERE parent_type = 'small_scene' AND parent_id IN ({ph})""",
+                    small_scene_ids,
+                ).fetchall()]
+
+            # Gather all shot_pages to inspect
+            if scope == "shot_pages":
+                page_ids = [s.strip() for s in scope_id.split(",") if s.strip()]
+            else:
+                page_ids = []
+                if small_scene_ids:
+                    ph = ",".join("?" * len(small_scene_ids))
+                    page_ids = [r["id"] for r in connection.execute(
+                        f"SELECT id FROM shot_pages WHERE small_scene_id IN ({ph})",
+                        small_scene_ids,
+                    ).fetchall()]
+
+            blocking: list[dict[str, object]] = []
+            warnings: list[dict[str, object]] = []
+
+            # Check 1: chapters/large_scenes/small_scenes with no pages
+            if small_scene_ids:
+                ph = ",".join("?" * len(small_scene_ids))
+                empty_scenes = connection.execute(
+                    f"""SELECT ss.id, ss.name, ss.large_scene_id
+                        FROM small_scenes ss
+                        WHERE ss.id IN ({ph})
+                          AND NOT EXISTS (SELECT 1 FROM shot_pages sp WHERE sp.small_scene_id = ss.id)
+                        ORDER BY ss.name""",
+                    small_scene_ids,
+                ).fetchall()
+                for r in empty_scenes:
+                    blocking.append({
+                        "type": "empty_small_scene",
+                        "entity_type": "small_scene",
+                        "entity_id": r["id"],
+                        "entity_name": r["name"],
+                        "message": f"小场景 '{r['name']}' 没有场景页",
+                    })
+            if large_scene_ids:
+                ph = ",".join("?" * len(large_scene_ids))
+                empty_large = connection.execute(
+                    f"""SELECT ls.id, ls.name
+                        FROM large_scenes ls
+                        WHERE ls.id IN ({ph})
+                          AND NOT EXISTS (SELECT 1 FROM small_scenes ss WHERE ss.large_scene_id = ls.id)
+                        ORDER BY ls.name""",
+                    large_scene_ids,
+                ).fetchall()
+                for r in empty_large:
+                    blocking.append({
+                        "type": "empty_large_scene",
+                        "entity_type": "large_scene",
+                        "entity_id": r["id"],
+                        "entity_name": r["name"],
+                        "message": f"大场景 '{r['name']}' 没有小场景",
+                    })
+            if chapter_ids:
+                ph = ",".join("?" * len(chapter_ids))
+                empty_chapters = connection.execute(
+                    f"""SELECT c.id, c.name
+                        FROM chapters c
+                        WHERE c.id IN ({ph})
+                          AND NOT EXISTS (SELECT 1 FROM large_scenes ls WHERE ls.chapter_id = c.id)
+                        ORDER BY c.name""",
+                    chapter_ids,
+                ).fetchall()
+                for r in empty_chapters:
+                    blocking.append({
+                        "type": "empty_chapter",
+                        "entity_type": "chapter",
+                        "entity_id": r["id"],
+                        "entity_name": r["name"],
+                        "message": f"章节 '{r['name']}' 没有大场景",
+                    })
+
+            # Check 2: shot_pages without character binding
+            if page_ids:
+                ph = ",".join("?" * len(page_ids))
+                pages_no_char = connection.execute(
+                    f"""SELECT sp.id, sp.title, sp.small_scene_id
+                        FROM shot_pages sp
+                        WHERE sp.id IN ({ph})
+                          AND NOT EXISTS (SELECT 1 FROM shot_page_characters spc WHERE spc.shot_page_id = sp.id)
+                        ORDER BY sp.title""",
+                    page_ids,
+                ).fetchall()
+                for r in pages_no_char:
+                    warnings.append({
+                        "type": "missing_character",
+                        "entity_type": "shot_page",
+                        "entity_id": r["id"],
+                        "entity_name": r["title"],
+                        "message": f"场景页 '{r['title']}' 未绑定人物",
+                    })
+
+                # Check 3: shot_pages without material mappings
+                pages_no_mapping = connection.execute(
+                    f"""SELECT sp.id, sp.title
+                        FROM shot_pages sp
+                        WHERE sp.id IN ({ph})
+                          AND NOT EXISTS (SELECT 1 FROM small_scene_page_mappings m WHERE m.scene_page_id = sp.id)
+                        ORDER BY sp.title""",
+                    page_ids,
+                ).fetchall()
+                for r in pages_no_mapping:
+                    warnings.append({
+                        "type": "missing_material_mapping",
+                        "entity_type": "shot_page",
+                        "entity_id": r["id"],
+                        "entity_name": r["title"],
+                        "message": f"场景页 '{r['title']}' 缺失素材映射",
+                    })
+
+                # Check 4: shot_pages with empty prompt_text
+                pages_no_prompt = connection.execute(
+                    f"""SELECT sp.id, sp.title
+                        FROM shot_pages sp
+                        WHERE sp.id IN ({ph}) AND (sp.prompt_text IS NULL OR sp.prompt_text = '')
+                        ORDER BY sp.title""",
+                    page_ids,
+                ).fetchall()
+                for r in pages_no_prompt:
+                    warnings.append({
+                        "type": "missing_prompt",
+                        "entity_type": "shot_page",
+                        "entity_id": r["id"],
+                        "entity_name": r["title"],
+                        "message": f"场景页 '{r['title']}' 正向提示词为空",
+                    })
+
+            # Check 5: invalid branch references (branch_id pointing to non-existent branches)
+            if page_ids:
+                ph = ",".join("?" * len(page_ids))
+                invalid_branch_refs = connection.execute(
+                    f"""SELECT sp.id, sp.title, sp.branch_id
+                        FROM shot_pages sp
+                        WHERE sp.id IN ({ph}) AND sp.branch_id IS NOT NULL
+                          AND NOT EXISTS (SELECT 1 FROM branches b WHERE b.id = sp.branch_id)
+                        ORDER BY sp.title""",
+                    page_ids,
+                ).fetchall()
+                for r in invalid_branch_refs:
+                    blocking.append({
+                        "type": "invalid_branch_ref",
+                        "entity_type": "shot_page",
+                        "entity_id": r["id"],
+                        "entity_name": r["title"],
+                        "message": f"场景页 '{r['title']}' 引用了不存在的分支",
+                    })
+
+            total_pages = len(page_ids)
+            blocked_pages = len({b["entity_id"] for b in blocking if b["entity_type"] == "shot_page"})
+            ready_pages = total_pages - blocked_pages
+
+            return {
+                "project_id": project_id,
+                "scope": scope,
+                "scope_id": scope_id,
+                "blocking": blocking,
+                "warnings": warnings,
+                "summary": {
+                    "total_pages": total_pages,
+                    "ready_pages": ready_pages,
+                    "blocked_pages": blocked_pages,
+                },
+            }
 

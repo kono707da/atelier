@@ -250,7 +250,7 @@ class SceneMaterialApiTests(unittest.TestCase):
             f"/api/shot-pages/{self.shot_page['id']}/materials",
             json={"material_ids": [self.material_a["id"]]},
         )
-        self.client.delete(f"/api/materials/{self.material_a['id']}")
+        self.client.delete(f"/api/materials/{self.material_a['id']}/permanent")
         ss_materials = self.client.get(
             f"/api/small-scenes/{self.small_scene['id']}/materials"
         ).json()["materials"]

@@ -61,20 +61,21 @@ class DatabaseEnvironmentTests(unittest.TestCase):
             project = manager.create_project("My Test Project")
 
             self.assertEqual(project["name"], "My Test Project")
-            self.assertEqual(len(manager.list_projects("test")), 1)
-            self.assertEqual(len(manager.list_projects("production")), 0)
+            self.assertEqual(manager.list_projects(environment="test")["total"], 1)
+            self.assertEqual(manager.list_projects(environment="production")["total"], 0)
             self.assertEqual(
                 manager.get_project(str(project["id"]), "test")["name"],
                 "My Test Project",
             )
 
-    def test_duplicate_project_name_is_rejected(self) -> None:
+    def test_duplicate_project_name_is_allowed(self) -> None:
+        # UNIQUE constraint on name was dropped in v0.5.1 migration.
         with tempfile.TemporaryDirectory() as directory:
             manager = DatabaseManager(Path(directory))
             manager.create_project("Project Alpha")
-
-            with self.assertRaises(ValueError):
-                manager.create_project("project alpha")
+            # Same name (different case) should now succeed.
+            second = manager.create_project("project alpha")
+            self.assertEqual(second["name"], "project alpha")
 
 
 if __name__ == "__main__":

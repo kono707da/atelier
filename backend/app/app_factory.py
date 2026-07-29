@@ -131,6 +131,43 @@ class ActivateDatabaseRequest(BaseModel):
 
 class CreateProjectRequest(BaseModel):
     name: str = Field(min_length=1, max_length=80)
+    description: str = Field(default="", max_length=2000)
+
+    @field_validator("name")
+    @classmethod
+    def name_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("项目名称不能为空。")
+        return value
+
+
+class UpdateProjectRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    description: str | None = Field(default=None, max_length=2000)
+
+    @field_validator("name")
+    @classmethod
+    def name_not_blank(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("项目名称不能为空。")
+        return value
+
+    @model_validator(mode="after")
+    def at_least_one_field(self):
+        if self.name is None and self.description is None:
+            raise ValueError("至少需要提供一个字段。")
+        return self
+
+
+class CopyProjectRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+
+    @field_validator("name")
+    @classmethod
+    def name_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("项目名称不能为空。")
+        return value
 
 
 class CreateChapterRequest(BaseModel):
@@ -204,16 +241,34 @@ class RenameLargeSceneRequest(BaseModel):
 
 class CreateCharacterRequest(BaseModel):
     name: str = Field(min_length=1, max_length=80)
+    description: str = Field(default="", max_length=500)
+    source: str = Field(default="", max_length=80)
+    source_identifier: str | None = None
+    external_url: str | None = None
+    tags: list[str] = Field(default_factory=list)
 
     @field_validator("name")
     @classmethod
     def name_not_blank(cls, value: str) -> str:
         if not value.strip():
+            raise ValueError("人物名称不能为空。")
+        return value
+
+
+class UpdateCharacterRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    description: str | None = Field(default=None, max_length=500)
+
+    @field_validator("name")
+    @classmethod
+    def name_not_blank(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
             raise ValueError("人物名称不能为空。")
         return value
 
 
 class RenameCharacterRequest(BaseModel):
+    """Legacy request model kept for backward compatibility."""
     name: str = Field(min_length=1, max_length=80)
 
     @field_validator("name")
@@ -224,18 +279,69 @@ class RenameCharacterRequest(BaseModel):
         return value
 
 
+class SetCharacterTagsRequest(BaseModel):
+    tags: list[str] = Field(default_factory=list)
+
+
+class CopyCharacterRequest(BaseModel):
+    new_name: str = Field(min_length=1, max_length=80)
+
+    @field_validator("new_name")
+    @classmethod
+    def name_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("新人物名称不能为空。")
+        return value
+
+
 class CreateCharacterVariantRequest(BaseModel):
     name: str = Field(min_length=1, max_length=80)
+    description: str = Field(default="", max_length=500)
+    default_prompt: str = Field(default="")
+    default_lora_name: str = Field(default="")
+    default_lora_weight: float | None = None
+    default_model_override: str = Field(default="")
 
     @field_validator("name")
     @classmethod
     def name_not_blank(cls, value: str) -> str:
         if not value.strip():
             raise ValueError("形象变体名称不能为空。")
+        return value
+
+    @field_validator("default_lora_weight")
+    @classmethod
+    def lora_weight_range(cls, value: float | None) -> float | None:
+        if value is not None and (value < 0 or value > 2):
+            raise ValueError("LoRA 权重必须在 0 到 2 之间。")
+        return value
+
+
+class UpdateCharacterVariantRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    description: str | None = Field(default=None, max_length=500)
+    default_prompt: str | None = None
+    default_lora_name: str | None = None
+    default_lora_weight: float | None = None
+    default_model_override: str | None = None
+
+    @field_validator("name")
+    @classmethod
+    def name_not_blank(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("形象变体名称不能为空。")
+        return value
+
+    @field_validator("default_lora_weight")
+    @classmethod
+    def lora_weight_range(cls, value: float | None) -> float | None:
+        if value is not None and (value < 0 or value > 2):
+            raise ValueError("LoRA 权重必须在 0 到 2 之间。")
         return value
 
 
 class RenameCharacterVariantRequest(BaseModel):
+    """Legacy request model kept for backward compatibility."""
     name: str = Field(min_length=1, max_length=80)
 
     @field_validator("name")
@@ -244,11 +350,29 @@ class RenameCharacterVariantRequest(BaseModel):
         if not value.strip():
             raise ValueError("形象变体名称不能为空。")
         return value
+
+
+class CopyCharacterVariantRequest(BaseModel):
+    new_name: str = Field(min_length=1, max_length=80)
+
+    @field_validator("new_name")
+    @classmethod
+    def name_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("新变体名称不能为空。")
+        return value
+
+
+class ReorderVariantsRequest(BaseModel):
+    variant_ids: list[str]
 
 
 class CreateProjectSpecRequest(BaseModel):
     spec_type: str = Field(min_length=1, max_length=40)
     custom_label: str = Field(default="", max_length=80)
+    description: str = Field(default="", max_length=500)
+    is_required: bool = False
+    default_value: str = Field(default="", max_length=500)
 
     @field_validator("spec_type")
     @classmethod
@@ -266,13 +390,35 @@ class CreateProjectSpecRequest(BaseModel):
 
 
 class UpdateProjectSpecRequest(BaseModel):
-    custom_label: str = Field(min_length=1, max_length=80)
+    custom_label: str | None = Field(default=None, min_length=1, max_length=80)
+    description: str | None = Field(default=None, max_length=500)
+    is_required: bool | None = None
+    default_value: str | None = Field(default=None, max_length=500)
 
-    @field_validator("custom_label")
+
+class BatchUpdateSpecValuesRequest(BaseModel):
+    updates: list[dict[str, object]]
+
+
+class SetShotPageCharacterRequest(BaseModel):
+    character_id: str
+    variant_id: str
+
+
+class CreateCharacterFromRoleRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    description: str = Field(default="", max_length=500)
+    source: str = Field(default="role_query", max_length=80)
+    source_identifier: str | None = None
+    external_url: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    project_id: str | None = None
+
+    @field_validator("name")
     @classmethod
-    def custom_label_not_blank(cls, value: str) -> str:
+    def name_not_blank(cls, value: str) -> str:
         if not value.strip():
-            raise ValueError("自定义规格标签不能为空。")
+            raise ValueError("人物名称不能为空。")
         return value
 
 
@@ -505,6 +651,9 @@ class CreateBranchRequest(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     description: str = Field(default="", max_length=500)
     is_enabled: bool = True
+    condition_type: str = Field(default="", max_length=50)
+    condition_value: str = Field(default="", max_length=500)
+    return_point: str | None = Field(default=None, max_length=500)
 
     @field_validator("name")
     @classmethod
@@ -518,6 +667,9 @@ class UpdateBranchRequest(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=80)
     description: str | None = Field(default=None, max_length=500)
     is_enabled: bool | None = None
+    condition_type: str | None = Field(default=None, max_length=50)
+    condition_value: str | None = Field(default=None, max_length=500)
+    return_point: str | None = Field(default=None, max_length=500)
 
     @field_validator("name")
     @classmethod
@@ -528,13 +680,69 @@ class UpdateBranchRequest(BaseModel):
 
     @model_validator(mode="after")
     def at_least_one_field(self):
-        if all(v is None for v in (self.name, self.description, self.is_enabled)):
+        if all(v is None for v in (self.name, self.description, self.is_enabled,
+                                   self.condition_type, self.condition_value, self.return_point)):
             raise ValueError("至少需要提供一个更新字段。")
         return self
 
 
 class SetMaterialsRequest(BaseModel):
     material_ids: list[str]
+
+
+# ── v0.5.4 Story Structure Request Models ───────────────────────────
+
+class CreateBranchOverrideRequest(BaseModel):
+    override_type: str = Field(min_length=1, max_length=50)
+    target_id: str | None = None
+    character_id: str | None = None
+    variant_id: str | None = None
+    material_id: str | None = None
+    material_page_id: str | None = None
+    param_key: str | None = Field(default=None, max_length=100)
+    param_value: str | None = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def validate_override_type(self):
+        if self.override_type not in ("character", "material", "parameter"):
+            raise ValueError("override_type 必须为 character/material/parameter")
+        return self
+
+
+class UpdateBranchOverrideRequest(BaseModel):
+    target_id: str | None = None
+    character_id: str | None = None
+    variant_id: str | None = None
+    material_id: str | None = None
+    material_page_id: str | None = None
+    param_key: str | None = Field(default=None, max_length=100)
+    param_value: str | None = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def at_least_one_field(self):
+        if all(v is None for v in (self.target_id, self.character_id, self.variant_id,
+                                   self.material_id, self.material_page_id,
+                                   self.param_key, self.param_value)):
+            raise ValueError("至少需要提供一个更新字段。")
+        return self
+
+
+class CreateSnapshotRequest(BaseModel):
+    label: str = Field(default="", max_length=200)
+
+
+class PrecheckRequest(BaseModel):
+    scope: str = Field(default="project")
+    scope_id: str | None = None
+
+    @model_validator(mode="after")
+    def validate_scope(self):
+        valid_scopes = ("project", "chapter", "large_scene", "small_scene", "branch", "shot_pages")
+        if self.scope not in valid_scopes:
+            raise ValueError(f"scope 无效，允许值: {', '.join(valid_scopes)}")
+        if self.scope != "project" and not self.scope_id:
+            raise ValueError(f"scope={self.scope} 需要 scope_id")
+        return self
 
 
 # ── v0.4.1 Request Models ───────────────────────────────────────────
@@ -634,6 +842,21 @@ class ReorderMaterialPagesRequest(BaseModel):
     page_ids: list[str] = Field(min_length=1)
 
 
+class CopyMaterialRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+
+    @field_validator("name")
+    @classmethod
+    def name_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("素材名称不能为空。")
+        return value
+
+
+class CreateMaterialVersionRequest(BaseModel):
+    label: str | None = Field(default=None, max_length=120)
+
+
 # 状态码到错误码的映射，保持 API 错误响应统一可追溯。
 _STATUS_CODE_TO_ERROR_CODE: dict[int, str] = {
     400: "VALIDATION_ERROR",
@@ -670,6 +893,27 @@ def _build_error_payload(
     return payload
 
 
+def _detect_project_blockers(project: dict, stats: dict) -> list[dict[str, str]]:
+    """检测项目阻塞项，返回阻塞原因列表。
+
+    阻塞项：
+    - 无章节：项目无法开始组织剧本
+    - 无场景页：没有可编译的跑图目标
+    - 无关联素材：场景页缺少素材映射
+    - 无关联人物：缺少角色规格
+    """
+    blockers: list[dict[str, str]] = []
+    if stats.get("chapter_count", 0) == 0:
+        blockers.append({"code": "NO_CHAPTER", "message": "项目还没有章节，无法组织剧本。"})
+    if stats.get("shot_page_count", 0) == 0:
+        blockers.append({"code": "NO_SHOT_PAGE", "message": "项目还没有场景页，没有可生成的目标。"})
+    if stats.get("material_count", 0) == 0:
+        blockers.append({"code": "NO_MATERIAL", "message": "项目还没有关联素材。"})
+    if stats.get("character_count", 0) == 0:
+        blockers.append({"code": "NO_CHARACTER", "message": "项目还没有关联人物。"})
+    return blockers
+
+
 def create_app(
     *,
     data_root: Path | None = None,
@@ -679,7 +923,7 @@ def create_app(
 ) -> FastAPI:
     app = FastAPI(
         title="Atelier API",
-        version="0.5.0",
+        version="0.5.4",
         docs_url="/api/docs",
         redoc_url=None,
     )
@@ -859,20 +1103,39 @@ def create_app(
             raise HTTPException(status_code=500, detail=str(error)) from error
 
     @app.get("/api/projects")
-    def list_projects() -> dict[str, object]:
-        projects = manager.list_projects()
+    def list_projects(
+        q: str | None = None,
+        status: str | None = None,
+        archived: bool = False,
+        trash: bool = False,
+        sort: str = "updated",
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, object]:
+        result = manager.list_projects(
+            query=q,
+            status=status,
+            include_archived=archived,
+            include_deleted=trash,
+            sort=sort,
+            limit=limit,
+            offset=offset,
+        )
         return {
             "database_environment": manager.active_environment,
-            "items": projects,
-            "total": len(projects),
+            "items": result["items"],
+            "total": result["total"],
+            "limit": result["limit"],
+            "offset": result["offset"],
+            "has_more": result["has_more"],
         }
 
     @app.post("/api/projects", status_code=status.HTTP_201_CREATED)
     def create_project(request: CreateProjectRequest) -> dict[str, object]:
         try:
-            project = manager.create_project(request.name)
+            project = manager.create_project(request.name, request.description)
         except ValueError as error:
-            raise HTTPException(status_code=409, detail=str(error)) from error
+            raise HTTPException(status_code=422, detail=str(error)) from error
         return {
             "database_environment": manager.active_environment,
             "project": project,
@@ -887,6 +1150,256 @@ def create_app(
             "database_environment": manager.active_environment,
             "project": project,
         }
+
+    @app.patch("/api/projects/{project_id}")
+    def update_project(project_id: str, request: UpdateProjectRequest) -> dict[str, object]:
+        try:
+            project = manager.update_project(
+                project_id,
+                name=request.name,
+                description=request.description,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        if not project:
+            raise HTTPException(status_code=404, detail="项目不存在。")
+        return {
+            "database_environment": manager.active_environment,
+            "project": project,
+        }
+
+    @app.post("/api/projects/{project_id}/archive")
+    def archive_project(project_id: str) -> dict[str, object]:
+        project = manager.archive_project(project_id)
+        if not project:
+            raise HTTPException(status_code=404, detail="项目不存在。")
+        return {
+            "database_environment": manager.active_environment,
+            "project": project,
+        }
+
+    @app.post("/api/projects/{project_id}/restore")
+    def restore_project(project_id: str) -> dict[str, object]:
+        project = manager.restore_project(project_id)
+        if not project:
+            raise HTTPException(status_code=404, detail="项目不存在。")
+        return {
+            "database_environment": manager.active_environment,
+            "project": project,
+        }
+
+    @app.delete("/api/projects/{project_id}")
+    def delete_project(project_id: str) -> dict[str, object]:
+        project = manager.soft_delete_project(project_id)
+        if not project:
+            raise HTTPException(status_code=404, detail="项目不存在。")
+        return {
+            "database_environment": manager.active_environment,
+            "project": project,
+        }
+
+    @app.delete("/api/projects/{project_id}/permanent")
+    def permanent_delete_project(project_id: str) -> dict[str, object]:
+        cover_dir = manager.data_root / "projects" / project_id
+        if cover_dir.exists():
+            try:
+                shutil.rmtree(cover_dir)
+            except OSError:
+                pass
+        deleted = manager.permanent_delete_project(project_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="项目不存在。")
+        return {
+            "database_environment": manager.active_environment,
+            "deleted": True,
+            "project_id": project_id,
+        }
+
+    @app.post("/api/projects/{project_id}/copy", status_code=status.HTTP_201_CREATED)
+    def copy_project(project_id: str, request: CopyProjectRequest) -> dict[str, object]:
+        try:
+            project = manager.copy_project(project_id, request.name)
+        except ValueError as error:
+            msg = str(error)
+            if "不存在" in msg:
+                raise HTTPException(status_code=404, detail=msg) from error
+            raise HTTPException(status_code=422, detail=msg) from error
+        return {
+            "database_environment": manager.active_environment,
+            "project": project,
+        }
+
+    @app.get("/api/projects/{project_id}/overview")
+    def get_project_overview(project_id: str) -> dict[str, object]:
+        project = manager.get_project(project_id)
+        if not project:
+            raise HTTPException(status_code=404, detail="项目不存在。")
+        stats = manager.get_project_stats(project_id)
+        return {
+            "database_environment": manager.active_environment,
+            "project": project,
+            "stats": stats,
+            "blockers": _detect_project_blockers(project, stats),
+        }
+
+    @app.post("/api/projects/{project_id}/cover")
+    async def upload_project_cover(
+        project_id: str,
+        file: UploadFile = File(...),
+    ) -> dict[str, object]:
+        if manager.get_project(project_id) is None:
+            raise HTTPException(status_code=404, detail="项目不存在。")
+
+        MAX_SIZE = 20 * 1024 * 1024  # 20 MB
+        contents = await file.read()
+        if len(contents) > MAX_SIZE:
+            raise HTTPException(status_code=413, detail="项目封面文件超过 20 MB 限制。")
+        if not contents:
+            raise HTTPException(status_code=422, detail="项目封面文件为空。")
+
+        try:
+            image = Image.open(io.BytesIO(contents))
+            image.load()
+        except (UnidentifiedImageError, OSError) as error:
+            raise HTTPException(
+                status_code=415,
+                detail="项目封面格式不支持或文件已损坏。",
+            ) from error
+
+        if image.width > 16384 or image.height > 16384:
+            raise HTTPException(
+                status_code=422,
+                detail="项目封面最长边不得超过 16,384 像素。",
+            )
+
+        ext_map = {
+            "JPEG": "jpg",
+            "PNG": "png",
+            "WEBP": "webp",
+        }
+        fmt = image.format
+        if fmt not in ext_map:
+            raise HTTPException(
+                status_code=415,
+                detail="项目封面格式不支持，仅接受 JPG、PNG、WebP。",
+            )
+
+        cover_dir = manager.data_root / "projects" / project_id
+        cover_dir.mkdir(parents=True, exist_ok=True)
+        original_filename = f"cover.{ext_map[fmt]}"
+        thumbnail_filename = "cover_thumb.webp"
+        original_path = cover_dir / original_filename
+        thumbnail_path = cover_dir / thumbnail_filename
+        tmp_original = cover_dir / f"{original_filename}.tmp"
+        tmp_thumbnail = cover_dir / f"{thumbnail_filename}.tmp"
+
+        try:
+            save_image = image
+            if fmt == "JPEG" and save_image.mode not in ("RGB", "L"):
+                save_image = save_image.convert("RGB")
+            save_image.save(tmp_original, format=fmt)
+
+            thumb = image.copy()
+            thumb.thumbnail((512, 512), Image.Resampling.LANCZOS)
+            if thumb.mode not in ("RGB", "RGBA"):
+                thumb = thumb.convert("RGB")
+            thumb.save(tmp_thumbnail, format="WEBP", quality=82)
+        except OSError as error:
+            for tmp in (tmp_original, tmp_thumbnail):
+                if tmp.exists():
+                    try:
+                        tmp.unlink()
+                    except OSError:
+                        pass
+            raise HTTPException(
+                status_code=422,
+                detail="项目封面处理失败，请检查图片内容。",
+            ) from error
+
+        if original_path.exists():
+            original_path.unlink()
+        tmp_original.replace(original_path)
+        if thumbnail_path.exists():
+            thumbnail_path.unlink()
+        tmp_thumbnail.replace(thumbnail_path)
+
+        rel_cover = f"projects/{project_id}/{original_filename}"
+        updated = manager.set_project_cover_path(project_id, cover_path=rel_cover)
+        if updated is None:
+            raise HTTPException(status_code=404, detail="项目不存在。")
+
+        return {
+            "database_environment": manager.active_environment,
+            "project": updated,
+            "cover_url": f"/api/projects/{project_id}/cover",
+            "cover_thumbnail_url": f"/api/projects/{project_id}/cover/thumbnail",
+        }
+
+    @app.delete("/api/projects/{project_id}/cover")
+    def delete_project_cover(project_id: str) -> dict[str, object]:
+        if manager.get_project(project_id) is None:
+            raise HTTPException(status_code=404, detail="项目不存在。")
+        cover_dir = manager.data_root / "projects" / project_id
+        if cover_dir.exists():
+            try:
+                shutil.rmtree(cover_dir)
+            except OSError:
+                pass
+        manager.set_project_cover_path(project_id, cover_path=None)
+        return {
+            "database_environment": manager.active_environment,
+            "deleted": True,
+            "project_id": project_id,
+        }
+
+    @app.get("/api/projects/{project_id}/cover")
+    def get_project_cover(project_id: str):
+        project = manager.get_project(project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="项目不存在。")
+        rel_path = project.get("cover_path")
+        if not rel_path:
+            raise HTTPException(status_code=404, detail="项目暂无封面。")
+        abs_path = (manager.data_root / rel_path).resolve()
+        projects_root = (manager.data_root / "projects").resolve()
+        try:
+            abs_path.relative_to(projects_root)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail="项目暂无封面。") from error
+        if not abs_path.exists():
+            raise HTTPException(status_code=404, detail="项目暂无封面。")
+        ext_to_media = {
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".png": "image/png",
+            ".webp": "image/webp",
+        }
+        media_type = ext_to_media.get(abs_path.suffix.lower(), "application/octet-stream")
+        return FileResponse(
+            str(abs_path),
+            media_type=media_type,
+            headers={"Cache-Control": "private, max-age=3600"},
+        )
+
+    @app.get("/api/projects/{project_id}/cover/thumbnail")
+    def get_project_cover_thumbnail(project_id: str):
+        project = manager.get_project(project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="项目不存在。")
+        cover_dir = manager.data_root / "projects" / project_id
+        thumbnail_path = (cover_dir / "cover_thumb.webp").resolve()
+        projects_root = (manager.data_root / "projects").resolve()
+        try:
+            thumbnail_path.relative_to(projects_root)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail="项目暂无封面缩略图。") from error
+        if not thumbnail_path.exists():
+            raise HTTPException(status_code=404, detail="项目暂无封面缩略图。")
+        return FileResponse(
+            str(thumbnail_path),
+            media_type="image/webp",
+            headers={"Cache-Control": "private, max-age=3600"},
+        )
 
     @app.get("/api/projects/{project_id}/chapters")
     def list_chapters(project_id: str) -> dict[str, object]:
@@ -1044,17 +1557,38 @@ def create_app(
     # ── Characters (global) ────────────────────────────────────
 
     @app.get("/api/characters")
-    def list_characters(project_id: str | None = None) -> dict[str, object]:
+    def list_characters(
+        project_id: str | None = None,
+        q: str = "",
+        tag: str = "",
+        archived: bool = False,
+        trash: bool = False,
+        sort: str = "sort_asc",
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, object]:
         if project_id is not None and manager.get_project(project_id) is None:
             raise HTTPException(status_code=404, detail="项目不存在。")
-        characters = manager.list_characters(project_id)
-        for character in characters:
+        if limit < 1 or limit > 200:
+            limit = 100
+        if offset < 0:
+            offset = 0
+        result = manager.list_characters(
+            project_id,
+            search=q or None,
+            tag=tag or None,
+            include_archived=archived,
+            include_deleted=trash,
+            sort=sort,
+            limit=limit,
+            offset=offset,
+        )
+        for character in result["items"]:
             character["stats"] = manager.get_character_stats(str(character["id"]))
         return {
             "database_environment": manager.active_environment,
             "project_id": project_id,
-            "items": characters,
-            "total": len(characters),
+            **result,
         }
 
     @app.post(
@@ -1068,12 +1602,55 @@ def create_app(
         if project_id is not None and manager.get_project(project_id) is None:
             raise HTTPException(status_code=404, detail="项目不存在。")
         try:
-            character = manager.create_character(request.name, project_id)
+            character = manager.create_character(
+                request.name,
+                project_id,
+                description=request.description,
+                source=request.source,
+                source_identifier=request.source_identifier,
+                external_url=request.external_url,
+                tags=request.tags,
+            )
         except ValueError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         return {
             "database_environment": manager.active_environment,
             "character": character,
+        }
+
+    @app.post(
+        "/api/characters/from-role",
+        status_code=status.HTTP_201_CREATED,
+    )
+    def create_character_from_role(
+        request: CreateCharacterFromRoleRequest,
+    ) -> dict[str, object]:
+        """Create a character from role query results."""
+        if request.project_id is not None and manager.get_project(request.project_id) is None:
+            raise HTTPException(status_code=404, detail="项目不存在。")
+        # Check for duplicate names; if exists, return 409 with candidate list
+        existing = manager.list_characters(search=request.name, limit=200)
+        candidates = [
+            {"id": c["id"], "name": c["name"]}
+            for c in existing["items"]
+            if str(c["name"]).lower() == request.name.lower()
+        ]
+        try:
+            character = manager.create_character(
+                request.name,
+                request.project_id,
+                description=request.description,
+                source=request.source,
+                source_identifier=request.source_identifier,
+                external_url=request.external_url,
+                tags=request.tags,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return {
+            "database_environment": manager.active_environment,
+            "character": character,
+            "duplicate_candidates": candidates,
         }
 
     @app.get("/api/characters/{character_id}")
@@ -1088,13 +1665,14 @@ def create_app(
         }
 
     @app.patch("/api/characters/{character_id}")
-    def rename_character(
-        character_id: str, request: RenameCharacterRequest
+    def update_character(
+        character_id: str, request: UpdateCharacterRequest
     ) -> dict[str, object]:
         if manager.get_character(character_id) is None:
             raise HTTPException(status_code=404, detail="人物不存在。")
         try:
-            character = manager.rename_character(character_id, request.name)
+            updates = request.model_dump(exclude_unset=True)
+            character = manager.update_character(character_id, **updates)
         except ValueError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         return {
@@ -1102,15 +1680,174 @@ def create_app(
             "character": character,
         }
 
-    @app.delete("/api/characters/{character_id}")
-    def delete_character(character_id: str) -> dict[str, object]:
-        if manager.get_character(character_id) is None:
-            raise HTTPException(status_code=404, detail="人物不存在。")
-        deleted = manager.delete_character(character_id)
+    @app.post("/api/characters/{character_id}/archive")
+    def archive_character(character_id: str) -> dict[str, object]:
+        character = manager.archive_character(character_id)
+        if character is None:
+            raise HTTPException(status_code=404, detail="人物不存在或已删除。")
         return {
             "database_environment": manager.active_environment,
-            "deleted": deleted,
+            "character": character,
         }
+
+    @app.post("/api/characters/{character_id}/restore")
+    def restore_character(character_id: str) -> dict[str, object]:
+        character = manager.restore_character(character_id)
+        if character is None:
+            raise HTTPException(status_code=404, detail="人物不存在。")
+        return {
+            "database_environment": manager.active_environment,
+            "character": character,
+        }
+
+    @app.delete("/api/characters/{character_id}")
+    def delete_character(character_id: str) -> dict[str, object]:
+        """Soft delete (move to trash)."""
+        result = manager.soft_delete_character(character_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail="人物不存在。")
+        return {
+            "database_environment": manager.active_environment,
+            "character": result,
+            "deleted": True,
+        }
+
+    @app.delete("/api/characters/{character_id}/permanent")
+    def permanent_delete_character(character_id: str) -> dict[str, object]:
+        deleted = manager.permanent_delete_character(character_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="人物不存在。")
+        return {
+            "database_environment": manager.active_environment,
+            "deleted": True,
+        }
+
+    @app.post("/api/characters/{character_id}/copy")
+    def copy_character(
+        character_id: str, request: CopyCharacterRequest
+    ) -> dict[str, object]:
+        try:
+            character = manager.copy_character(character_id, request.new_name)
+        except ValueError as error:
+            status_code = 404 if "不存在" in str(error) else 409
+            raise HTTPException(status_code=status_code, detail=str(error)) from error
+        return {
+            "database_environment": manager.active_environment,
+            "character": character,
+        }
+
+    @app.get("/api/characters/{character_id}/references")
+    def get_character_references(character_id: str) -> dict[str, object]:
+        if manager.get_character(character_id) is None:
+            raise HTTPException(status_code=404, detail="人物不存在。")
+        references = manager.get_character_references(character_id)
+        return {
+            "database_environment": manager.active_environment,
+            "character_id": character_id,
+            **references,
+        }
+
+    @app.put("/api/characters/{character_id}/tags")
+    def set_character_tags(
+        character_id: str, request: SetCharacterTagsRequest
+    ) -> dict[str, object]:
+        character = manager.set_character_tags(character_id, request.tags)
+        if character is None:
+            raise HTTPException(status_code=404, detail="人物不存在。")
+        return {
+            "database_environment": manager.active_environment,
+            "character": character,
+        }
+
+    @app.post("/api/characters/{character_id}/cover")
+    def upload_character_cover(
+        character_id: str, file: UploadFile
+    ) -> dict[str, object]:
+        if manager.get_character(character_id) is None:
+            raise HTTPException(status_code=404, detail="人物不存在。")
+        allowed = {"image/png", "image/jpeg", "image/webp"}
+        content_type = (file.content_type or "").lower()
+        if content_type not in allowed:
+            raise HTTPException(
+                status_code=415,
+                detail="封面格式必须为 PNG/JPEG/WebP。",
+            )
+        payload = file.file.read()
+        if not payload:
+            raise HTTPException(status_code=422, detail="封面文件为空。")
+        if len(payload) > 20 * 1024 * 1024:
+            raise HTTPException(status_code=422, detail="封面大小不能超过 20MB。")
+        try:
+            image = Image.open(io.BytesIO(payload))
+            image.load()
+        except Exception as error:
+            raise HTTPException(
+                status_code=422, detail="封面文件无法解析为图片。"
+            ) from error
+        cover_dir = data_root / "character-covers" / character_id
+        cover_dir.mkdir(parents=True, exist_ok=True)
+        original_path = cover_dir / "original"
+        ext = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}[content_type]
+        original_path = original_path.with_suffix(ext)
+        original_path.write_bytes(payload)
+        # Generate 512px thumbnail
+        thumb = Image.open(io.BytesIO(payload))
+        thumb.thumbnail((512, 512))
+        thumb_path = cover_dir / "thumbnail.webp"
+        thumb.save(thumb_path, format="WEBP", quality=85)
+        character = manager.set_character_cover_path(
+            character_id, str(original_path.relative_to(data_root))
+        )
+        if character is None:
+            raise HTTPException(status_code=404, detail="人物不存在。")
+        return {
+            "database_environment": manager.active_environment,
+            "character": character,
+        }
+
+    @app.delete("/api/characters/{character_id}/cover")
+    def delete_character_cover(character_id: str) -> dict[str, object]:
+        character = manager.get_character(character_id)
+        if character is None:
+            raise HTTPException(status_code=404, detail="人物不存在。")
+        cover_path = character.get("cover_path")
+        if cover_path:
+            cover_dir = data_root / "character-covers" / character_id
+            if cover_dir.exists():
+                shutil.rmtree(cover_dir, ignore_errors=True)
+        updated = manager.set_character_cover_path(character_id, None)
+        if updated is None:
+            raise HTTPException(status_code=404, detail="人物不存在。")
+        return {
+            "database_environment": manager.active_environment,
+            "character": updated,
+        }
+
+    @app.get("/api/characters/{character_id}/cover")
+    def get_character_cover(character_id: str):
+        character = manager.get_character(character_id)
+        if character is None:
+            raise HTTPException(status_code=404, detail="人物不存在。")
+        cover_path = character.get("cover_path")
+        if not cover_path:
+            raise HTTPException(status_code=404, detail="人物未设置封面。")
+        full_path = data_root / cover_path
+        if not full_path.exists():
+            raise HTTPException(status_code=404, detail="封面文件不存在。")
+        return FileResponse(str(full_path))
+
+    @app.get("/api/characters/{character_id}/cover/thumbnail")
+    def get_character_cover_thumbnail(character_id: str):
+        character = manager.get_character(character_id)
+        if character is None:
+            raise HTTPException(status_code=404, detail="人物不存在。")
+        cover_path = character.get("cover_path")
+        if not cover_path:
+            raise HTTPException(status_code=404, detail="人物未设置封面。")
+        thumb_path = data_root / "character-covers" / character_id / "thumbnail.webp"
+        if not thumb_path.exists():
+            raise HTTPException(status_code=404, detail="封面缩略图不存在。")
+        return FileResponse(str(thumb_path))
 
     @app.post("/api/projects/{project_id}/characters/{character_id}")
     def link_character_to_project(project_id: str, character_id: str) -> dict[str, object]:
@@ -1146,10 +1883,14 @@ def create_app(
     # ── Character Variants ──────────────────────────────────────
 
     @app.get("/api/characters/{character_id}/variants")
-    def list_character_variants(character_id: str) -> dict[str, object]:
+    def list_character_variants(
+        character_id: str, include_archived: bool = False
+    ) -> dict[str, object]:
         if manager.get_character(character_id) is None:
             raise HTTPException(status_code=404, detail="人物不存在。")
-        variants = manager.list_character_variants(character_id)
+        variants = manager.list_character_variants(
+            character_id, include_archived=include_archived
+        )
         return {
             "database_environment": manager.active_environment,
             "character_id": character_id,
@@ -1167,7 +1908,15 @@ def create_app(
         if manager.get_character(character_id) is None:
             raise HTTPException(status_code=404, detail="人物不存在。")
         try:
-            variant = manager.create_character_variant(character_id, request.name)
+            variant = manager.create_character_variant(
+                character_id,
+                request.name,
+                description=request.description,
+                default_prompt=request.default_prompt,
+                default_lora_name=request.default_lora_name,
+                default_lora_weight=request.default_lora_weight,
+                default_model_override=request.default_model_override,
+            )
         except ValueError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         return {
@@ -1176,18 +1925,167 @@ def create_app(
         }
 
     @app.patch("/api/character-variants/{variant_id}")
-    def rename_character_variant(
-        variant_id: str, request: RenameCharacterVariantRequest
+    def update_character_variant(
+        variant_id: str, request: UpdateCharacterVariantRequest
     ) -> dict[str, object]:
         if manager.get_character_variant(variant_id) is None:
             raise HTTPException(status_code=404, detail="形象变体不存在。")
         try:
-            variant = manager.rename_character_variant(variant_id, request.name)
+            updates = request.model_dump(exclude_unset=True)
+            variant = manager.update_character_variant(variant_id, **updates)
         except ValueError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         return {
             "database_environment": manager.active_environment,
             "variant": variant,
+        }
+
+    @app.post("/api/character-variants/{variant_id}/copy")
+    def copy_character_variant(
+        variant_id: str, request: CopyCharacterVariantRequest
+    ) -> dict[str, object]:
+        try:
+            variant = manager.copy_character_variant(variant_id, request.new_name)
+        except ValueError as error:
+            status_code = 404 if "不存在" in str(error) else 409
+            raise HTTPException(status_code=status_code, detail=str(error)) from error
+        return {
+            "database_environment": manager.active_environment,
+            "variant": variant,
+        }
+
+    @app.post("/api/character-variants/{variant_id}/archive")
+    def archive_character_variant(variant_id: str) -> dict[str, object]:
+        variant = manager.archive_character_variant(variant_id)
+        if variant is None:
+            raise HTTPException(status_code=404, detail="形象变体不存在。")
+        return {
+            "database_environment": manager.active_environment,
+            "variant": variant,
+        }
+
+    @app.post("/api/character-variants/{variant_id}/restore")
+    def restore_character_variant(variant_id: str) -> dict[str, object]:
+        variant = manager.restore_character_variant(variant_id)
+        if variant is None:
+            raise HTTPException(status_code=404, detail="形象变体不存在。")
+        return {
+            "database_environment": manager.active_environment,
+            "variant": variant,
+        }
+
+    @app.put("/api/characters/{character_id}/variants/reorder")
+    def reorder_character_variants(
+        character_id: str, request: ReorderVariantsRequest
+    ) -> dict[str, object]:
+        if manager.get_character(character_id) is None:
+            raise HTTPException(status_code=404, detail="人物不存在。")
+        try:
+            variants = manager.reorder_character_variants(
+                character_id, request.variant_ids
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return {
+            "database_environment": manager.active_environment,
+            "character_id": character_id,
+            "items": variants,
+            "total": len(variants),
+        }
+
+    @app.post("/api/character-variants/{variant_id}/preview")
+    def upload_character_variant_preview(
+        variant_id: str, file: UploadFile
+    ) -> dict[str, object]:
+        if manager.get_character_variant(variant_id) is None:
+            raise HTTPException(status_code=404, detail="形象变体不存在。")
+        allowed = {"image/png", "image/jpeg", "image/webp"}
+        content_type = (file.content_type or "").lower()
+        if content_type not in allowed:
+            raise HTTPException(
+                status_code=415, detail="预览图格式必须为 PNG/JPEG/WebP。"
+            )
+        payload = file.file.read()
+        if not payload:
+            raise HTTPException(status_code=422, detail="预览图文件为空。")
+        if len(payload) > 20 * 1024 * 1024:
+            raise HTTPException(status_code=422, detail="预览图大小不能超过 20MB。")
+        try:
+            image = Image.open(io.BytesIO(payload))
+            image.load()
+        except Exception as error:
+            raise HTTPException(
+                status_code=422, detail="预览图文件无法解析为图片。"
+            ) from error
+        preview_dir = data_root / "character-variant-previews" / variant_id
+        preview_dir.mkdir(parents=True, exist_ok=True)
+        ext = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}[content_type]
+        original_path = preview_dir / ("original" + ext)
+        original_path.write_bytes(payload)
+        thumb = Image.open(io.BytesIO(payload))
+        thumb.thumbnail((512, 512))
+        thumb_path = preview_dir / "thumbnail.webp"
+        thumb.save(thumb_path, format="WEBP", quality=85)
+        variant = manager.set_character_variant_preview_paths(
+            variant_id,
+            str(original_path.relative_to(data_root)),
+            str(thumb_path.relative_to(data_root)),
+        )
+        if variant is None:
+            raise HTTPException(status_code=404, detail="形象变体不存在。")
+        return {
+            "database_environment": manager.active_environment,
+            "variant": variant,
+        }
+
+    @app.delete("/api/character-variants/{variant_id}/preview")
+    def delete_character_variant_preview(variant_id: str) -> dict[str, object]:
+        variant = manager.get_character_variant(variant_id)
+        if variant is None:
+            raise HTTPException(status_code=404, detail="形象变体不存在。")
+        preview_dir = data_root / "character-variant-previews" / variant_id
+        if preview_dir.exists():
+            shutil.rmtree(preview_dir, ignore_errors=True)
+        updated = manager.set_character_variant_preview_paths(variant_id, None, None)
+        if updated is None:
+            raise HTTPException(status_code=404, detail="形象变体不存在。")
+        return {
+            "database_environment": manager.active_environment,
+            "variant": updated,
+        }
+
+    @app.get("/api/character-variants/{variant_id}/preview")
+    def get_character_variant_preview(variant_id: str):
+        variant = manager.get_character_variant(variant_id)
+        if variant is None:
+            raise HTTPException(status_code=404, detail="形象变体不存在。")
+        preview_path = variant.get("preview_original_path")
+        if not preview_path:
+            raise HTTPException(status_code=404, detail="变体未设置预览图。")
+        full_path = data_root / preview_path
+        if not full_path.exists():
+            raise HTTPException(status_code=404, detail="预览图文件不存在。")
+        return FileResponse(str(full_path))
+
+    @app.get("/api/character-variants/{variant_id}/preview/thumbnail")
+    def get_character_variant_preview_thumbnail(variant_id: str):
+        variant = manager.get_character_variant(variant_id)
+        if variant is None:
+            raise HTTPException(status_code=404, detail="形象变体不存在。")
+        thumb_path = data_root / "character-variant-previews" / variant_id / "thumbnail.webp"
+        if not thumb_path.exists():
+            raise HTTPException(status_code=404, detail="预览图缩略图不存在。")
+        return FileResponse(str(thumb_path))
+
+    @app.get("/api/character-variants/{variant_id}/references")
+    def get_character_variant_references(variant_id: str) -> dict[str, object]:
+        if manager.get_character_variant(variant_id) is None:
+            raise HTTPException(status_code=404, detail="形象变体不存在。")
+        references = manager.get_character_variant_references(variant_id)
+        return {
+            "database_environment": manager.active_environment,
+            "variant_id": variant_id,
+            **references,
         }
 
     @app.delete("/api/character-variants/{variant_id}")
@@ -1218,7 +2116,11 @@ def create_app(
     def create_spec(request: CreateProjectSpecRequest) -> dict[str, object]:
         try:
             spec = manager.create_spec(
-                request.spec_type, request.custom_label
+                request.spec_type,
+                request.custom_label,
+                description=request.description,
+                is_required=request.is_required,
+                default_value=request.default_value,
             )
         except ValueError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
@@ -1234,7 +2136,8 @@ def create_app(
         if manager.get_spec(spec_id) is None:
             raise HTTPException(status_code=404, detail="规格不存在。")
         try:
-            spec = manager.update_spec(spec_id, request.custom_label)
+            updates = request.model_dump(exclude_unset=True)
+            spec = manager.update_spec(spec_id, **updates)
         except ValueError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         return {
@@ -1252,7 +2155,30 @@ def create_app(
             "deleted": deleted,
         }
 
-    # ── Character Spec Values ───────────────────────────────────
+    # ── Character Spec Values & Matrix ─────────────────────────
+
+    @app.get("/api/characters/{character_id}/matrix")
+    def get_character_matrix(character_id: str) -> dict[str, object]:
+        if manager.get_character(character_id) is None:
+            raise HTTPException(status_code=404, detail="人物不存在。")
+        matrix = manager.get_character_spec_matrix(character_id)
+        return {
+            "database_environment": manager.active_environment,
+            **matrix,
+        }
+
+    @app.post("/api/character-spec-values/batch")
+    def batch_update_spec_values(
+        request: BatchUpdateSpecValuesRequest,
+    ) -> dict[str, object]:
+        try:
+            count = manager.batch_update_spec_values(request.updates)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return {
+            "database_environment": manager.active_environment,
+            "updated": count,
+        }
 
     @app.get("/api/character-variants/{variant_id}/spec-values")
     def list_spec_values(variant_id: str) -> dict[str, object]:
@@ -1285,6 +2211,45 @@ def create_app(
             "spec_value": value,
         }
 
+    # ── Shot Page Character References ─────────────────────────
+
+    @app.get("/api/shot-pages/{shot_page_id}/character")
+    def get_shot_page_character(shot_page_id: str) -> dict[str, object]:
+        reference = manager.get_shot_page_character(shot_page_id)
+        if reference is None:
+            raise HTTPException(status_code=404, detail="场景页未绑定人物。")
+        return {
+            "database_environment": manager.active_environment,
+            "shot_page_id": shot_page_id,
+            "reference": reference,
+        }
+
+    @app.put("/api/shot-pages/{shot_page_id}/character")
+    def set_shot_page_character(
+        shot_page_id: str, request: SetShotPageCharacterRequest
+    ) -> dict[str, object]:
+        try:
+            reference = manager.set_shot_page_character(
+                shot_page_id, request.character_id, request.variant_id
+            )
+        except ValueError as error:
+            status_code = 404 if "不存在" in str(error) else 400
+            raise HTTPException(status_code=status_code, detail=str(error)) from error
+        return {
+            "database_environment": manager.active_environment,
+            "shot_page_id": shot_page_id,
+            "reference": reference,
+        }
+
+    @app.delete("/api/shot-pages/{shot_page_id}/character")
+    def clear_shot_page_character(shot_page_id: str) -> dict[str, object]:
+        cleared = manager.clear_shot_page_character(shot_page_id)
+        return {
+            "database_environment": manager.active_environment,
+            "shot_page_id": shot_page_id,
+            "cleared": cleared,
+        }
+
     # ── Materials ──────────────────────────────────────────────
 
     @app.get("/api/materials")
@@ -1293,6 +2258,8 @@ def create_app(
         material_type: str = "",
         validation_status: str = "",
         tag: str = "",
+        archived: bool = False,
+        trash: bool = False,
         limit: int = 60,
         offset: int = 0,
         sort: str = "updated_desc",
@@ -1308,6 +2275,8 @@ def create_app(
             material_type=material_type,
             validation_status=validation_status,
             tag=tag,
+            include_archived=archived,
+            include_deleted=trash,
             limit=limit,
             offset=offset,
             sort=sort,
@@ -1315,6 +2284,15 @@ def create_app(
         return {
             "database_environment": manager.active_environment,
             **result,
+        }
+
+    @app.get("/api/materials/trash")
+    def list_trash_materials() -> dict[str, object]:
+        items = manager.list_deleted_materials()
+        return {
+            "database_environment": manager.active_environment,
+            "items": items,
+            "total": len(items),
         }
 
     @app.post(
@@ -1371,20 +2349,133 @@ def create_app(
 
     @app.delete("/api/materials/{material_id}")
     def delete_material(material_id: str) -> dict[str, object]:
-        result = manager.delete_material(material_id)
+        result = manager.soft_delete_material(material_id)
         if result is None:
             raise HTTPException(status_code=404, detail="素材不存在。")
-        # Clean up material image directory
+        return {
+            "database_environment": manager.active_environment,
+            "deleted": True,
+            "material_id": material_id,
+        }
+
+    @app.post("/api/materials/{material_id}/archive")
+    def archive_material(material_id: str) -> dict[str, object]:
+        material = manager.archive_material(material_id)
+        if material is None:
+            raise HTTPException(status_code=404, detail="素材不存在。")
+        return {
+            "database_environment": manager.active_environment,
+            "material": material,
+        }
+
+    @app.post("/api/materials/{material_id}/restore")
+    def restore_material(material_id: str) -> dict[str, object]:
+        material = manager.restore_material(material_id)
+        if material is None:
+            raise HTTPException(status_code=404, detail="素材不存在。")
+        return {
+            "database_environment": manager.active_environment,
+            "material": material,
+        }
+
+    @app.delete("/api/materials/{material_id}/permanent")
+    def permanent_delete_material(material_id: str) -> dict[str, object]:
+        # Clean up material image directory before permanent deletion
         material_dir = manager.data_root / "materials" / material_id
         if material_dir.exists():
             try:
                 shutil.rmtree(material_dir)
             except OSError:
                 pass
+        result = manager.permanent_delete_material(material_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail="素材不存在。")
         return {
             "database_environment": manager.active_environment,
             "deleted": True,
             "material_id": material_id,
+        }
+
+    @app.get("/api/materials/{material_id}/references")
+    def get_material_references(material_id: str) -> dict[str, object]:
+        refs = manager.get_material_references(material_id)
+        if refs is None:
+            raise HTTPException(status_code=404, detail="素材不存在。")
+        return {
+            "database_environment": manager.active_environment,
+            "material_id": material_id,
+            **refs,
+        }
+
+    @app.post("/api/materials/{material_id}/copy", status_code=status.HTTP_201_CREATED)
+    def copy_material(material_id: str, request: CopyMaterialRequest) -> dict[str, object]:
+        try:
+            material = manager.copy_material(material_id, new_name=request.name)
+        except ValueError as error:
+            msg = str(error)
+            if "不存在" in msg:
+                raise HTTPException(status_code=404, detail=msg) from error
+            raise HTTPException(status_code=422, detail=msg) from error
+        return {
+            "database_environment": manager.active_environment,
+            "material": material,
+        }
+
+    # ── Material Versions (v0.5.2) ─────────────────────────────
+
+    @app.post(
+        "/api/materials/{material_id}/versions",
+        status_code=status.HTTP_201_CREATED,
+    )
+    def create_material_version(
+        material_id: str, request: CreateMaterialVersionRequest
+    ) -> dict[str, object]:
+        if manager.get_material(material_id) is None:
+            raise HTTPException(status_code=404, detail="素材不存在。")
+        version = manager.create_material_version(
+            material_id, label=request.label
+        )
+        if version is None:
+            raise HTTPException(status_code=404, detail="素材不存在。")
+        return {
+            "database_environment": manager.active_environment,
+            "version": version,
+        }
+
+    @app.get("/api/materials/{material_id}/versions")
+    def list_material_versions(material_id: str) -> dict[str, object]:
+        if manager.get_material(material_id) is None:
+            raise HTTPException(status_code=404, detail="素材不存在。")
+        items = manager.list_material_versions(material_id)
+        return {
+            "database_environment": manager.active_environment,
+            "material_id": material_id,
+            "items": items,
+            "total": len(items),
+        }
+
+    @app.get("/api/materials/{material_id}/versions/{version_number}")
+    def get_material_version(material_id: str, version_number: int) -> dict[str, object]:
+        if manager.get_material(material_id) is None:
+            raise HTTPException(status_code=404, detail="素材不存在。")
+        version = manager.get_material_version(material_id, version_number)
+        if version is None:
+            raise HTTPException(status_code=404, detail="版本不存在。")
+        return {
+            "database_environment": manager.active_environment,
+            "version": version,
+        }
+
+    @app.post("/api/materials/{material_id}/versions/{version_number}/restore")
+    def restore_material_version(
+        material_id: str, version_number: int
+    ) -> dict[str, object]:
+        material = manager.restore_material_version(material_id, version_number)
+        if material is None:
+            raise HTTPException(status_code=404, detail="素材或版本不存在。")
+        return {
+            "database_environment": manager.active_environment,
+            "material": material,
         }
 
     @app.get("/api/material-tags")
@@ -1839,6 +2930,9 @@ def create_app(
                 pt, parent_id, request.name,
                 description=request.description,
                 is_enabled=request.is_enabled,
+                condition_type=request.condition_type,
+                condition_value=request.condition_value,
+                return_point=request.return_point,
             )
         except ValueError as error:
             msg = str(error)
@@ -1867,6 +2961,9 @@ def create_app(
                 name=request.name,
                 description=request.description,
                 is_enabled=request.is_enabled,
+                condition_type=request.condition_type,
+                condition_value=request.condition_value,
+                return_point=request.return_point,
             )
         except ValueError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
@@ -2210,6 +3307,387 @@ def create_app(
             "database_environment": manager.active_environment,
             "material_id": material_id,
             "pages": pages,
+        }
+
+    # ── Material Page Preview & Copy (v0.5.2) ──────────────────
+
+    @app.post("/api/material-pages/{page_id}/copy", status_code=status.HTTP_201_CREATED)
+    def copy_material_page(page_id: str) -> dict[str, object]:
+        page = manager.copy_material_page(page_id)
+        if page is None:
+            raise HTTPException(status_code=404, detail="素材页不存在")
+        return {
+            "database_environment": manager.active_environment,
+            **page,
+        }
+
+    @app.post("/api/material-pages/{page_id}/preview")
+    async def upload_material_page_preview(
+        page_id: str,
+        file: UploadFile = File(...),
+    ) -> dict[str, object]:
+        if manager.get_material_page(page_id) is None:
+            raise HTTPException(status_code=404, detail="素材页不存在")
+
+        MAX_SIZE = 20 * 1024 * 1024  # 20 MB
+        contents = await file.read()
+        if len(contents) > MAX_SIZE:
+            raise HTTPException(status_code=413, detail="预览图文件超过 20 MB 限制。")
+        if not contents:
+            raise HTTPException(status_code=422, detail="预览图文件为空。")
+
+        try:
+            image = Image.open(io.BytesIO(contents))
+            image.load()
+        except (UnidentifiedImageError, OSError) as error:
+            raise HTTPException(
+                status_code=415,
+                detail="预览图格式不支持或文件已损坏。",
+            ) from error
+
+        if image.width > 16384 or image.height > 16384:
+            raise HTTPException(
+                status_code=422,
+                detail="预览图最长边不得超过 16,384 像素。",
+            )
+
+        ext_map = {
+            "JPEG": "jpg",
+            "PNG": "png",
+            "WEBP": "webp",
+        }
+        fmt = image.format
+        if fmt not in ext_map:
+            raise HTTPException(
+                status_code=415,
+                detail="预览图格式不支持，仅接受 JPG、PNG、WebP。",
+            )
+
+        page_dir = manager.data_root / "material_pages" / page_id
+        page_dir.mkdir(parents=True, exist_ok=True)
+        original_filename = f"original.{ext_map[fmt]}"
+        thumbnail_filename = "thumbnail.webp"
+        original_path = page_dir / original_filename
+        thumbnail_path = page_dir / thumbnail_filename
+        tmp_original = page_dir / f"{original_filename}.tmp"
+        tmp_thumbnail = page_dir / f"{thumbnail_filename}.tmp"
+
+        try:
+            save_image = image
+            if fmt == "JPEG" and save_image.mode not in ("RGB", "L"):
+                save_image = save_image.convert("RGB")
+            save_image.save(tmp_original, format=fmt)
+
+            thumb = image.copy()
+            thumb.thumbnail((512, 512), Image.Resampling.LANCZOS)
+            if thumb.mode not in ("RGB", "RGBA"):
+                thumb = thumb.convert("RGB")
+            thumb.save(tmp_thumbnail, format="WEBP", quality=82)
+        except OSError as error:
+            for tmp in (tmp_original, tmp_thumbnail):
+                if tmp.exists():
+                    try:
+                        tmp.unlink()
+                    except OSError:
+                        pass
+            raise HTTPException(
+                status_code=422,
+                detail="预览图处理失败，请检查图片内容。",
+            ) from error
+
+        if original_path.exists():
+            original_path.unlink()
+        tmp_original.replace(original_path)
+        if thumbnail_path.exists():
+            thumbnail_path.unlink()
+        tmp_thumbnail.replace(thumbnail_path)
+
+        rel_original = f"material_pages/{page_id}/{original_filename}"
+        rel_thumbnail = f"material_pages/{page_id}/{thumbnail_filename}"
+        updated = manager.set_material_page_preview_paths(
+            page_id,
+            original_path=rel_original,
+            thumbnail_path=rel_thumbnail,
+        )
+        if updated is None:
+            raise HTTPException(status_code=404, detail="素材页不存在。")
+
+        return {
+            "database_environment": manager.active_environment,
+            "preview_url": f"/api/material-pages/{page_id}/preview",
+            "thumbnail_url": f"/api/material-pages/{page_id}/thumbnail",
+        }
+
+    @app.delete("/api/material-pages/{page_id}/preview")
+    def delete_material_page_preview(page_id: str) -> dict[str, object]:
+        page = manager.get_material_page(page_id)
+        if page is None:
+            raise HTTPException(status_code=404, detail="素材页不存在")
+        page_dir = manager.data_root / "material_pages" / page_id
+        if page_dir.exists():
+            try:
+                shutil.rmtree(page_dir)
+            except OSError:
+                pass
+        manager.set_material_page_preview_paths(
+            page_id,
+            original_path=None,
+            thumbnail_path=None,
+        )
+        return {
+            "database_environment": manager.active_environment,
+            "deleted": True,
+            "page_id": page_id,
+        }
+
+    @app.get("/api/material-pages/{page_id}/preview")
+    def get_material_page_preview(page_id: str):
+        page = manager.get_material_page(page_id)
+        if page is None:
+            raise HTTPException(status_code=404, detail="素材页不存在")
+        rel_path = page.get("preview_original_path")
+        if not rel_path:
+            raise HTTPException(status_code=404, detail="素材页暂无预览图。")
+        abs_path = (manager.data_root / rel_path).resolve()
+        pages_root = (manager.data_root / "material_pages").resolve()
+        try:
+            abs_path.relative_to(pages_root)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail="素材页暂无预览图。") from error
+        if not abs_path.exists():
+            raise HTTPException(status_code=404, detail="素材页暂无预览图。")
+        ext_to_media = {
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".png": "image/png",
+            ".webp": "image/webp",
+        }
+        media_type = ext_to_media.get(abs_path.suffix.lower(), "application/octet-stream")
+        return FileResponse(
+            str(abs_path),
+            media_type=media_type,
+            headers={"Cache-Control": "private, max-age=3600"},
+        )
+
+    @app.get("/api/material-pages/{page_id}/thumbnail")
+    def get_material_page_thumbnail(page_id: str):
+        page = manager.get_material_page(page_id)
+        if page is None:
+            raise HTTPException(status_code=404, detail="素材页不存在")
+        rel_path = page.get("preview_thumbnail_path")
+        if not rel_path:
+            raise HTTPException(status_code=404, detail="素材页暂无缩略图。")
+        abs_path = (manager.data_root / rel_path).resolve()
+        pages_root = (manager.data_root / "material_pages").resolve()
+        try:
+            abs_path.relative_to(pages_root)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail="素材页暂无缩略图。") from error
+        if not abs_path.exists():
+            raise HTTPException(status_code=404, detail="素材页暂无缩略图。")
+        ext_to_media = {
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".png": "image/png",
+            ".webp": "image/webp",
+        }
+        media_type = ext_to_media.get(abs_path.suffix.lower(), "application/octet-stream")
+        return FileResponse(
+            str(abs_path),
+            media_type=media_type,
+            headers={"Cache-Control": "private, max-age=3600"},
+        )
+
+    # ── v0.5.4 Story Structure Routes ─────────────────────────────────
+
+    @app.get("/api/branches/{branch_id}/overrides")
+    def list_branch_overrides(branch_id: str) -> dict[str, object]:
+        if manager.get_branch(branch_id) is None:
+            raise HTTPException(status_code=404, detail="分支不存在")
+        items = manager.list_branch_overrides(branch_id)
+        return {
+            "database_environment": manager.active_environment,
+            "branch_id": branch_id,
+            "items": items,
+            "total": len(items),
+        }
+
+    @app.post("/api/branches/{branch_id}/overrides", status_code=status.HTTP_201_CREATED)
+    def create_branch_override(branch_id: str, request: CreateBranchOverrideRequest) -> dict[str, object]:
+        try:
+            override = manager.create_branch_override(
+                branch_id, request.override_type,
+                target_id=request.target_id,
+                character_id=request.character_id,
+                variant_id=request.variant_id,
+                material_id=request.material_id,
+                material_page_id=request.material_page_id,
+                param_key=request.param_key,
+                param_value=request.param_value,
+            )
+        except ValueError as error:
+            msg = str(error)
+            code = 404 if "不存在" in msg else 409
+            raise HTTPException(status_code=code, detail=msg) from error
+        return {
+            "database_environment": manager.active_environment,
+            "override": override,
+        }
+
+    @app.patch("/api/branch-overrides/{override_id}")
+    def update_branch_override(override_id: str, request: UpdateBranchOverrideRequest) -> dict[str, object]:
+        try:
+            override = manager.update_branch_override(
+                override_id,
+                target_id=request.target_id,
+                character_id=request.character_id,
+                variant_id=request.variant_id,
+                material_id=request.material_id,
+                material_page_id=request.material_page_id,
+                param_key=request.param_key,
+                param_value=request.param_value,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        if override is None:
+            raise HTTPException(status_code=404, detail="覆盖配置不存在")
+        return {
+            "database_environment": manager.active_environment,
+            "override": override,
+        }
+
+    @app.delete("/api/branch-overrides/{override_id}")
+    def delete_branch_override(override_id: str) -> dict[str, object]:
+        result = manager.delete_branch_override(override_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail="覆盖配置不存在")
+        return {
+            "database_environment": manager.active_environment,
+            "deleted": result,
+        }
+
+    @app.get("/api/shot-pages/{shot_page_id}/effective-overrides")
+    def get_effective_overrides(shot_page_id: str, branch_id: str) -> dict[str, object]:
+        try:
+            result = manager.get_effective_overrides(shot_page_id, branch_id)
+        except ValueError as error:
+            msg = str(error)
+            code = 404 if "不存在" in msg else 422
+            raise HTTPException(status_code=code, detail=msg) from error
+        return {
+            "database_environment": manager.active_environment,
+            **result,
+        }
+
+    @app.get("/api/projects/{project_id}/snapshots")
+    def list_story_snapshots(project_id: str) -> dict[str, object]:
+        if manager.get_project(project_id) is None:
+            raise HTTPException(status_code=404, detail="项目不存在")
+        items = manager.list_story_snapshots(project_id)
+        return {
+            "database_environment": manager.active_environment,
+            "project_id": project_id,
+            "items": items,
+            "total": len(items),
+        }
+
+    @app.post("/api/projects/{project_id}/snapshots", status_code=status.HTTP_201_CREATED)
+    def create_story_snapshot(project_id: str, request: CreateSnapshotRequest) -> dict[str, object]:
+        try:
+            snapshot = manager.create_story_snapshot(project_id, request.label)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        if snapshot is None:
+            raise HTTPException(status_code=404, detail="项目不存在")
+        return {
+            "database_environment": manager.active_environment,
+            "snapshot": snapshot,
+        }
+
+    @app.get("/api/story-snapshots/{snapshot_id}")
+    def get_story_snapshot(snapshot_id: str) -> dict[str, object]:
+        snapshot = manager.get_story_snapshot(snapshot_id)
+        if snapshot is None:
+            raise HTTPException(status_code=404, detail="快照不存在")
+        return {
+            "database_environment": manager.active_environment,
+            "snapshot": snapshot,
+        }
+
+    @app.post("/api/story-snapshots/{snapshot_id}/restore")
+    def restore_story_snapshot(snapshot_id: str) -> dict[str, object]:
+        try:
+            result = manager.restore_story_snapshot(snapshot_id)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        if result is None:
+            raise HTTPException(status_code=404, detail="快照不存在")
+        return {
+            "database_environment": manager.active_environment,
+            **result,
+        }
+
+    @app.get("/api/projects/{project_id}/operations")
+    def list_operations(project_id: str, limit: int = 50) -> dict[str, object]:
+        if manager.get_project(project_id) is None:
+            raise HTTPException(status_code=404, detail="项目不存在")
+        items = manager.list_operations(project_id, limit=limit)
+        return {
+            "database_environment": manager.active_environment,
+            "project_id": project_id,
+            "items": items,
+            "total": len(items),
+        }
+
+    @app.post("/api/operations/{operation_id}/undo")
+    def undo_operation(operation_id: str) -> dict[str, object]:
+        try:
+            result = manager.undo_operation(operation_id)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        if result is None:
+            raise HTTPException(status_code=404, detail="操作记录不存在")
+        return {
+            "database_environment": manager.active_environment,
+            **result,
+        }
+
+    @app.post("/api/operations/{operation_id}/redo")
+    def redo_operation(operation_id: str) -> dict[str, object]:
+        try:
+            result = manager.redo_operation(operation_id)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        if result is None:
+            raise HTTPException(status_code=404, detail="操作记录不存在")
+        return {
+            "database_environment": manager.active_environment,
+            **result,
+        }
+
+    @app.get("/api/shot-pages/{shot_page_id}/inheritance")
+    def get_shot_page_inheritance(shot_page_id: str) -> dict[str, object]:
+        result = manager.get_shot_page_inheritance(shot_page_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail="场景页不存在")
+        return {
+            "database_environment": manager.active_environment,
+            **result,
+        }
+
+    @app.post("/api/projects/{project_id}/precheck")
+    def precheck_compilation(project_id: str, request: PrecheckRequest) -> dict[str, object]:
+        try:
+            result = manager.precheck_compilation(
+                project_id, request.scope, request.scope_id
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        if result is None:
+            raise HTTPException(status_code=404, detail="项目不存在")
+        return {
+            "database_environment": manager.active_environment,
+            **result,
         }
 
     # Warm the production lookup cache before the first page request. Test

@@ -97,7 +97,8 @@ class CharacterApiTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 422)
 
-    def test_duplicate_character_name_in_same_project_rejected(self) -> None:
+    def test_duplicate_character_name_in_same_project_allowed(self) -> None:
+        """v0.5.3: 人物库去除唯一约束，支持同名人物和复制场景。"""
         self.client.post(
             f"/api/characters?project_id={self.project['id']}",
             json={"name": "同名角色"},
@@ -106,7 +107,7 @@ class CharacterApiTests(unittest.TestCase):
             f"/api/characters?project_id={self.project['id']}",
             json={"name": "同名角色"},
         )
-        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.status_code, 201)
 
     def test_character_list_isolated_between_projects(self) -> None:
         other = self.manager.create_project("另一个项目")
@@ -146,13 +147,14 @@ class CharacterApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["character"]["name"], "新名称")
 
-    def test_rename_character_rejects_duplicate(self) -> None:
+    def test_rename_character_allows_duplicate(self) -> None:
+        """v0.5.3: 允许重名，改名到已有名称不再冲突。"""
         first = self.manager.create_character("角色A", str(self.project["id"]))
         self.manager.create_character("角色B", str(self.project["id"]))
         response = self.client.patch(
             f"/api/characters/{first['id']}", json={"name": "角色B"}
         )
-        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.status_code, 200)
 
     def test_rename_missing_character_returns_404(self) -> None:
         response = self.client.patch(
@@ -164,17 +166,21 @@ class CharacterApiTests(unittest.TestCase):
         char = self.manager.create_character("待删除", str(self.project["id"]))
         response = self.client.delete(f"/api/characters/{char['id']}")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["deleted"]["id"], char["id"])
-        self.assertIsNone(self.manager.get_character(str(char["id"])))
+        self.assertTrue(response.json()["deleted"])
+        self.assertIsNotNone(response.json()["character"]["deleted_at"])
+        # 软删除后默认列表不可见
+        listed = self.manager.list_characters(str(self.project["id"]))
+        self.assertEqual(listed["total"], 0)
 
-    def test_delete_character_cascades_to_variants(self) -> None:
+    def test_soft_delete_character_keeps_variants(self) -> None:
+        """v0.5.3: 软删除人物后变体仍保留（回收站语义）。"""
         char = self.manager.create_character("级联角色", str(self.project["id"]))
         variants = self.manager.list_character_variants(str(char["id"]))
         self.assertEqual(len(variants), 1)
         self.client.delete(f"/api/characters/{char['id']}")
-        self.assertEqual(
-            self.manager.list_character_variants(str(char["id"])), []
-        )
+        # 变体数据保留
+        remaining = self.manager.list_character_variants(str(char["id"]))
+        self.assertEqual(len(remaining), 1)
 
     def test_delete_missing_character_returns_404(self) -> None:
         self.assertEqual(
@@ -246,7 +252,8 @@ class CharacterVariantApiTests(unittest.TestCase):
         values = self.manager.list_spec_values_for_variant(str(variant["id"]))
         self.assertEqual(len(values), 2)
 
-    def test_duplicate_variant_name_rejected(self) -> None:
+    def test_duplicate_variant_name_allowed(self) -> None:
+        """v0.5.3: 允许同一人物下变体同名（支持复制场景）。"""
         self.client.post(
             f"/api/characters/{self.character['id']}/variants",
             json={"name": "裙装"},
@@ -255,7 +262,7 @@ class CharacterVariantApiTests(unittest.TestCase):
             f"/api/characters/{self.character['id']}/variants",
             json={"name": "裙装"},
         )
-        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.status_code, 201)
 
     def test_rename_variant(self) -> None:
         variants = self.manager.list_character_variants(str(self.character["id"]))
@@ -448,11 +455,11 @@ class CharacterSpecValueIsolationTests(unittest.TestCase):
 
     def test_character_data_stays_in_test_database(self) -> None:
         char = self.manager.create_character("角色A", str(self.project["id"]))
-        self.assertEqual(
-            self.manager.list_characters(str(self.project["id"])),
-            [char],
-        )
+        test_chars = self.manager.list_characters(str(self.project["id"]))
+        self.assertEqual(test_chars["total"], 1)
+        self.assertEqual(test_chars["items"][0]["id"], char["id"])
         production_chars = self.manager.list_characters(
             str(self.project["id"]), environment="production"
         )
-        self.assertEqual(production_chars, [])
+        self.assertEqual(production_chars["total"], 0)
+        self.assertEqual(production_chars["items"], [])
