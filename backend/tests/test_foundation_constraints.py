@@ -236,5 +236,39 @@ class IsolatedTestCaseTests(unittest.TestCase):
             case.doCleanups()
 
 
+class ProductionDatabaseRoutesHiddenTests(unittest.TestCase):
+    """需求 §8.3：生产模式不暴露数据库切换接口，访问返回 404。"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.app = create_app(
+            data_root=Path(self._tmp.name),
+            environment="production",
+            locked_environment="production",
+        )
+        self.client = TestClient(self.app)
+
+    def test_get_databases_returns_404_in_production(self) -> None:
+        """生产模式下 GET /api/settings/databases 返回 404。"""
+        response = self.client.get("/api/settings/databases")
+        self.assertEqual(response.status_code, 404)
+
+    def test_activate_database_returns_404_in_production(self) -> None:
+        """生产模式下 POST /api/settings/databases/activate 返回 404 或 405。"""
+        response = self.client.post(
+            "/api/settings/databases/activate",
+            json={"environment": "production", "confirmation": "USE PRODUCTION"},
+        )
+        # 404（路由未注册）或 405（方法不允许）都表示路由不可用
+        self.assertIn(response.status_code, (404, 405))
+
+    def test_verify_isolation_returns_404_in_production(self) -> None:
+        """生产模式下 POST /api/settings/databases/verify-isolation 返回 404 或 405。"""
+        response = self.client.post("/api/settings/databases/verify-isolation")
+        # 404（路由未注册）或 405（方法不允许）都表示路由不可用
+        self.assertIn(response.status_code, (404, 405))
+
+
 if __name__ == "__main__":
     unittest.main()

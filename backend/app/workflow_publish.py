@@ -255,13 +255,18 @@ def export_workflow(
     *,
     raw_ui_json: dict[str, Any] | None = None,
     raw_api_json: dict[str, Any] | None = None,
+    is_dirty: bool = False,
 ) -> dict[str, Any]:
     """导出工作流为指定格式。
 
     参数：
         format: "api_json"（ComfyUI API JSON）或 "ui_json"（ComfyUI UI JSON）
-        raw_ui_json: 原始 UI JSON（如果有，直接返回）
-        raw_api_json: 原始 API JSON（如果有，直接返回）
+        raw_ui_json: 原始 UI JSON（来源快照，仅在未编辑时返回）
+        raw_api_json: 原始 API JSON（来源快照，仅在未编辑时返回）
+        is_dirty: 草稿是否被编辑过。
+            - False（刚导入未编辑）：可以返回来源快照，保证未知字段不丢失。
+            - True（已编辑）：必须从 normalized_graph 重新生成，不返回旧 JSON。
+              来源中无法理解的未知字段通过 metadata 合并保留。
 
     返回：
         {
@@ -272,11 +277,22 @@ def export_workflow(
         }
     """
     if format == "ui_json":
-        # 优先返回原始 UI JSON，否则从规范化结构生成
-        data = raw_ui_json if raw_ui_json else normalized_to_ui_json(normalized)
+        if not is_dirty and raw_ui_json:
+            # 未编辑且有来源快照：原样返回，保证未知字段不丢失
+            data = raw_ui_json
+        else:
+            # 已编辑或无来源快照：从规范化结构生成
+            data = normalized_to_ui_json(normalized)
+            # 编辑后合并来源中的未知顶层字段（通过 metadata 保留）
+            if is_dirty and raw_ui_json and isinstance(raw_ui_json, dict):
+                data = _merge_unknown_top_level_fields(raw_ui_json, data)
     elif format == "api_json":
-        # 优先返回原始 API JSON，否则从规范化结构生成
-        data = raw_api_json if raw_api_json else normalized_to_api_json(normalized)
+        if not is_dirty and raw_api_json:
+            data = raw_api_json
+        else:
+            data = normalized_to_api_json(normalized)
+            if is_dirty and raw_api_json and isinstance(raw_api_json, dict):
+                data = _merge_unknown_top_level_fields(raw_api_json, data)
     else:
         raise ValueError(f"不支持的导出格式：{format}")
 
@@ -286,6 +302,30 @@ def export_workflow(
         "node_count": normalized.node_count(),
         "checksum": normalized.checksum(),
     }
+
+
+def _merge_unknown_top_level_fields(
+    source: dict[str, Any], generated: dict[str, Any]
+) -> dict[str, Any]:
+    """将来源 JSON 中的未知顶层字段合并到生成结果中。
+
+    已知字段（nodes/links/groups/last_node_id/last_link_id/version/config/extra
+    以及 API JSON 的节点 ID 键）使用生成结果中的最新值，不覆盖。
+    未知字段从来源中保留，确保编辑后仍不丢失。
+    """
+    known_ui_keys = {
+        "nodes", "links", "groups", "last_node_id", "last_link_id",
+        "version", "config", "extra",
+    }
+    result = dict(generated)
+    if isinstance(source, dict):
+        for key, value in source.items():
+            if key in known_ui_keys:
+                continue
+            # API JSON 的键是节点 ID（数字字符串），使用生成结果的最新值
+            if key not in result:
+                result[key] = value
+    return result
 
 
 # ──────────────────────────────────────────────────────────────────

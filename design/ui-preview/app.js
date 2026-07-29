@@ -116,13 +116,14 @@ function shell(content) {
       <div class="brand"><span class="brand-mark">A</span><span class="brand-name">Atelier</span><span class="brand-tag">DESIGN</span></div>
       <div class="nav-scroll">${nav}</div>
       <div class="sidebar-bottom">
-        <div class="health pending"><span class="health-dot"></span><span>ComfyUI 尚未检测</span><span style="margin-left:auto;color:#9aa2b2">—</span></div>
+        <div class="health pending" id="comfyui-sidebar-health"><span class="health-dot"></span><span>ComfyUI 尚未检测</span><span style="margin-left:auto;color:#9aa2b2">—</span></div>
       </div>
     </aside>
     <main class="workspace">
       <header class="topbar">
         <div class="breadcrumb"><span>Atelier</span><span class="chevron">›</span><span>${meta[2]}</span><span class="chevron">›</span><strong>${meta[1]}</strong></div>
         <div class="topbar-spacer"></div>
+        <button class="btn soft comfyui-status-btn" type="button" data-api-action="open-settings-from-status" id="comfyui-status-indicator" title="ComfyUI 连接状态，点击前往设置"><span class="health-dot"></span><span class="comfyui-status-text">ComfyUI 尚未检测</span></button>
         <div class="save-state"><span class="save-check">✓</span>所有更改已保存</div>
         <button class="icon-button">⌘</button>
         <button class="icon-button">?</button>
@@ -437,7 +438,7 @@ function workflowsPage() {
   ];
   const cards = wfs.map((w, i) => `<div class="wf-card">${workflowMini(i)}<div style="display:flex;justify-content:space-between;align-items:center"><div class="material-name">${w[0]}</div>${chip(w[1], "blue")}</div><div class="material-desc">${w[2]}</div><div class="material-footer">${status(w[3], i === 0 ? "green" : i === 3 ? "purple" : "")}<span style="margin-left:auto;color:#a0a8b6;font-size:8px">今天 ${14 + i}:20</span></div></div>`).join("");
   return `<div class="page-scroll">
-    ${pageHeader("工作流库", "管理 ComfyUI 工作流、版本、项目副本和语义插槽。", button("从图片提取") + button("导入 JSON") + button("新建工作流", "primary"))}
+    ${pageHeader("工作流库", "管理 ComfyUI 工作流、版本、项目副本和语义插槽。", '<button class="btn" type="button" data-api-action="extract-workflow-from-image">从图片提取</button><button class="btn" type="button" data-api-action="import-workflow-json">导入 JSON</button><button class="btn primary" type="button" data-api-action="create-workflow">新建工作流</button>')}
     <div class="library-toolbar"><div class="search wide">⌕ 搜索工作流、节点或插槽</div><div class="tabs"><span class="tab active">全部</span><span class="tab">项目</span><span class="tab">全局模板</span><span class="tab">最近使用</span></div><div style="margin-left:auto">${status("节点定义已同步","green")}</div></div>
     <div class="grid cols-3">${cards}</div>
   </div>`;
@@ -605,23 +606,19 @@ function exportPage() {
 
 function settingsPage() {
   return `<div class="page-scroll">
-    ${pageHeader("设置", "管理生产数据、测试数据和运行环境。", '<button class="btn soft" data-api-action="verify-isolation">验证数据库隔离</button>' + button("保存设置", "primary"))}
+    ${pageHeader("设置", "管理 ComfyUI 连接、应用配置和运行环境。", button("保存设置", "primary"))}
     <section class="panel database-settings">
       <div class="panel-header">
-        <div><div class="panel-title">数据库与存储</div><div class="panel-sub">应用始终使用生产数据库，自动化测试使用独立隔离的临时目录。</div></div>
-        <div id="database-safety-status">${status("已隔离","green")}</div>
+        <div><div class="panel-title">数据库与存储</div><div class="panel-sub">查看数据可用性和存储目录。</div></div>
+        <div id="database-safety-status">${status("可用","green")}</div>
       </div>
       <div class="database-guide">
         <span class="database-guide-icon">i</span>
-        <div><strong>界面只连接生产数据库。</strong>自动化测试通过临时数据目录隔离，不会写入生产数据。</div>
+        <div><strong>数据可用。</strong>存储目录由应用配置决定，可通过备份和恢复入口管理。</div>
       </div>
-      <div class="database-result" id="database-result">生产数据库已就绪。</div>
+      <div class="database-result" id="database-result">数据可用。</div>
     </section>
-    <div class="grid cols-3">
-      <div class="setting-card"><div style="display:flex;justify-content:space-between">${status("尚未检测","orange")}${chip("默认实例","blue")}</div><div class="setting-title" style="margin-top:12px">ComfyUI 主实例</div><div class="setting-desc">运行生成任务并提供节点定义。</div><div class="setting-value">192.168.3.5:8188</div><div class="kv"><span>延迟</span><strong>连接后读取</strong></div><div class="kv"><span>GPU</span><strong>连接后读取</strong></div><div class="kv"><span>节点</span><strong>连接后读取</strong></div></div>
-      <div class="setting-card"><div style="display:flex;justify-content:space-between">${status("已隔离","green")}${chip("测试隔离")}</div><div class="setting-title" style="margin-top:12px">数据安全策略</div><div class="setting-desc">界面只连接生产数据库，测试使用临时目录。</div><div class="setting-value">生产数据库</div><div class="kv"><span>普通启动</span><strong>生产数据库</strong></div><div class="kv"><span>自动化测试</span><strong>临时数据目录</strong></div><div class="kv"><span>跨库写入</span><strong>禁止</strong></div></div>
-      <div class="setting-card"><div style="display:flex;justify-content:space-between">${status("未配置","orange")}${chip("双层缩略图")}</div><div class="setting-title" style="margin-top:12px">图库缓存</div><div class="setting-desc">256px 列表缩略图与 640px 快速预览。</div><div class="setting-value">尚未设置缓存目录</div><div class="kv"><span>缓存占用</span><strong>0 KB</strong></div><div class="kv"><span>待生成</span><strong>0</strong></div><div class="kv"><span>浏览器策略</span><strong>长缓存 + ETag</strong></div></div>
-    </div>
+    <div id="comfyui-instances-panel"></div>
     <div class="grid cols-2" style="margin-top:14px">
       ${panel("应用与单端口启动", "正式环境由 FastAPI 托管前端", `<div class="form-row"><div><label class="label">监听地址</label><div class="field">0.0.0.0</div></div><div><label class="label">应用端口</label><div class="field">8110</div></div></div><div class="kv"><span>前端与 API</span><strong>同一端口</strong></div><div class="kv"><span>健康接口</span><strong>/api/health</strong></div><div class="kv"><span>启动脚本</span><strong>start.bat</strong></div><div class="empty-note" style="margin-top:10px">启动时只终止能够通过项目绝对路径和启动标识确认的 Atelier 旧进程。其他程序占用端口时停止启动。</div>`)}
       ${panel("性能与索引", "百万级图片模式已启用", `<div class="kv"><span>列表分页</span><strong>游标 · 每批 100</strong></div><div class="kv"><span>前端网格</span><strong>二维虚拟化</strong></div><div class="kv"><span>原图加载</span><strong>仅详情页</strong></div><div class="kv"><span>提示词搜索</span><strong>SQLite FTS5</strong></div><div class="kv"><span>重复检测</span><strong>SHA-256 + pHash</strong></div><div style="margin-top:13px;display:flex;gap:8px">${button("重建缺失缩略图","small")}${button("检查索引","small")}${button("清理软删除","small danger-soft")}</div>`)}

@@ -280,6 +280,49 @@ class SyncResourcesRequest(BaseModel):
     )
 
 
+class CreateComfyuiInstanceRequest(BaseModel):
+    """创建 ComfyUI 实例请求（需求 §4.4）。"""
+
+    name: str = Field(min_length=1, max_length=120)
+    base_url: str = Field(min_length=1, max_length=500)
+    websocket_url: str = Field(default="", max_length=500)
+    timeout_seconds: float = Field(default=10.0, ge=1.0, le=120.0)
+    download_timeout_seconds: float = Field(default=60.0, ge=1.0, le=600.0)
+    is_active: bool = False
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_base_url(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("ComfyUI 地址不能为空。")
+        if not stripped.startswith(("http://", "https://")):
+            raise ValueError("ComfyUI 地址必须以 http:// 或 https:// 开头。")
+        return stripped.rstrip("/")
+
+
+class UpdateComfyuiInstanceRequest(BaseModel):
+    """更新 ComfyUI 实例配置请求（部分更新）。"""
+
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    base_url: str | None = Field(default=None, max_length=500)
+    websocket_url: str | None = Field(default=None, max_length=500)
+    timeout_seconds: float | None = Field(default=None, ge=1.0, le=120.0)
+    download_timeout_seconds: float | None = Field(default=None, ge=1.0, le=600.0)
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_base_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("ComfyUI 地址不能为空。")
+        if not stripped.startswith(("http://", "https://")):
+            raise ValueError("ComfyUI 地址必须以 http:// 或 https:// 开头。")
+        return stripped.rstrip("/")
+
+
 class CreateWorkflowRequest(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     description: str = Field(default="", max_length=2000)
@@ -367,6 +410,8 @@ class SaveDraftRequest(BaseModel):
     last_link_id: int | None = Field(default=None, ge=0)
     validation_state: str | None = None
     layout_state: str | None = None
+    is_dirty: bool | None = None
+    expected_revision: int | None = Field(default=None, ge=0)
 
 class AddNodeRequest(BaseModel):
     node_class: str = Field(min_length=1, max_length=200)
@@ -1401,12 +1446,22 @@ def create_app(
 
     # ComfyUI 客户端：基于数据库设置构造，运行时可更新配置
     def _build_comfyui_client() -> ComfyUIClient:
-        settings = manager.get_comfyui_settings()
-        config = ComfyUIConnectionConfig(
-            base_url=str(settings.get("base_url", "http://127.0.0.1:8188")),
-            timeout_seconds=float(settings.get("timeout_seconds", 10.0)),
-            websocket_url=str(settings.get("websocket_url", "")),
-        )
+        # 优先使用 comfyui_instances 表中的活动实例（需求 §4.2）
+        active_instance = manager.get_active_comfyui_instance()
+        if active_instance:
+            config = ComfyUIConnectionConfig(
+                base_url=str(active_instance["base_url"]),
+                timeout_seconds=float(active_instance["timeout_seconds"]),
+                websocket_url=str(active_instance.get("websocket_url", "")),
+            )
+        else:
+            # 回退到 app_settings（兼容旧单实例设置）
+            settings = manager.get_comfyui_settings()
+            config = ComfyUIConnectionConfig(
+                base_url=str(settings.get("base_url", "http://127.0.0.1:8188")),
+                timeout_seconds=float(settings.get("timeout_seconds", 10.0)),
+                websocket_url=str(settings.get("websocket_url", "")),
+            )
         return ComfyUIClient(config)
 
     comfyui_client = _build_comfyui_client()
@@ -1583,47 +1638,49 @@ def create_app(
                 detail="系统功能清单读取失败。",
             ) from error
 
-    @app.get("/api/settings/databases")
-    def database_settings() -> dict[str, object]:
-        return {
-            "active_environment": manager.active_environment,
-            "locked_environment": manager.locked_environment,
-            "databases": [
-                manager.database_info("production"),
-                manager.database_info("test"),
-            ],
-            "safety": {
-                "default_environment": "production",
-                "tests_forced_to": "test",
-                "paths_are_separate": True,
-            },
-        }
+    # ── 测试数据库路由（仅在测试模式注册，生产模式返回 404，需求 §8.3）──
+    if environment == "test":
+        @app.get("/api/settings/databases")
+        def database_settings() -> dict[str, object]:
+            return {
+                "active_environment": manager.active_environment,
+                "locked_environment": manager.locked_environment,
+                "databases": [
+                    manager.database_info("production"),
+                    manager.database_info("test"),
+                ],
+                "safety": {
+                    "default_environment": "production",
+                    "tests_forced_to": "test",
+                    "paths_are_separate": True,
+                },
+            }
 
-    @app.post("/api/settings/databases/activate")
-    def activate_database(request: ActivateDatabaseRequest) -> dict[str, object]:
-        if (
-            request.environment == "production"
-            and request.confirmation != "USE PRODUCTION"
-        ):
-            raise HTTPException(
-                status_code=400,
-                detail="Production activation requires explicit confirmation.",
-            )
-        try:
-            manager.activate(request.environment)
-        except DatabaseSafetyError as error:
-            raise HTTPException(status_code=409, detail=str(error)) from error
-        return {
-            "active_environment": manager.active_environment,
-            "message": f"Active database is now {manager.active_environment}.",
-        }
+        @app.post("/api/settings/databases/activate")
+        def activate_database(request: ActivateDatabaseRequest) -> dict[str, object]:
+            if (
+                request.environment == "production"
+                and request.confirmation != "USE PRODUCTION"
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Production activation requires explicit confirmation.",
+                )
+            try:
+                manager.activate(request.environment)
+            except DatabaseSafetyError as error:
+                raise HTTPException(status_code=409, detail=str(error)) from error
+            return {
+                "active_environment": manager.active_environment,
+                "message": f"Active database is now {manager.active_environment}.",
+            }
 
-    @app.post("/api/settings/databases/verify-isolation")
-    def verify_database_isolation() -> dict[str, object]:
-        try:
-            return manager.verify_isolation()
-        except DatabaseSafetyError as error:
-            raise HTTPException(status_code=500, detail=str(error)) from error
+        @app.post("/api/settings/databases/verify-isolation")
+        def verify_database_isolation() -> dict[str, object]:
+            try:
+                return manager.verify_isolation()
+            except DatabaseSafetyError as error:
+                raise HTTPException(status_code=500, detail=str(error)) from error
 
     # ── ComfyUI 连接层 ──
 
@@ -1641,6 +1698,15 @@ def create_app(
             timeout_seconds=request.timeout_seconds,
             websocket_url=request.websocket_url,
         )
+        # 兼容旧单实例设置：同步更新活动实例的配置（需求 §11.2 兼容期）
+        active = manager.get_active_comfyui_instance()
+        if active:
+            manager.update_comfyui_instance(
+                active["id"],
+                base_url=request.base_url,
+                timeout_seconds=request.timeout_seconds,
+                websocket_url=request.websocket_url,
+            )
         # 配置变更后重建客户端
         _refresh_comfyui_client()
         return {
@@ -1790,6 +1856,250 @@ def create_app(
             **result,
         }
 
+    # ── ComfyUI 多实例管理（需求 §4.4、§6.2）──
+
+    @app.get("/api/comfyui/instances")
+    def list_comfyui_instances() -> dict[str, object]:
+        """列出所有 ComfyUI 实例。"""
+        instances = manager.list_comfyui_instances()
+        return {
+            "database_environment": manager.active_environment,
+            "instances": instances,
+            "total": len(instances),
+        }
+
+    @app.post("/api/comfyui/instances")
+    def create_comfyui_instance(
+        request: CreateComfyuiInstanceRequest,
+    ) -> dict[str, object]:
+        """创建 ComfyUI 实例。如果 is_active=True，同时设为活动实例。"""
+        instance = manager.create_comfyui_instance(
+            name=request.name,
+            base_url=request.base_url,
+            websocket_url=request.websocket_url,
+            timeout_seconds=request.timeout_seconds,
+            download_timeout_seconds=request.download_timeout_seconds,
+            is_active=request.is_active,
+        )
+        if request.is_active:
+            _refresh_comfyui_client()
+        return {
+            "database_environment": manager.active_environment,
+            "instance": instance,
+            "message": "ComfyUI 实例已创建。",
+        }
+
+    @app.patch("/api/comfyui/instances/{instance_id}")
+    def update_comfyui_instance(
+        instance_id: str, request: UpdateComfyuiInstanceRequest
+    ) -> dict[str, object]:
+        """更新 ComfyUI 实例配置。"""
+        instance = manager.update_comfyui_instance(
+            instance_id,
+            name=request.name,
+            base_url=request.base_url,
+            websocket_url=request.websocket_url,
+            timeout_seconds=request.timeout_seconds,
+            download_timeout_seconds=request.download_timeout_seconds,
+        )
+        if instance is None:
+            raise HTTPException(status_code=404, detail="ComfyUI 实例不存在。")
+        # 如果更新的是活动实例，刷新客户端
+        if instance.get("is_active"):
+            _refresh_comfyui_client()
+        return {
+            "database_environment": manager.active_environment,
+            "instance": instance,
+            "message": "ComfyUI 实例已更新。",
+        }
+
+    @app.delete("/api/comfyui/instances/{instance_id}")
+    def delete_comfyui_instance(instance_id: str) -> dict[str, object]:
+        """删除 ComfyUI 实例。"""
+        instance = manager.get_comfyui_instance(instance_id)
+        if instance is None:
+            raise HTTPException(status_code=404, detail="ComfyUI 实例不存在。")
+        was_active = bool(instance.get("is_active"))
+        manager.delete_comfyui_instance(instance_id)
+        return {
+            "database_environment": manager.active_environment,
+            "deleted": True,
+            "message": "ComfyUI 实例已删除。",
+        }
+
+    @app.post("/api/comfyui/instances/{instance_id}/activate")
+    def activate_comfyui_instance(instance_id: str) -> dict[str, object]:
+        """将指定实例设为活动实例。其他实例自动设为非活动。"""
+        instance = manager.activate_comfyui_instance(instance_id)
+        if instance is None:
+            raise HTTPException(status_code=404, detail="ComfyUI 实例不存在。")
+        _refresh_comfyui_client()
+        return {
+            "database_environment": manager.active_environment,
+            "instance": instance,
+            "message": "已切换活动 ComfyUI 实例。",
+        }
+
+    @app.post("/api/comfyui/instances/{instance_id}/test")
+    def test_comfyui_instance(instance_id: str) -> dict[str, object]:
+        """测试指定实例的连接，更新状态字段。"""
+        instance = manager.get_comfyui_instance(instance_id)
+        if instance is None:
+            raise HTTPException(status_code=404, detail="ComfyUI 实例不存在。")
+        # 构造临时客户端测试连接，不影响全局客户端
+        config = ComfyUIConnectionConfig(
+            base_url=str(instance["base_url"]),
+            timeout_seconds=float(instance["timeout_seconds"]),
+            websocket_url=str(instance.get("websocket_url", "")),
+        )
+        temp_client = ComfyUIClient(config)
+        try:
+            stats = temp_client.test_connection()
+            # 提取 ComfyUI 版本和设备摘要
+            system = stats.raw.get("system", {})
+            version = str(system.get("comfyui_version", ""))
+            devices = stats.devices if isinstance(stats.devices, list) else []
+            updated = manager.update_comfyui_instance_status(
+                instance_id,
+                connection_status="ok",
+                comfyui_version=version,
+                device_summary=devices,
+            )
+            return {
+                "database_environment": manager.active_environment,
+                "instance": updated,
+                "status": "ok",
+                "base_url": config.normalized_base_url(),
+                "websocket_url": config.derived_websocket_url(),
+                "system": system,
+                "devices": devices,
+            }
+        except ComfyUIError as error:
+            manager.update_comfyui_instance_status(
+                instance_id, connection_status="unreachable"
+            )
+            return {
+                "database_environment": manager.active_environment,
+                "status": "error",
+                "message": str(error),
+                "base_url": config.normalized_base_url(),
+            }
+        finally:
+            temp_client.close()
+
+    @app.post("/api/comfyui/instances/{instance_id}/sync")
+    def sync_comfyui_instance(instance_id: str) -> dict[str, object]:
+        """同步指定实例的节点定义和资源。如果为活动实例，同时刷新全局客户端。"""
+        instance = manager.get_comfyui_instance(instance_id)
+        if instance is None:
+            raise HTTPException(status_code=404, detail="ComfyUI 实例不存在。")
+        config = ComfyUIConnectionConfig(
+            base_url=str(instance["base_url"]),
+            timeout_seconds=float(instance["timeout_seconds"]),
+            websocket_url=str(instance.get("websocket_url", "")),
+        )
+        temp_client = ComfyUIClient(config)
+        try:
+            object_info = temp_client.get_object_info()
+        except ComfyUIError as error:
+            raise HTTPException(status_code=502, detail=str(error)) from error
+        finally:
+            temp_client.close()
+        summary = summarize_node_definitions(object_info)
+        saved = manager.save_node_definitions(object_info)
+        extracted = extract_resource_lists(object_info)
+        synced_resources: list[dict[str, object]] = []
+        for rtype, names in extracted.items():
+            result = manager.save_resource_cache(rtype, names)
+            synced_resources.append(result)
+        # 更新实例的节点定义摘要
+        node_summary = {
+            "node_count": saved["node_count"],
+            "custom_node_count": saved["custom_node_count"],
+            "sha256": summary.sha256,
+            "last_synced_at": saved["synced_at"],
+        }
+        manager.update_comfyui_instance_status(
+            instance_id,
+            connection_status="ok",
+            node_definition_summary=node_summary,
+        )
+        return {
+            "database_environment": manager.active_environment,
+            "instance_id": instance_id,
+            "sha256": summary.sha256,
+            "node_count": saved["node_count"],
+            "custom_node_count": saved["custom_node_count"],
+            "synced_at": saved["synced_at"],
+            "resources_synced": synced_resources,
+        }
+
+    @app.post("/api/comfyui/discover")
+    def discover_comfyui_instances() -> dict[str, object]:
+        """探测候选 ComfyUI 实例（需求 §4.5）。
+
+        探测范围受限：
+        - 已保存的实例地址
+        - 环境变量 ATELIER_COMFYUI_URL
+        - 127.0.0.1:8188
+        - 环境变量 ATELIER_COMFYUI_TEST_URL
+
+        只调用只读接口 /system_stats，不自动覆盖活动实例。
+        """
+        import os
+
+        candidates: list[str] = []
+        # 1. 已保存的实例地址
+        for inst in manager.list_comfyui_instances():
+            url = str(inst["base_url"]).rstrip("/")
+            if url and url not in candidates:
+                candidates.append(url)
+        # 2. 环境变量 ATELIER_COMFYUI_URL
+        env_url = os.environ.get("ATELIER_COMFYUI_URL", "").strip()
+        if env_url and env_url not in candidates:
+            candidates.append(env_url)
+        # 3. 环境变量 ATELIER_COMFYUI_TEST_URL
+        test_url = os.environ.get("ATELIER_COMFYUI_TEST_URL", "").strip()
+        if test_url and test_url not in candidates:
+            candidates.append(test_url)
+        # 4. 默认本机地址
+        default_url = "http://127.0.0.1:8188"
+        if default_url not in candidates:
+            candidates.append(default_url)
+
+        discovered: list[dict[str, object]] = []
+        for url in candidates:
+            config = ComfyUIConnectionConfig(base_url=url, timeout_seconds=3.0)
+            temp_client = ComfyUIClient(config)
+            try:
+                stats = temp_client.test_connection()
+                system = stats.raw.get("system", {})
+                version = str(system.get("comfyui_version", ""))
+                devices = stats.devices if isinstance(stats.devices, list) else []
+                discovered.append({
+                    "base_url": url,
+                    "reachable": True,
+                    "comfyui_version": version,
+                    "devices": devices,
+                    "status": "ok",
+                })
+            except ComfyUIError as error:
+                discovered.append({
+                    "base_url": url,
+                    "reachable": False,
+                    "status": "error",
+                    "message": str(error),
+                })
+            finally:
+                temp_client.close()
+
+        return {
+            "database_environment": manager.active_environment,
+            "candidates": discovered,
+            "total": len(discovered),
+            "message": "探测完成，结果仅作为候选，未自动覆盖活动实例。",
+        }
+
     # ── 工作流库 ──
 
     @app.get("/api/workflows")
@@ -1892,12 +2202,20 @@ def create_app(
             raw_ui_json=request.raw_json if actual_format == "ui_json" else None,
             raw_api_json=request.raw_json if actual_format == "api_json" else None,
         )
+        # 计算来源快照校验和（用于审计，导入后不变）
+        import hashlib
+        source_checksum = hashlib.sha256(
+            json.dumps(request.raw_json, sort_keys=True, ensure_ascii=False).encode("utf-8")
+        ).hexdigest()
         draft = manager.save_workflow_draft(
             workflow_id,
             normalized_graph=serialized["normalized"] if isinstance(serialized["normalized"], str) else json.dumps(serialized["normalized"], ensure_ascii=False),
             raw_ui_json=serialized.get("raw_ui_json") and json.dumps(serialized["raw_ui_json"], ensure_ascii=False),
             raw_api_json=serialized.get("raw_api_json") and json.dumps(serialized["raw_api_json"], ensure_ascii=False),
             node_count=serialized["node_count"],
+            is_dirty=False,  # 刚导入，未编辑
+            source_checksum=source_checksum,
+            draft_checksum=serialized["checksum"],
         )
         # 更新工作流 source_type
         manager.update_workflow(workflow_id, name=None, description=None)  # 触发 revision 递增
@@ -1998,9 +2316,14 @@ def create_app(
                 last_link_id=request.last_link_id,
                 validation_state=request.validation_state,
                 layout_state=request.layout_state,
+                is_dirty=request.is_dirty,
+                expected_revision=request.expected_revision,
             )
         except ValueError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
+            msg = str(error)
+            if "草稿修订号不匹配" in msg:
+                raise HTTPException(status_code=409, detail=msg) from error
+            raise HTTPException(status_code=404, detail=msg) from error
         return {"database_environment": manager.active_environment, "draft": draft}
 
     @app.post("/api/workflows/{workflow_id}/draft/validate")
@@ -2116,6 +2439,8 @@ def create_app(
             semantic_slots_json=draft.get("semantic_slots_json", "[]"),
             last_node_id=new_last,
             last_link_id=draft.get("last_link_id", 0),
+            is_dirty=True,
+            draft_checksum=serialized["checksum"],
         )
         return {
             "database_environment": manager.active_environment,
@@ -2154,6 +2479,15 @@ def create_app(
             target["title"] = request.title
         if request.widgets_values is not None:
             target["widgets_values"] = request.widgets_values
+            # 同步值类型输入：按顺序将 widgets_values 写回无连线的 inputs[].value，
+            # 保证 normalized 结构内部一致，导出 API JSON 时反映最新值。
+            value_idx = 0
+            for inp in target.get("inputs", []) if isinstance(target.get("inputs"), list) else []:
+                if inp.get("link"):
+                    continue  # 有连线，跳过
+                if value_idx < len(request.widgets_values):
+                    inp["value"] = request.widgets_values[value_idx]
+                    value_idx += 1
         if request.flags is not None:
             current_flags = target.get("flags", {}) if isinstance(target.get("flags"), dict) else {}
             current_flags.update(request.flags)
@@ -2172,6 +2506,8 @@ def create_app(
             semantic_slots_json=draft.get("semantic_slots_json", "[]"),
             last_node_id=draft.get("last_node_id", 0),
             last_link_id=draft.get("last_link_id", 0),
+            is_dirty=True,
+            draft_checksum=serialized["checksum"],
         )
         return {
             "database_environment": manager.active_environment,
@@ -2224,6 +2560,8 @@ def create_app(
             semantic_slots_json=draft.get("semantic_slots_json", "[]"),
             last_node_id=draft.get("last_node_id", 0),
             last_link_id=draft.get("last_link_id", 0),
+            is_dirty=True,
+            draft_checksum=serialized["checksum"],
         )
         return {
             "database_environment": manager.active_environment,
@@ -2275,6 +2613,8 @@ def create_app(
             semantic_slots_json=draft.get("semantic_slots_json", "[]"),
             last_node_id=new_last,
             last_link_id=draft.get("last_link_id", 0),
+            is_dirty=True,
+            draft_checksum=serialized["checksum"],
         )
         return {
             "database_environment": manager.active_environment,
@@ -2358,6 +2698,8 @@ def create_app(
             semantic_slots_json=draft.get("semantic_slots_json", "[]"),
             last_node_id=draft.get("last_node_id", 0),
             last_link_id=new_last,
+            is_dirty=True,
+            draft_checksum=serialized["checksum"],
         )
         return {
             "database_environment": manager.active_environment,
@@ -2415,6 +2757,8 @@ def create_app(
             semantic_slots_json=draft.get("semantic_slots_json", "[]"),
             last_node_id=draft.get("last_node_id", 0),
             last_link_id=draft.get("last_link_id", 0),
+            is_dirty=True,
+            draft_checksum=serialized["checksum"],
         )
         return {
             "database_environment": manager.active_environment,
@@ -2443,7 +2787,18 @@ def create_app(
     def _save_draft_layout_state(
         workflow_id: str, draft: dict, layout_state: dict
     ) -> dict:
-        """保存布局状态到草稿并返回更新后的草稿。"""
+        """保存布局状态到草稿并返回更新后的草稿。
+
+        布局操作视为编辑，标记 is_dirty=True。
+        """
+        # 计算当前草稿校验和
+        try:
+            current_normalized = NormalizedWorkflow.from_dict(
+                json.loads(draft["normalized_graph"])
+            )
+            current_checksum = current_normalized.checksum()
+        except (TypeError, ValueError, KeyError):
+            current_checksum = ""
         try:
             updated = manager.save_workflow_draft(
                 workflow_id,
@@ -2456,6 +2811,8 @@ def create_app(
                 last_link_id=draft.get("last_link_id", 0),
                 validation_state=draft.get("validation_state"),
                 layout_state=json.dumps(layout_state, ensure_ascii=False),
+                is_dirty=True,
+                draft_checksum=current_checksum,
             )
         except ValueError as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
@@ -2919,7 +3276,8 @@ def create_app(
     def export_workflow_api(workflow_id: str, request: ExportWorkflowRequest) -> dict[str, object]:
         """导出工作流为 API JSON 或 UI JSON 格式。
 
-        优先返回原始 JSON（如果存在），否则从规范化结构生成。
+        - 未编辑（is_dirty=False）：优先返回来源快照，保证未知字段不丢失。
+        - 已编辑（is_dirty=True）：必须从 normalized_graph 重新生成，不返回旧 JSON。
         """
         draft = manager.get_workflow_draft(workflow_id)
         if not draft:
@@ -2933,16 +3291,25 @@ def create_app(
             ) from error
         raw_ui_json = json.loads(draft["raw_ui_json"]) if draft.get("raw_ui_json") else None
         raw_api_json = json.loads(draft["raw_api_json"]) if draft.get("raw_api_json") else None
+        is_dirty = bool(draft.get("is_dirty", False))
         try:
             result = export_workflow(
                 normalized,
                 format=request.format,
                 raw_ui_json=raw_ui_json,
                 raw_api_json=raw_api_json,
+                is_dirty=is_dirty,
             )
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
-        return {"database_environment": manager.active_environment, **result}
+        return {
+            "database_environment": manager.active_environment,
+            **result,
+            "is_dirty": is_dirty,
+            "draft_revision": int(draft.get("draft_revision", 0)),
+            "source_checksum": draft.get("source_checksum", ""),
+            "draft_checksum": draft.get("draft_checksum", ""),
+        }
 
     @app.post("/api/workflows/{workflow_id}/precheck")
     def precheck_workflow_publish(workflow_id: str) -> dict[str, object]:
@@ -2972,13 +3339,16 @@ def create_app(
 
         如果 request.normalized_graph 为空，则使用当前草稿的规范化结构。
         发布前建议先调用 /precheck 检查。
+
+        当草稿已被编辑（is_dirty=True）时：
+        - raw_ui_json/raw_api_json 留空，避免发布来源旧 JSON。
+        - 版本只保存当前草稿的 normalized_graph。
         """
         draft = manager.get_workflow_draft(workflow_id)
         if not draft:
             raise HTTPException(status_code=404, detail="草稿不存在。")
         normalized_graph = request.normalized_graph or draft["normalized_graph"]
-        raw_ui_json = request.raw_ui_json or draft.get("raw_ui_json")
-        raw_api_json = request.raw_api_json or draft.get("raw_api_json")
+        is_dirty = bool(draft.get("is_dirty", False))
         try:
             normalized_data = json.loads(normalized_graph)
             normalized = NormalizedWorkflow.from_dict(normalized_data)
@@ -2986,6 +3356,13 @@ def create_app(
             raise HTTPException(
                 status_code=422, detail=f"草稿数据解析失败：{error}"
             ) from error
+        # 已编辑时不发布来源旧 JSON；未编辑时保留来源快照用于审计
+        if is_dirty:
+            raw_ui_json = request.raw_ui_json
+            raw_api_json = request.raw_api_json
+        else:
+            raw_ui_json = request.raw_ui_json or draft.get("raw_ui_json")
+            raw_api_json = request.raw_api_json or draft.get("raw_api_json")
         try:
             version = manager.publish_workflow_version(
                 workflow_id,

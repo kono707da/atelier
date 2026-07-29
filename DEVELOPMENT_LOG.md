@@ -2,6 +2,46 @@
 
 更新日期：2026-07-29
 
+## v0.8.0 开发记录 — 阶段1-2验收整改
+
+### 开发目标
+
+按《全功能开发阶段一与阶段二验收整改需求》完成3大阻塞问题修复和前端全量接入。
+
+### 开发分支
+
+`dev-260729-GLM5.2-全功能开发`（继续在同一开发分支）
+
+### 实际解决方案
+
+1. **工作流导出旧数据修复（§5）**：在 `update_node_in_draft` 中新增 `widgets_values` → `inputs[].value` 同步逻辑，编辑后导出基于 `normalized_graph` 生成。
+2. **ComfyUI多实例管理（§4）**：新增 `comfyui_instances` 表和8个API路由，支持创建/编辑/删除/激活/测试连接/同步节点/探测候选实例。旧 `app_settings` 单实例设置自动迁移。`_build_comfyui_client` 优先从活动实例读取配置。
+3. **移除测试数据库路由（§8）**：3个数据库路由仅 `environment=="test"` 时注册，生产模式返回404。
+4. **工作流库真实接入（§6.3）**：`renderProductionWorkflows()` 真实列表渲染，创建/导入/复制/归档/删除弹窗，防竞态分页加载。
+5. **工作流画布真实接入（§6.4）**：`renderProductionWorkflowCanvas()` 三栏布局，节点显示/编辑/连线/插槽/保存/预检查/发布/导出，1217行新增代码。
+6. **设置页ComfyUI多实例管理（§6.5）**：`renderProductionSettings()` 实例列表，添加/编辑/删除/激活/测试/同步/探测。
+7. **顶部连接状态（§6.6）**：导航栏连接状态指示器，30秒轮询。
+8. **阶段1功能补齐（§7）**：分支CRUD弹窗、快照弹窗、撤销重做按钮、编译预检查弹窗。
+9. **路由契约修复**：修复3个前端API端点与后端路由不匹配（object-info→node-definitions、slots→semantic-slots、POST→PUT）。
+
+### 测试用例
+
+- `test_comfyui_instances.py`（新增）：38项测试
+- `test_foundation_constraints.py`（修改）：3项生产路由隐藏测试
+- `test_workflow_publish.py`（已有）：11项导出修复测试
+- `test_frontend_route_contract.py`（修复）：3个路由契约不匹配
+
+### 测试结果
+
+- 后端自动化测试：1175/1175 通过
+
+### 未执行项
+
+- 真实ComfyUI验收（§9）：需启动应用连接127.0.0.1:8188
+- 浏览器验收（§13）：需启动应用使用浏览器测试
+
+---
+
 ## v0.7.0 开发记录 — 阶段 3 编译、批量生成与任务中心
 
 ### 开发目标
