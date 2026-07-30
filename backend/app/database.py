@@ -640,6 +640,10 @@ class DatabaseManager:
                 connection, "v0.9.2", "Add legacy_indexed_files table for MOD-12 legacy library indexing with checkpoints",
                 self._migrate_legacy_import,
             )
+            self._run_migration(
+                connection, "v0.9.3", "Add star_rating/color_label/review_note to image_instances, image_tags and image_tag_links tables",
+                self._migrate_image_review_enhancements,
+            )
             marker = connection.execute(
                 "SELECT value FROM atelier_meta WHERE key = 'environment'"
             ).fetchone()
@@ -2394,6 +2398,71 @@ class DatabaseManager:
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_legacy_indexed_files_path "
             "ON legacy_indexed_files(source_path)"
+        )
+
+    def _migrate_image_review_enhancements(self, connection) -> None:
+        """MOD-08 增强：图片审片评分、颜色标记、备注与标签。
+
+        需求 §7.15：支持淘汰、代表图、评分、颜色标记和备注。
+        需求 §954：image_tags 表（name, normalized_name）。
+
+        - star_rating: 0-5 星评分
+        - color_label: 颜色标记（none/red/orange/yellow/green/blue/purple）
+        - review_note: 审片备注文本
+        - image_tags: 全局标签池
+        - image_tag_links: 图片实例与标签的多对多关联
+        """
+        ii_cols = [row["name"] for row in connection.execute("PRAGMA table_info(image_instances)").fetchall()]
+        if "star_rating" not in ii_cols:
+            connection.execute("ALTER TABLE image_instances ADD COLUMN star_rating INTEGER NOT NULL DEFAULT 0")
+        if "color_label" not in ii_cols:
+            connection.execute("ALTER TABLE image_instances ADD COLUMN color_label TEXT NOT NULL DEFAULT 'none'")
+        if "review_note" not in ii_cols:
+            connection.execute("ALTER TABLE image_instances ADD COLUMN review_note TEXT NOT NULL DEFAULT ''")
+
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_image_instances_rating "
+            "ON image_instances(star_rating) WHERE star_rating > 0"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_image_instances_color "
+            "ON image_instances(color_label) WHERE color_label != 'none'"
+        )
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS image_tags (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                normalized_name TEXT NOT NULL UNIQUE,
+                color TEXT NOT NULL DEFAULT 'none',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS image_tag_links (
+                id TEXT PRIMARY KEY,
+                image_instance_id TEXT NOT NULL,
+                tag_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (image_instance_id)
+                    REFERENCES image_instances(id) ON DELETE CASCADE,
+                FOREIGN KEY (tag_id)
+                    REFERENCES image_tags(id) ON DELETE CASCADE,
+                UNIQUE (image_instance_id, tag_id)
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_image_tag_links_instance "
+            "ON image_tag_links(image_instance_id)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_image_tag_links_tag "
+            "ON image_tag_links(tag_id)"
         )
 
     def _migrate_comfyui_instances(self, connection) -> None:

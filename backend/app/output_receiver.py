@@ -839,6 +839,228 @@ def copy_params_from_instance(
     }
 
 
+# ──────────────────────────────────────────────────────────────────
+# MOD-08 增强：评分、颜色标记、备注
+# ──────────────────────────────────────────────────────────────────
+
+
+VALID_COLOR_LABELS = ("none", "red", "orange", "yellow", "green", "blue", "purple")
+
+
+def update_image_review(
+    manager: Any,
+    instance_id: str,
+    *,
+    star_rating: int | None = None,
+    color_label: str | None = None,
+    review_note: str | None = None,
+    environment: str | None = None,
+) -> dict[str, Any] | None:
+    """更新图片实例的审片评分、颜色标记和/或备注。
+
+    传入 None 的字段不更新。star_rating 范围 0-5，color_label 必须在
+    VALID_COLOR_LABELS 中。
+    """
+    if star_rating is not None and not (0 <= star_rating <= 5):
+        raise ValueError(f"star_rating 必须在 0-5 之间，得到 {star_rating}")
+    if color_label is not None and color_label not in VALID_COLOR_LABELS:
+        raise ValueError(f"color_label 必须是 {VALID_COLOR_LABELS} 之一，得到 {color_label}")
+
+    now = datetime.now(timezone.utc).isoformat()
+    sets: list[str] = []
+    params: list[Any] = []
+    if star_rating is not None:
+        sets.append("star_rating = ?")
+        params.append(star_rating)
+    if color_label is not None:
+        sets.append("color_label = ?")
+        params.append(color_label)
+    if review_note is not None:
+        sets.append("review_note = ?")
+        params.append(review_note)
+    if not sets:
+        # 无更新字段
+        with manager.connection(environment) as conn:
+            row = conn.execute(
+                "SELECT * FROM image_instances WHERE id = ?", (instance_id,)
+            ).fetchone()
+        return dict(row) if row else None
+    sets.append("updated_at = ?")
+    params.append(now)
+    params.append(instance_id)
+    with manager.connection(environment) as conn:
+        row = conn.execute(
+            "SELECT id FROM image_instances WHERE id = ?", (instance_id,)
+        ).fetchone()
+        if not row:
+            return None
+        conn.execute(
+            f"UPDATE image_instances SET {', '.join(sets)} WHERE id = ?",
+            params,
+        )
+        conn.commit()
+        result = conn.execute(
+            "SELECT * FROM image_instances WHERE id = ?", (instance_id,)
+        ).fetchone()
+    return dict(result) if result else None
+
+
+# ──────────────────────────────────────────────────────────────────
+# MOD-08 增强：图片标签管理
+# ──────────────────────────────────────────────────────────────────
+
+
+def _normalize_tag_name(name: str) -> str:
+    """标签名标准化：去除首尾空格、转小写、压缩内部空格。"""
+    return " ".join(name.strip().lower().split())
+
+
+def create_image_tag(
+    manager: Any,
+    name: str,
+    *,
+    color: str = "none",
+    environment: str | None = None,
+) -> dict[str, Any]:
+    """创建图片标签。已存在则返回已有记录（按 normalized_name 去重）。"""
+    if color not in VALID_COLOR_LABELS:
+        raise ValueError(f"color 必须是 {VALID_COLOR_LABELS} 之一，得到 {color}")
+    normalized = _normalize_tag_name(name)
+    if not normalized:
+        raise ValueError("标签名不能为空")
+    now = datetime.now(timezone.utc).isoformat()
+    with manager.connection(environment) as conn:
+        existing = conn.execute(
+            "SELECT * FROM image_tags WHERE normalized_name = ?",
+            (normalized,),
+        ).fetchone()
+        if existing:
+            return dict(existing)
+        tag_id = str(uuid4())
+        conn.execute(
+            """INSERT INTO image_tags(id, name, normalized_name, color, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (tag_id, name.strip(), normalized, color, now, now),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM image_tags WHERE id = ?", (tag_id,)
+        ).fetchone()
+    return dict(row) if row else {}
+
+
+def list_image_tags(
+    manager: Any,
+    *,
+    environment: str | None = None,
+) -> list[dict[str, Any]]:
+    """列出所有图片标签。"""
+    with manager.connection(environment) as conn:
+        rows = conn.execute(
+            "SELECT t.*, COUNT(l.id) AS usage_count "
+            "FROM image_tags t "
+            "LEFT JOIN image_tag_links l ON l.tag_id = t.id "
+            "GROUP BY t.id ORDER BY t.name ASC"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def delete_image_tag(
+    manager: Any,
+    tag_id: str,
+    *,
+    environment: str | None = None,
+) -> bool:
+    """删除图片标签（级联删除关联）。"""
+    with manager.connection(environment) as conn:
+        cursor = conn.execute(
+            "DELETE FROM image_tags WHERE id = ?", (tag_id,)
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def add_tag_to_image(
+    manager: Any,
+    instance_id: str,
+    tag_id: str,
+    *,
+    environment: str | None = None,
+) -> dict[str, Any] | None:
+    """为图片实例添加标签（幂等）。"""
+    now = datetime.now(timezone.utc).isoformat()
+    with manager.connection(environment) as conn:
+        instance = conn.execute(
+            "SELECT id FROM image_instances WHERE id = ?", (instance_id,)
+        ).fetchone()
+        if not instance:
+            return None
+        tag = conn.execute(
+            "SELECT id FROM image_tags WHERE id = ?", (tag_id,)
+        ).fetchone()
+        if not tag:
+            return None
+        # 幂等：已存在则跳过
+        existing = conn.execute(
+            "SELECT id FROM image_tag_links WHERE image_instance_id = ? AND tag_id = ?",
+            (instance_id, tag_id),
+        ).fetchone()
+        if not existing:
+            link_id = str(uuid4())
+            conn.execute(
+                """INSERT INTO image_tag_links(id, image_instance_id, tag_id, created_at)
+                   VALUES (?, ?, ?, ?)""",
+                (link_id, instance_id, tag_id, now),
+            )
+            conn.commit()
+        # 返回实例及其所有标签
+        return get_image_tags_for_instance(manager, instance_id, environment=environment)
+
+
+def remove_tag_from_image(
+    manager: Any,
+    instance_id: str,
+    tag_id: str,
+    *,
+    environment: str | None = None,
+) -> bool:
+    """从图片实例移除标签。"""
+    with manager.connection(environment) as conn:
+        cursor = conn.execute(
+            "DELETE FROM image_tag_links WHERE image_instance_id = ? AND tag_id = ?",
+            (instance_id, tag_id),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def get_image_tags_for_instance(
+    manager: Any,
+    instance_id: str,
+    *,
+    environment: str | None = None,
+) -> dict[str, Any] | None:
+    """获取图片实例的所有标签。"""
+    with manager.connection(environment) as conn:
+        instance = conn.execute(
+            "SELECT id FROM image_instances WHERE id = ?", (instance_id,)
+        ).fetchone()
+        if not instance:
+            return None
+        rows = conn.execute(
+            """SELECT t.id, t.name, t.normalized_name, t.color, l.created_at AS linked_at
+               FROM image_tag_links l
+               JOIN image_tags t ON t.id = l.tag_id
+               WHERE l.image_instance_id = ?
+               ORDER BY t.name ASC""",
+            (instance_id,),
+        ).fetchall()
+    return {
+        "instance_id": instance_id,
+        "tags": [dict(r) for r in rows],
+    }
+
+
 def list_background_jobs(
     manager: Any,
     *,

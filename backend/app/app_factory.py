@@ -136,19 +136,26 @@ from .comfyui_progress import (
 )
 from .output_receiver import (
     adopt_image_instance,
+    add_tag_to_image,
     collect_attempt_outputs,
     copy_params_from_instance,
+    create_image_tag,
+    delete_image_tag,
     get_file_path,
     get_file_record,
     get_image_instance,
     get_image_instance_tracking,
+    get_image_tags_for_instance,
     list_background_jobs,
     list_image_instances,
+    list_image_tags,
     parse_comfyui_outputs,
     reject_image_instance,
+    remove_tag_from_image,
     reorder_adopted_image_instances,
     set_representative_image_instance,
     unadopt_image_instance,
+    update_image_review,
 )
 from .gallery import (
     find_duplicate_images,
@@ -1501,6 +1508,17 @@ class LegacyIndexRequest(BaseModel):
     link_mode: str = "hardlink"
     force: bool = False
     max_files: int = 200
+
+
+class ImageReviewRequest(BaseModel):
+    star_rating: int | None = None
+    color_label: str | None = None
+    review_note: str | None = None
+
+
+class CreateTagRequest(BaseModel):
+    name: str
+    color: str = "none"
 
 
 # ── MOD-11: 存储备份与维护请求模型 ──────────────────────────────────
@@ -7157,6 +7175,103 @@ def create_app(
         return {
             "database_environment": manager.active_environment,
             "params": result,
+        }
+
+    # ── MOD-08 增强：评分、颜色标记、备注 API ──────────────────────
+
+    @app.patch("/api/image-instances/{instance_id}/review")
+    def update_image_review_api(
+        instance_id: str, request: ImageReviewRequest
+    ) -> dict[str, object]:
+        """更新图片实例的评分、颜色标记和/或备注。"""
+        try:
+            result = update_image_review(
+                manager,
+                instance_id,
+                star_rating=request.star_rating,
+                color_label=request.color_label,
+                review_note=request.review_note,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        if result is None:
+            raise HTTPException(status_code=404, detail="图片实例不存在")
+        return {
+            "database_environment": manager.active_environment,
+            "image_instance": result,
+        }
+
+    # ── MOD-08 增强：图片标签 API ──────────────────────────────────
+
+    @app.post("/api/image-tags")
+    def create_image_tag_api(request: CreateTagRequest) -> dict[str, object]:
+        """创建图片标签。"""
+        try:
+            tag = create_image_tag(manager, request.name, color=request.color)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return {
+            "database_environment": manager.active_environment,
+            "tag": tag,
+        }
+
+    @app.get("/api/image-tags")
+    def list_image_tags_api() -> dict[str, object]:
+        """列出所有图片标签。"""
+        tags = list_image_tags(manager)
+        return {
+            "database_environment": manager.active_environment,
+            "tags": tags,
+            "total": len(tags),
+        }
+
+    @app.delete("/api/image-tags/{tag_id}")
+    def delete_image_tag_api(tag_id: str) -> dict[str, object]:
+        """删除图片标签。"""
+        deleted = delete_image_tag(manager, tag_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="标签不存在")
+        return {
+            "database_environment": manager.active_environment,
+            "deleted": True,
+            "tag_id": tag_id,
+        }
+
+    @app.post("/api/image-instances/{instance_id}/tags/{tag_id}")
+    def add_tag_to_image_api(
+        instance_id: str, tag_id: str
+    ) -> dict[str, object]:
+        """为图片实例添加标签。"""
+        result = add_tag_to_image(manager, instance_id, tag_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail="图片实例或标签不存在")
+        return {
+            "database_environment": manager.active_environment,
+            "result": result,
+        }
+
+    @app.delete("/api/image-instances/{instance_id}/tags/{tag_id}")
+    def remove_tag_from_image_api(
+        instance_id: str, tag_id: str
+    ) -> dict[str, object]:
+        """从图片实例移除标签。"""
+        removed = remove_tag_from_image(manager, instance_id, tag_id)
+        return {
+            "database_environment": manager.active_environment,
+            "removed": removed,
+            "instance_id": instance_id,
+            "tag_id": tag_id,
+        }
+
+    @app.get("/api/image-instances/{instance_id}/tags")
+    def get_image_tags_api(instance_id: str) -> dict[str, object]:
+        """获取图片实例的所有标签。"""
+        result = get_image_tags_for_instance(manager, instance_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail="图片实例不存在")
+        return {
+            "database_environment": manager.active_environment,
+            "result": result,
         }
 
     # ── MOD-09: 最终版本与导出 ─────────────────────────────────────
