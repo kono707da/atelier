@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import sqlite3
@@ -11798,6 +11799,956 @@ class DatabaseManager:
             "cleared": removed,
             "cache_root": str(cache_root),
             "temp_root": str(temp_root),
+        }
+
+    # ── MOD-12: 导入与外部扩展 ─────────────────────────────────────────
+
+    _MATERIALS_PACKAGE_FORMAT = "atelier.materials.package"
+    _MATERIALS_PACKAGE_VERSION = "1.0"
+    _PROJECT_PACKAGE_FORMAT = "atelier.project.package"
+    _PROJECT_PACKAGE_VERSION = "1.0"
+    _LEGACY_IMAGE_EXTENSIONS: tuple[str, ...] = (
+        ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tiff", ".tif",
+    )
+    _LEGACY_METADATA_EXTENSIONS: tuple[str, ...] = (".json", ".txt")
+
+    @staticmethod
+    def _compute_content_hash(content: str) -> str:
+        """Compute SHA-256 hash of a string for content deduplication."""
+        return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+    def export_materials_package(
+        self,
+        material_ids: list[str],
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        """Export selected materials (with tags and pages) as a JSON manifest.
+
+        Preview image paths and timestamps are excluded — only portable text
+        fields are exported. Each material entry includes a ``content_hash``
+        for deduplication on import.
+        """
+        target_environment = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        materials_data: list[dict[str, object]] = []
+        with self._lock, self.connection(target_environment) as connection:
+            for material_id in material_ids:
+                row = connection.execute(
+                    f"SELECT {self._MATERIAL_SELECT_COLUMNS} FROM materials "
+                    "WHERE id = ? AND deleted_at IS NULL",
+                    (material_id,),
+                ).fetchone()
+                if row is None:
+                    raise ValueError(f"素材 {material_id} 不存在。")
+                material = dict(row)
+                tags = self._get_material_tags(connection, material_id)
+                page_rows = connection.execute(
+                    """SELECT name, description, content, prompt_text,
+                              negative_prompt, sort_order
+                       FROM material_pages WHERE material_id = ?
+                       ORDER BY sort_order ASC""",
+                    (material_id,),
+                ).fetchall()
+                materials_data.append({
+                    "name": material["name"],
+                    "material_type": material["material_type"],
+                    "description": material["description"],
+                    "content": material["content"],
+                    "prompt_text": material["prompt_text"],
+                    "negative_prompt": material["negative_prompt"],
+                    "validation_status": material["validation_status"],
+                    "notes": material["notes"],
+                    "tags": tags,
+                    "content_hash": self._compute_content_hash(
+                        str(material["content"])
+                    ),
+                    "pages": [dict(p) for p in page_rows],
+                })
+        return {
+            "format": self._MATERIALS_PACKAGE_FORMAT,
+            "version": self._MATERIALS_PACKAGE_VERSION,
+            "exported_at": now,
+            "material_count": len(materials_data),
+            "materials": materials_data,
+        }
+
+    def import_materials_package(
+        self,
+        manifest: dict[str, object],
+        dry_run: bool = False,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        """Import materials from a manifest. Supports dry-run preview.
+
+        Conflict detection: same name + material_type (case-insensitive) in the
+        target database or within the manifest itself. Duplicate content_hash
+        within the manifest is reported as a warning.
+        """
+        target_environment = environment or self._active_environment
+        materials = manifest.get("materials", [])
+        if not isinstance(materials, list):
+            raise ValueError("manifest.materials 必须是列表。")
+
+        to_create: list[dict[str, object]] = []
+        conflicts: list[dict[str, object]] = []
+        warnings: list[str] = []
+        seen_names: set[tuple[str, str]] = set()
+        seen_hashes: dict[str, str] = {}
+
+        with self._lock, self.connection(target_environment) as connection:
+            for idx, entry in enumerate(materials):
+                if not isinstance(entry, dict):
+                    warnings.append(f"条目 {idx}: 不是有效对象，已跳过。")
+                    continue
+                name = str(entry.get("name", "")).strip()
+                material_type = str(entry.get("material_type", ""))
+                content = str(entry.get("content", ""))
+                validation_status = str(entry.get("validation_status", "unverified"))
+
+                if not name:
+                    warnings.append(f"条目 {idx}: 素材名称为空，已跳过。")
+                    continue
+                if len(name) > 80:
+                    warnings.append(f"条目 {idx}: 素材名称超过 80 字，已跳过。")
+                    continue
+                if material_type not in self.VALID_MATERIAL_TYPES:
+                    warnings.append(
+                        f"条目 {idx}: 素材类型 {material_type} 不合法，已跳过。"
+                    )
+                    continue
+                if not content.strip():
+                    warnings.append(f"条目 {idx}: 素材正文为空，已跳过。")
+                    continue
+                if validation_status not in self.VALID_MATERIAL_STATUSES:
+                    validation_status = "unverified"
+                    warnings.append(
+                        f"条目 {idx}: 验证状态不合法，已重置为 unverified。"
+                    )
+
+                content_hash = self._compute_content_hash(content)
+                key = (name.lower(), material_type)
+
+                # Check DB for name conflict
+                existing = connection.execute(
+                    "SELECT id FROM materials "
+                    "WHERE LOWER(name) = ? AND material_type = ? "
+                    "AND deleted_at IS NULL",
+                    (name.lower(), material_type),
+                ).fetchone()
+                if existing is not None:
+                    conflicts.append({
+                        "type": "name",
+                        "name": name,
+                        "material_type": material_type,
+                        "source": "database",
+                    })
+                    continue
+                # Check manifest for duplicate name
+                if key in seen_names:
+                    conflicts.append({
+                        "type": "name",
+                        "name": name,
+                        "material_type": material_type,
+                        "source": "manifest",
+                    })
+                    continue
+                # Check manifest for duplicate content
+                if content_hash in seen_hashes:
+                    warnings.append(
+                        f"条目 {idx}: 素材「{name}」与「{seen_hashes[content_hash]}」"
+                        "内容相同。"
+                    )
+                seen_names.add(key)
+                seen_hashes[content_hash] = name
+                to_create.append({
+                    "name": name,
+                    "material_type": material_type,
+                    "description": str(entry.get("description", ""))[:300],
+                    "content": content,
+                    "prompt_text": str(entry.get("prompt_text", "")),
+                    "negative_prompt": str(entry.get("negative_prompt", "")),
+                    "validation_status": validation_status,
+                    "notes": str(entry.get("notes", "")),
+                    "tags": entry.get("tags", []) if isinstance(entry.get("tags"), list) else [],
+                    "pages": entry.get("pages", []) if isinstance(entry.get("pages"), list) else [],
+                })
+
+            if dry_run:
+                return {
+                    "dry_run": True,
+                    "created_count": len(to_create),
+                    "conflicts": conflicts,
+                    "warnings": warnings,
+                }
+
+            # Actual creation
+            now = datetime.now(timezone.utc).isoformat()
+            created_materials: list[dict[str, object]] = []
+            for entry in to_create:
+                new_id = str(uuid4())
+                try:
+                    connection.execute(
+                        """INSERT INTO materials(
+                            id, name, material_type, description, content,
+                            prompt_text, negative_prompt, validation_status,
+                            notes, preview_original_path, preview_thumbnail_path,
+                            created_at, updated_at
+                        )
+                        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)""",
+                        (
+                            new_id, entry["name"], entry["material_type"],
+                            entry["description"], entry["content"],
+                            entry["prompt_text"], entry["negative_prompt"],
+                            entry["validation_status"], entry["notes"], now, now,
+                        ),
+                    )
+                except sqlite3.IntegrityError:
+                    conflicts.append({
+                        "type": "name",
+                        "name": entry["name"],
+                        "material_type": entry["material_type"],
+                        "source": "database",
+                    })
+                    continue
+                clean_tags = self._normalize_material_tags(
+                    entry["tags"]  # type: ignore[arg-type]
+                )
+                if clean_tags:
+                    self._sync_material_tags(connection, new_id, clean_tags, now)
+                for page in entry["pages"]:  # type: ignore[union-attr]
+                    if not isinstance(page, dict):
+                        continue
+                    page_name = str(page.get("name", "")).strip()
+                    if not page_name:
+                        continue
+                    try:
+                        connection.execute(
+                            """INSERT INTO material_pages
+                               (id, material_id, name, description, content,
+                                prompt_text, negative_prompt, sort_order,
+                                created_at, updated_at)
+                               VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            (
+                                str(uuid4()), new_id, page_name,
+                                str(page.get("description", "")),
+                                str(page.get("content", "")),
+                                str(page.get("prompt_text", "")),
+                                str(page.get("negative_prompt", "")),
+                                int(page.get("sort_order", 1) or 1),
+                                now, now,
+                            ),
+                        )
+                    except sqlite3.IntegrityError:
+                        warnings.append(
+                            f"素材「{entry['name']}」的页面「{page_name}」已存在，已跳过。"
+                        )
+                created_materials.append({
+                    "id": new_id,
+                    "name": entry["name"],
+                    "material_type": entry["material_type"],
+                })
+
+        return {
+            "dry_run": False,
+            "created_count": len(created_materials),
+            "materials": created_materials,
+            "conflicts": conflicts,
+            "warnings": warnings,
+        }
+
+    def export_project_package(
+        self,
+        project_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        """Export a complete project structure as a JSON manifest.
+
+        Includes: project metadata, chapters, large_scenes, small_scenes,
+        branches, shot_pages, materials (with pages), and all associations
+        (small_scene_materials, shot_page_materials, small_scene_page_mappings).
+        Cross-references use ``original_id`` fields that are resolved to new
+        IDs on import.
+        """
+        target_environment = environment or self._active_environment
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self.connection(target_environment) as connection:
+            project_row = connection.execute(
+                """SELECT id, name, description, status
+                   FROM projects WHERE id = ? AND deleted_at IS NULL""",
+                (project_id,),
+            ).fetchone()
+            if project_row is None:
+                raise ValueError("项目不存在。")
+
+            chapters = connection.execute(
+                """SELECT id, name, sort_order FROM chapters
+                   WHERE project_id = ? ORDER BY sort_order ASC""",
+                (project_id,),
+            ).fetchall()
+
+            chapter_ids = [ch["id"] for ch in chapters]
+            large_scenes: list[sqlite3.Row] = []
+            if chapter_ids:
+                ph = ",".join("?" * len(chapter_ids))
+                large_scenes = connection.execute(
+                    f"""SELECT id, chapter_id, name, scene_type, sort_order
+                        FROM large_scenes
+                        WHERE chapter_id IN ({ph})
+                        ORDER BY sort_order ASC""",
+                    chapter_ids,
+                ).fetchall()
+
+            large_scene_ids = [ls["id"] for ls in large_scenes]
+            small_scenes: list[sqlite3.Row] = []
+            if large_scene_ids:
+                ph = ",".join("?" * len(large_scene_ids))
+                small_scenes = connection.execute(
+                    f"""SELECT id, large_scene_id, name, scene_type,
+                               description, sort_order
+                        FROM small_scenes
+                        WHERE large_scene_id IN ({ph})
+                        ORDER BY sort_order ASC""",
+                    large_scene_ids,
+                ).fetchall()
+
+            parent_ids = large_scene_ids + [ss["id"] for ss in small_scenes]
+            branches: list[sqlite3.Row] = []
+            if parent_ids:
+                ph = ",".join("?" * len(parent_ids))
+                branches = connection.execute(
+                    f"""SELECT id, parent_type, parent_id, name, description,
+                               is_enabled, sort_order
+                        FROM branches
+                        WHERE parent_type IN ('large_scene', 'small_scene')
+                          AND parent_id IN ({ph})
+                        ORDER BY sort_order ASC""",
+                    parent_ids,
+                ).fetchall()
+
+            small_scene_ids = [ss["id"] for ss in small_scenes]
+            shot_pages: list[sqlite3.Row] = []
+            if small_scene_ids:
+                ph = ",".join("?" * len(small_scene_ids))
+                shot_pages = connection.execute(
+                    f"""SELECT id, small_scene_id, branch_id, title, description,
+                               prompt_text, negative_prompt, sort_order
+                        FROM shot_pages
+                        WHERE small_scene_id IN ({ph})
+                        ORDER BY sort_order ASC""",
+                    small_scene_ids,
+                ).fetchall()
+
+            shot_page_ids = [sp["id"] for sp in shot_pages]
+            ssm_rows: list[sqlite3.Row] = []
+            spm_rows: list[sqlite3.Row] = []
+            mapping_rows: list[sqlite3.Row] = []
+            if small_scene_ids:
+                ph = ",".join("?" * len(small_scene_ids))
+                ssm_rows = connection.execute(
+                    f"""SELECT small_scene_id, material_id, sort_order
+                        FROM small_scene_materials
+                        WHERE small_scene_id IN ({ph})""",
+                    small_scene_ids,
+                ).fetchall()
+            if shot_page_ids:
+                ph = ",".join("?" * len(shot_page_ids))
+                spm_rows = connection.execute(
+                    f"""SELECT shot_page_id, material_id, sort_order
+                        FROM shot_page_materials
+                        WHERE shot_page_id IN ({ph})""",
+                    shot_page_ids,
+                ).fetchall()
+                mapping_rows = connection.execute(
+                    f"""SELECT scene_page_id, material_page_id, material_type
+                        FROM small_scene_page_mappings
+                        WHERE scene_page_id IN ({ph})""",
+                    shot_page_ids,
+                ).fetchall()
+
+            # Collect unique material IDs
+            material_ids_set: set[str] = set()
+            for r in ssm_rows:
+                material_ids_set.add(r["material_id"])
+            for r in spm_rows:
+                material_ids_set.add(r["material_id"])
+
+            materials_data: list[dict[str, object]] = []
+            page_owner: dict[str, str] = {}  # page_id -> material_id
+            for mid in sorted(material_ids_set):
+                mrow = connection.execute(
+                    f"SELECT {self._MATERIAL_SELECT_COLUMNS} FROM materials "
+                    "WHERE id = ? AND deleted_at IS NULL",
+                    (mid,),
+                ).fetchone()
+                if mrow is None:
+                    continue
+                m = dict(mrow)
+                tags = self._get_material_tags(connection, mid)
+                page_rows = connection.execute(
+                    """SELECT id, name, description, content, prompt_text,
+                              negative_prompt, sort_order
+                       FROM material_pages WHERE material_id = ?
+                       ORDER BY sort_order ASC""",
+                    (mid,),
+                ).fetchall()
+                pages_list: list[dict[str, object]] = []
+                for p in page_rows:
+                    page_owner[p["id"]] = mid
+                    pages_list.append({
+                        "original_id": p["id"],
+                        "name": p["name"],
+                        "description": p["description"],
+                        "content": p["content"],
+                        "prompt_text": p["prompt_text"],
+                        "negative_prompt": p["negative_prompt"],
+                        "sort_order": p["sort_order"],
+                    })
+                materials_data.append({
+                    "original_id": mid,
+                    "name": m["name"],
+                    "material_type": m["material_type"],
+                    "description": m["description"],
+                    "content": m["content"],
+                    "prompt_text": m["prompt_text"],
+                    "negative_prompt": m["negative_prompt"],
+                    "validation_status": m["validation_status"],
+                    "notes": m["notes"],
+                    "tags": tags,
+                    "content_hash": self._compute_content_hash(str(m["content"])),
+                    "pages": pages_list,
+                })
+
+        return {
+            "format": self._PROJECT_PACKAGE_FORMAT,
+            "version": self._PROJECT_PACKAGE_VERSION,
+            "exported_at": now,
+            "project": {
+                "name": project_row["name"],
+                "description": project_row["description"],
+                "status": project_row["status"],
+            },
+            "chapters": [
+                {"original_id": ch["id"], "name": ch["name"],
+                 "sort_order": ch["sort_order"]}
+                for ch in chapters
+            ],
+            "large_scenes": [
+                {"original_id": ls["id"], "chapter_original_id": ls["chapter_id"],
+                 "name": ls["name"], "scene_type": ls["scene_type"],
+                 "sort_order": ls["sort_order"]}
+                for ls in large_scenes
+            ],
+            "small_scenes": [
+                {"original_id": ss["id"], "large_scene_original_id": ss["large_scene_id"],
+                 "name": ss["name"], "scene_type": ss["scene_type"],
+                 "description": ss["description"], "sort_order": ss["sort_order"]}
+                for ss in small_scenes
+            ],
+            "branches": [
+                {"original_id": br["id"], "parent_type": br["parent_type"],
+                 "parent_original_id": br["parent_id"], "name": br["name"],
+                 "description": br["description"], "is_enabled": bool(br["is_enabled"]),
+                 "sort_order": br["sort_order"]}
+                for br in branches
+            ],
+            "shot_pages": [
+                {"original_id": sp["id"], "small_scene_original_id": sp["small_scene_id"],
+                 "branch_original_id": sp["branch_id"], "title": sp["title"],
+                 "description": sp["description"], "prompt_text": sp["prompt_text"],
+                 "negative_prompt": sp["negative_prompt"],
+                 "sort_order": sp["sort_order"]}
+                for sp in shot_pages
+            ],
+            "materials": materials_data,
+            "small_scene_materials": [
+                {"small_scene_original_id": r["small_scene_id"],
+                 "material_original_id": r["material_id"],
+                 "sort_order": r["sort_order"]}
+                for r in ssm_rows
+            ],
+            "shot_page_materials": [
+                {"shot_page_original_id": r["shot_page_id"],
+                 "material_original_id": r["material_id"],
+                 "sort_order": r["sort_order"]}
+                for r in spm_rows
+            ],
+            "small_scene_page_mappings": [
+                {"scene_page_original_id": r["scene_page_id"],
+                 "material_page_original_id": r["material_page_id"],
+                 "material_type": r["material_type"]}
+                for r in mapping_rows
+            ],
+        }
+
+    def import_project_package(
+        self,
+        manifest: dict[str, object],
+        dry_run: bool = False,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        """Import a project from a manifest. Supports dry-run preview.
+
+        Creates a new project with all chapters, scenes, branches, shot pages,
+        and materials. Material conflicts (same name + type) are resolved by
+        reusing the existing material. Returns a preview report when dry_run.
+        """
+        target_environment = environment or self._active_environment
+        project_data = manifest.get("project", {})
+        if not isinstance(project_data, dict):
+            raise ValueError("manifest.project 必须是对象。")
+        project_name = str(project_data.get("name", "")).strip()
+        if not project_name:
+            raise ValueError("项目名称不能为空。")
+
+        materials = manifest.get("materials", [])
+        if not isinstance(materials, list):
+            materials = []
+
+        conflicts: list[dict[str, object]] = []
+        warnings: list[str] = []
+
+        with self._lock, self.connection(target_environment) as connection:
+            # Check for existing project with same name (warning only — duplicates allowed)
+            dup_project = connection.execute(
+                "SELECT id FROM projects WHERE name = ? AND deleted_at IS NULL",
+                (project_name,),
+            ).fetchone()
+            if dup_project is not None:
+                warnings.append(f"已存在同名项目「{project_name}」，将创建新项目。")
+
+            # Pre-check materials
+            materials_to_create: list[dict[str, object]] = []
+            materials_to_reuse: list[dict[str, object]] = []
+            for idx, entry in enumerate(materials):
+                if not isinstance(entry, dict):
+                    continue
+                mname = str(entry.get("name", "")).strip()
+                mtype = str(entry.get("material_type", ""))
+                if not mname or mtype not in self.VALID_MATERIAL_TYPES:
+                    warnings.append(f"素材条目 {idx}: 名称或类型无效，将跳过。")
+                    continue
+                existing = connection.execute(
+                    "SELECT id FROM materials "
+                    "WHERE LOWER(name) = ? AND material_type = ? "
+                    "AND deleted_at IS NULL",
+                    (mname.lower(), mtype),
+                ).fetchone()
+                if existing is not None:
+                    conflicts.append({
+                        "type": "name",
+                        "name": mname,
+                        "material_type": mtype,
+                        "resolution": "reuse",
+                    })
+                    materials_to_reuse.append({
+                        "original_id": entry.get("original_id", ""),
+                        "existing_id": existing["id"],
+                        "entry": entry,
+                    })
+                else:
+                    materials_to_create.append(entry)
+
+            # Count entities to be created
+            entity_counts = {
+                "chapters": len(manifest.get("chapters", []) if isinstance(manifest.get("chapters"), list) else []),
+                "large_scenes": len(manifest.get("large_scenes", []) if isinstance(manifest.get("large_scenes"), list) else []),
+                "small_scenes": len(manifest.get("small_scenes", []) if isinstance(manifest.get("small_scenes"), list) else []),
+                "branches": len(manifest.get("branches", []) if isinstance(manifest.get("branches"), list) else []),
+                "shot_pages": len(manifest.get("shot_pages", []) if isinstance(manifest.get("shot_pages"), list) else []),
+                "materials_new": len(materials_to_create),
+                "materials_reused": len(materials_to_reuse),
+            }
+            total_to_create = (
+                entity_counts["chapters"] + entity_counts["large_scenes"] +
+                entity_counts["small_scenes"] + entity_counts["branches"] +
+                entity_counts["shot_pages"] + entity_counts["materials_new"] + 1
+            )
+
+            if dry_run:
+                return {
+                    "dry_run": True,
+                    "created_count": total_to_create,
+                    "entity_counts": entity_counts,
+                    "conflicts": conflicts,
+                    "warnings": warnings,
+                }
+
+            # ── Actual import ──
+            now = datetime.now(timezone.utc).isoformat()
+            new_project_id = str(uuid4())
+            connection.execute(
+                """INSERT INTO projects(
+                    id, name, description, status, cover_path, archived_at,
+                    deleted_at, revision, created_at, updated_at
+                )
+                VALUES(?, ?, ?, 'draft', NULL, NULL, NULL, 1, ?, ?)""",
+                (
+                    new_project_id, project_name,
+                    str(project_data.get("description", "")), now, now,
+                ),
+            )
+
+            chapter_map: dict[str, str] = {}
+            for ch in manifest.get("chapters", []) if isinstance(manifest.get("chapters"), list) else []:
+                if not isinstance(ch, dict):
+                    continue
+                new_id = str(uuid4())
+                orig = str(ch.get("original_id", ""))
+                chapter_map[orig] = new_id
+                connection.execute(
+                    """INSERT INTO chapters(
+                        id, project_id, name, sort_order, revision,
+                        created_at, updated_at
+                    )
+                    VALUES(?, ?, ?, ?, 1, ?, ?)""",
+                    (
+                        new_id, new_project_id,
+                        str(ch.get("name", "")),
+                        int(ch.get("sort_order", 1) or 1),
+                        now, now,
+                    ),
+                )
+
+            large_scene_map: dict[str, str] = {}
+            for ls in manifest.get("large_scenes", []) if isinstance(manifest.get("large_scenes"), list) else []:
+                if not isinstance(ls, dict):
+                    continue
+                new_id = str(uuid4())
+                orig = str(ls.get("original_id", ""))
+                large_scene_map[orig] = new_id
+                connection.execute(
+                    """INSERT INTO large_scenes(
+                        id, chapter_id, name, scene_type, sort_order,
+                        revision, created_at, updated_at
+                    )
+                    VALUES(?, ?, ?, ?, ?, 1, ?, ?)""",
+                    (
+                        new_id, chapter_map.get(str(ls.get("chapter_original_id", "")), ""),
+                        str(ls.get("name", "")),
+                        str(ls.get("scene_type", "content")),
+                        int(ls.get("sort_order", 1) or 1),
+                        now, now,
+                    ),
+                )
+
+            small_scene_map: dict[str, str] = {}
+            for ss in manifest.get("small_scenes", []) if isinstance(manifest.get("small_scenes"), list) else []:
+                if not isinstance(ss, dict):
+                    continue
+                new_id = str(uuid4())
+                orig = str(ss.get("original_id", ""))
+                small_scene_map[orig] = new_id
+                connection.execute(
+                    """INSERT INTO small_scenes(
+                        id, large_scene_id, name, scene_type, description,
+                        sort_order, revision, created_at, updated_at
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, 1, ?, ?)""",
+                    (
+                        new_id,
+                        large_scene_map.get(str(ss.get("large_scene_original_id", "")), ""),
+                        str(ss.get("name", "")),
+                        str(ss.get("scene_type", "content")),
+                        str(ss.get("description", "")),
+                        int(ss.get("sort_order", 1) or 1),
+                        now, now,
+                    ),
+                )
+
+            branch_map: dict[str, str] = {}
+            for br in manifest.get("branches", []) if isinstance(manifest.get("branches"), list) else []:
+                if not isinstance(br, dict):
+                    continue
+                new_id = str(uuid4())
+                orig = str(br.get("original_id", ""))
+                branch_map[orig] = new_id
+                parent_type = str(br.get("parent_type", "small_scene"))
+                parent_orig = str(br.get("parent_original_id", ""))
+                if parent_type == "large_scene":
+                    new_parent = large_scene_map.get(parent_orig, "")
+                else:
+                    new_parent = small_scene_map.get(parent_orig, "")
+                connection.execute(
+                    """INSERT INTO branches(
+                        id, parent_type, parent_id, name, description,
+                        is_enabled, sort_order, created_at, updated_at
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        new_id, parent_type, new_parent,
+                        str(br.get("name", "")),
+                        str(br.get("description", "")),
+                        1 if br.get("is_enabled", True) else 0,
+                        int(br.get("sort_order", 1) or 1),
+                        now, now,
+                    ),
+                )
+
+            shot_page_map: dict[str, str] = {}
+            for sp in manifest.get("shot_pages", []) if isinstance(manifest.get("shot_pages"), list) else []:
+                if not isinstance(sp, dict):
+                    continue
+                new_id = str(uuid4())
+                orig = str(sp.get("original_id", ""))
+                shot_page_map[orig] = new_id
+                branch_orig = sp.get("branch_original_id")
+                new_branch = branch_map.get(str(branch_orig), "") if branch_orig else None
+                connection.execute(
+                    """INSERT INTO shot_pages(
+                        id, small_scene_id, branch_id, title, description,
+                        prompt_text, negative_prompt, sort_order, revision,
+                        created_at, updated_at
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)""",
+                    (
+                        new_id,
+                        small_scene_map.get(str(sp.get("small_scene_original_id", "")), ""),
+                        new_branch if new_branch else None,
+                        str(sp.get("title", "")),
+                        str(sp.get("description", "")),
+                        str(sp.get("prompt_text", "")),
+                        str(sp.get("negative_prompt", "")),
+                        int(sp.get("sort_order", 1) or 1),
+                        now, now,
+                    ),
+                )
+
+            # Materials: create new or reuse existing
+            material_map: dict[str, str] = {}
+            material_page_map: dict[str, str] = {}
+            for item in materials_to_reuse:
+                orig = str(item.get("original_id", ""))
+                material_map[orig] = str(item["existing_id"])
+                entry = item["entry"]
+                # Map material pages to existing pages by name
+                if isinstance(entry, dict):
+                    existing_pages = connection.execute(
+                        "SELECT id, name FROM material_pages WHERE material_id = ?",
+                        (item["existing_id"],),
+                    ).fetchall()
+                    for ep in existing_pages:
+                        material_page_map[ep["name"]] = ep["id"]  # by name fallback
+
+            for entry in materials_to_create:
+                if not isinstance(entry, dict):
+                    continue
+                mname = str(entry.get("name", "")).strip()
+                mtype = str(entry.get("material_type", ""))
+                new_mid = str(uuid4())
+                orig = str(entry.get("original_id", ""))
+                material_map[orig] = new_mid
+                validation_status = str(entry.get("validation_status", "unverified"))
+                if validation_status not in self.VALID_MATERIAL_STATUSES:
+                    validation_status = "unverified"
+                try:
+                    connection.execute(
+                        """INSERT INTO materials(
+                            id, name, material_type, description, content,
+                            prompt_text, negative_prompt, validation_status,
+                            notes, preview_original_path, preview_thumbnail_path,
+                            created_at, updated_at
+                        )
+                        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)""",
+                        (
+                            new_mid, mname, mtype,
+                            str(entry.get("description", ""))[:300],
+                            str(entry.get("content", "")),
+                            str(entry.get("prompt_text", "")),
+                            str(entry.get("negative_prompt", "")),
+                            validation_status,
+                            str(entry.get("notes", "")),
+                            now, now,
+                        ),
+                    )
+                except sqlite3.IntegrityError:
+                    conflicts.append({
+                        "type": "name",
+                        "name": mname,
+                        "material_type": mtype,
+                        "resolution": "skipped",
+                    })
+                    continue
+                tags = entry.get("tags", [])
+                if isinstance(tags, list) and tags:
+                    clean_tags = self._normalize_material_tags(tags)
+                    if clean_tags:
+                        self._sync_material_tags(connection, new_mid, clean_tags, now)
+                for page in entry.get("pages", []) if isinstance(entry.get("pages"), list) else []:
+                    if not isinstance(page, dict):
+                        continue
+                    page_name = str(page.get("name", "")).strip()
+                    if not page_name:
+                        continue
+                    new_page_id = str(uuid4())
+                    page_orig = str(page.get("original_id", ""))
+                    if page_orig:
+                        material_page_map[page_orig] = new_page_id
+                    try:
+                        connection.execute(
+                            """INSERT INTO material_pages
+                               (id, material_id, name, description, content,
+                                prompt_text, negative_prompt, sort_order,
+                                created_at, updated_at)
+                               VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            (
+                                new_page_id, new_mid, page_name,
+                                str(page.get("description", "")),
+                                str(page.get("content", "")),
+                                str(page.get("prompt_text", "")),
+                                str(page.get("negative_prompt", "")),
+                                int(page.get("sort_order", 1) or 1),
+                                now, now,
+                            ),
+                        )
+                    except sqlite3.IntegrityError:
+                        warnings.append(
+                            f"素材「{mname}」的页面「{page_name}」已存在，已跳过。"
+                        )
+
+            # Associations: small_scene_materials
+            for ssm in manifest.get("small_scene_materials", []) if isinstance(manifest.get("small_scene_materials"), list) else []:
+                if not isinstance(ssm, dict):
+                    continue
+                ss_orig = str(ssm.get("small_scene_original_id", ""))
+                mat_orig = str(ssm.get("material_original_id", ""))
+                new_ss = small_scene_map.get(ss_orig)
+                new_mat = material_map.get(mat_orig)
+                if not new_ss or not new_mat:
+                    continue
+                try:
+                    connection.execute(
+                        """INSERT INTO small_scene_materials
+                           (id, small_scene_id, material_id, sort_order, created_at)
+                           VALUES(?, ?, ?, ?, ?)""",
+                        (
+                            str(uuid4()), new_ss, new_mat,
+                            int(ssm.get("sort_order", 0) or 0), now,
+                        ),
+                    )
+                except sqlite3.IntegrityError:
+                    pass
+
+            # Associations: shot_page_materials
+            for spm in manifest.get("shot_page_materials", []) if isinstance(manifest.get("shot_page_materials"), list) else []:
+                if not isinstance(spm, dict):
+                    continue
+                sp_orig = str(spm.get("shot_page_original_id", ""))
+                mat_orig = str(spm.get("material_original_id", ""))
+                new_sp = shot_page_map.get(sp_orig)
+                new_mat = material_map.get(mat_orig)
+                if not new_sp or not new_mat:
+                    continue
+                try:
+                    connection.execute(
+                        """INSERT INTO shot_page_materials
+                           (shot_page_id, material_id, sort_order, created_at)
+                           VALUES(?, ?, ?, ?)""",
+                        (
+                            new_sp, new_mat,
+                            int(spm.get("sort_order", 0) or 0), now,
+                        ),
+                    )
+                except sqlite3.IntegrityError:
+                    pass
+
+            # Associations: small_scene_page_mappings
+            for m in manifest.get("small_scene_page_mappings", []) if isinstance(manifest.get("small_scene_page_mappings"), list) else []:
+                if not isinstance(m, dict):
+                    continue
+                sp_orig = str(m.get("scene_page_original_id", ""))
+                mp_orig = str(m.get("material_page_original_id", ""))
+                new_sp = shot_page_map.get(sp_orig)
+                new_mp = material_page_map.get(mp_orig)
+                if not new_sp or not new_mp:
+                    continue
+                try:
+                    connection.execute(
+                        """INSERT INTO small_scene_page_mappings
+                           (id, scene_page_id, material_page_id, material_type,
+                            created_at, updated_at)
+                           VALUES(?, ?, ?, ?, ?, ?)""",
+                        (
+                            str(uuid4()), new_sp, new_mp,
+                            str(m.get("material_type", "scene")),
+                            now, now,
+                        ),
+                    )
+                except sqlite3.IntegrityError:
+                    pass
+
+        created_count = (
+            1 + len(chapter_map) + len(large_scene_map) +
+            len(small_scene_map) + len(branch_map) +
+            len(shot_page_map) + len(materials_to_create)
+        )
+        return {
+            "dry_run": False,
+            "project_id": new_project_id,
+            "project_name": project_name,
+            "created_count": created_count,
+            "materials_created": len(materials_to_create),
+            "materials_reused": len(materials_to_reuse),
+            "conflicts": conflicts,
+            "warnings": warnings,
+        }
+
+    def scan_legacy_notes(
+        self,
+        directory: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        """Scan a directory for legacy AI drawing notes.
+
+        Finds image files (png/jpg/jpeg/webp/bmp/gif/tiff) and metadata files
+        (json/txt). For each image, a SHA-256 ``content_hash`` is computed for
+        deduplication. This operation is non-destructive and does not modify
+        the database.
+        """
+        target_environment = environment or self._active_environment
+        scan_path = Path(directory).resolve()
+        if not scan_path.exists():
+            raise ValueError(f"目录不存在：{directory}")
+        if not scan_path.is_dir():
+            raise ValueError(f"路径不是目录：{directory}")
+
+        images: list[dict[str, object]] = []
+        metadata_files: list[dict[str, object]] = []
+        for entry in sorted(scan_path.rglob("*")):
+            if not entry.is_file():
+                continue
+            ext = entry.suffix.lower()
+            if ext in self._LEGACY_IMAGE_EXTENSIONS:
+                file_bytes = entry.read_bytes()
+                images.append({
+                    "path": str(entry),
+                    "filename": entry.name,
+                    "extension": ext,
+                    "size_bytes": len(file_bytes),
+                    "content_hash": hashlib.sha256(file_bytes).hexdigest(),
+                })
+            elif ext in self._LEGACY_METADATA_EXTENSIONS:
+                metadata_files.append({
+                    "path": str(entry),
+                    "filename": entry.name,
+                    "extension": ext,
+                    "size_bytes": entry.stat().st_size,
+                })
+
+        # Detect duplicate image hashes
+        hash_counts: dict[str, int] = {}
+        for img in images:
+            h = str(img["content_hash"])
+            hash_counts[h] = hash_counts.get(h, 0) + 1
+        duplicate_hashes = {h for h, c in hash_counts.items() if c > 1}
+
+        return {
+            "directory": str(scan_path),
+            "images": images,
+            "metadata_files": metadata_files,
+            "image_count": len(images),
+            "metadata_count": len(metadata_files),
+            "total_count": len(images) + len(metadata_files),
+            "duplicate_image_count": len(duplicate_hashes),
         }
 
 

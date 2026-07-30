@@ -1436,6 +1436,28 @@ class CreateMaterialVersionRequest(BaseModel):
     label: str | None = Field(default=None, max_length=120)
 
 
+# ── MOD-12: 导入导出请求模型 ────────────────────────────────────────
+
+
+class ExportMaterialsPackageRequest(BaseModel):
+    material_ids: list[str] = Field(..., min_length=1)
+
+
+class ImportMaterialsPackageRequest(BaseModel):
+    manifest: dict[str, Any]
+    dry_run: bool = False
+
+
+class ImportProjectPackageRequest(BaseModel):
+    manifest: dict[str, Any]
+    dry_run: bool = False
+
+
+class ScanLegacyRequest(BaseModel):
+    directory: str
+    dry_run: bool = True
+
+
 # ── MOD-11: 存储备份与维护请求模型 ──────────────────────────────────
 
 
@@ -3636,6 +3658,34 @@ def create_app(
             "project": project,
         }
 
+    # ── MOD-12: 项目包导入导出 ─────────────────────────────────
+
+    @app.post("/api/projects/{project_id}/export-package")
+    def export_project_package(project_id: str) -> dict[str, object]:
+        try:
+            manifest = manager.export_project_package(project_id)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        return {
+            "database_environment": manager.active_environment,
+            "manifest": manifest,
+        }
+
+    @app.post("/api/projects/import-package")
+    def import_project_package(
+        request: ImportProjectPackageRequest,
+    ) -> dict[str, object]:
+        try:
+            result = manager.import_project_package(
+                request.manifest, dry_run=request.dry_run
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return {
+            "database_environment": manager.active_environment,
+            **result,
+        }
+
     @app.get("/api/projects/{project_id}/overview")
     def get_project_overview(project_id: str) -> dict[str, object]:
         project = manager.get_project(project_id)
@@ -5094,6 +5144,36 @@ def create_app(
             media_type=media_type,
             headers={"Cache-Control": "private, max-age=3600"},
         )
+
+    # ── MOD-12: 素材包导入导出 ─────────────────────────────────
+
+    @app.post("/api/materials/export-package")
+    def export_materials_package(
+        request: ExportMaterialsPackageRequest,
+    ) -> dict[str, object]:
+        try:
+            manifest = manager.export_materials_package(request.material_ids)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        return {
+            "database_environment": manager.active_environment,
+            "manifest": manifest,
+        }
+
+    @app.post("/api/materials/import-package")
+    def import_materials_package(
+        request: ImportMaterialsPackageRequest,
+    ) -> dict[str, object]:
+        try:
+            result = manager.import_materials_package(
+                request.manifest, dry_run=request.dry_run
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return {
+            "database_environment": manager.active_environment,
+            **result,
+        }
 
     # ── Character Database (Danbooru CSV lookup) ───────────────
 
@@ -7314,6 +7394,21 @@ def create_app(
         """清理临时文件和缓存目录。"""
         result = manager.clear_cache()
         return {"database_environment": manager.active_environment, "clear_cache": result}
+
+    # ── MOD-12: 旧笔记扫描 API ────────────────────────────────────────
+
+    @app.post("/api/import/scan-legacy")
+    def scan_legacy_notes_api(request: ScanLegacyRequest) -> dict[str, object]:
+        """扫描目录中的旧 AI 作图笔记（图片和元数据文件）。"""
+        try:
+            result = manager.scan_legacy_notes(request.directory)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return {
+            "database_environment": manager.active_environment,
+            "dry_run": request.dry_run,
+            "scan": result,
+        }
 
     # Warm the production lookup cache before the first page request. Test
     # application factories must not start a shared background import thread.
