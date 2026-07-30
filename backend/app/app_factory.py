@@ -168,6 +168,11 @@ from .thumbnail_worker import (
     run_thumbnail_worker_once,
     thumbnail_path_for,
 )
+from .export_runner import (
+    cancel_export_job,
+    execute_export_job,
+    run_export_worker_once,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -7260,6 +7265,79 @@ def create_app(
         return {
             "database_environment": manager.active_environment,
             "job": job,
+        }
+
+    @app.post("/api/export-jobs/{job_id}/execute")
+    def execute_export_job_api(
+        job_id: str,
+        conflict_strategy: str = "suffix",
+    ) -> dict[str, object]:
+        """执行单个导出任务（同步阻塞，处理完成或失败后返回）。"""
+        try:
+            result = execute_export_job(
+                manager, job_id, conflict_strategy=conflict_strategy
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return {
+            "database_environment": manager.active_environment,
+            "export_result": result,
+        }
+
+    @app.post("/api/export-jobs/{job_id}/cancel")
+    def cancel_export_job_api(job_id: str) -> dict[str, object]:
+        """取消导出任务。"""
+        try:
+            result = cancel_export_job(manager, job_id)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        return {
+            "database_environment": manager.active_environment,
+            "cancel_result": result,
+        }
+
+    @app.post("/api/export-jobs/worker/run")
+    def run_export_worker_api(
+        max_jobs: int = 1,
+        conflict_strategy: str = "suffix",
+    ) -> dict[str, object]:
+        """触发一轮导出 worker，处理 pending 的导出任务。"""
+        result = run_export_worker_once(
+            manager,
+            max_jobs=max_jobs,
+            conflict_strategy=conflict_strategy,
+        )
+        return {
+            "database_environment": manager.active_environment,
+            "worker_result": result,
+        }
+
+    @app.post("/api/final-versions/{final_version_id}/rebuild-from-adoptions")
+    def rebuild_from_adoptions_api(final_version_id: str) -> dict[str, object]:
+        """从采用结果重建最终版本序列（清空现有条目后重新生成）。
+
+        与 generate-default-sequence 的区别：本端点先删除现有所有条目再生成，
+        适用于已有手动调整后需要重置的场景。
+        """
+        fv = manager.get_final_version(final_version_id)
+        if fv is None:
+            raise HTTPException(status_code=404, detail="最终版本不存在。")
+        # 清空现有条目
+        with manager.connection() as conn:
+            conn.execute(
+                "DELETE FROM final_version_items WHERE final_version_id = ?",
+                (final_version_id,),
+            )
+            conn.commit()
+        # 重新生成
+        items = manager.generate_default_sequence(
+            final_version_id, str(fv["project_id"])
+        )
+        return {
+            "database_environment": manager.active_environment,
+            "rebuilt": True,
+            "items": items,
+            "total": len(items),
         }
 
     @app.get("/api/background-jobs")
