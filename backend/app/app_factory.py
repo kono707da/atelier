@@ -205,6 +205,44 @@ from .event_bus import (
     set_global_bus,
     sse_events_generator,
 )
+from .gap_fill_2 import (
+    VALID_REFERENCE_MODES,
+    VALID_TEMPLATE_TYPES,
+    VALID_TRANSITION_TYPES,
+    add_to_recycle_bin,
+    batch_paste_spec_values,
+    check_directory_access,
+    check_spec_completeness,
+    create_autosave_snapshot,
+    create_blocking_issue,
+    create_material_template,
+    create_transition_block,
+    create_validation_run,
+    delete_material_template,
+    delete_transition_block,
+    get_directory_settings,
+    get_latest_autosave,
+    get_linked_character_for_record,
+    get_material_template,
+    get_transition_block,
+    get_validation_run,
+    link_query_record_to_character,
+    list_autosave_snapshots,
+    list_blocking_issues,
+    list_material_templates,
+    list_recycle_bin,
+    list_transition_blocks,
+    list_validation_runs,
+    purge_recycle_bin,
+    restore_from_recycle_bin,
+    set_directory_settings,
+    set_material_page_reference_mode,
+    update_blocking_issue,
+    update_material_template,
+    update_transition_block,
+    update_validation_run,
+    upload_spec_value_preview,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -1532,6 +1570,136 @@ class RestoreDatabaseRequest(BaseModel):
     backup_path: str = Field(..., description="备份文件的绝对或相对路径")
     pre_restore_backup: bool = Field(default=True, description="恢复前自动备份当前库")
     pre_restore_backup_dir: str | None = Field(default=None, description="恢复前备份目录")
+
+
+# ── Gap-Fill 2 请求模型 ─────────────────────────────────────────────
+
+
+class DirectorySettingsRequest(BaseModel):
+    data_dir: str | None = None
+    images_dir: str | None = None
+    cache_dir: str | None = None
+    tmp_dir: str | None = None
+
+
+class CheckDirectoryRequest(BaseModel):
+    path: str
+
+
+class RecycleBinEntryRequest(BaseModel):
+    entity_type: str
+    entity_id: str
+    entity_name: str = ""
+    source_table: str
+    payload: dict | None = None
+    expires_at: str | None = None
+
+
+class PurgeRecycleBinRequest(BaseModel):
+    entry_id: str | None = None
+    entity_type: str | None = None
+    older_than_days: int | None = None
+
+
+class ValidationRunRequest(BaseModel):
+    workflow_id: str | None = None
+    workflow_version_id: str | None = None
+    draft_id: str | None = None
+    run_type: str = "precheck"
+
+
+class UpdateValidationRunRequest(BaseModel):
+    status: str | None = None
+    errors: list | None = None
+    warnings: list | None = None
+    node_count: int | None = None
+    connection_count: int | None = None
+    duration_ms: int | None = None
+    comfyui_response: dict | None = None
+
+
+class TransitionBlockRequest(BaseModel):
+    project_id: str
+    source_page_id: str | None = None
+    target_page_id: str | None = None
+    transition_type: str = "cut"
+    duration_frames: int = 0
+    in_frame: int | None = None
+    out_frame: int | None = None
+    params: dict | None = None
+    sort_order: int = 0
+
+
+class UpdateTransitionBlockRequest(BaseModel):
+    transition_type: str | None = None
+    duration_frames: int | None = None
+    in_frame: int | None = None
+    out_frame: int | None = None
+    params: dict | None = None
+    sort_order: int | None = None
+
+
+class AutosaveSnapshotRequest(BaseModel):
+    project_id: str
+    entity_type: str
+    entity_id: str
+    operation_type: str = "update"
+    payload: dict | None = None
+
+
+class BlockingIssueRequest(BaseModel):
+    project_id: str
+    batch_id: str | None = None
+    severity: str = "error"
+    category: str = "general"
+    page_id: str | None = None
+    field_path: str | None = None
+    message: str
+    detail: dict | None = None
+
+
+class UpdateBlockingIssueRequest(BaseModel):
+    status: str | None = None
+
+
+class MaterialTemplateRequest(BaseModel):
+    name: str
+    template_type: str = "shot_template"
+    description: str = ""
+    pages: list | None = None
+    tags: list | None = None
+    preview_file_id: str | None = None
+
+
+class UpdateMaterialTemplateRequest(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    pages: list | None = None
+    tags: list | None = None
+    preview_file_id: str | None = None
+    is_archived: int | None = None
+
+
+class MaterialPageReferenceModeRequest(BaseModel):
+    mode: str
+
+
+class BatchPasteSpecValuesRequest(BaseModel):
+    character_id: str
+    variant_id: str
+    spec_values: list[dict]
+
+
+class LinkQueryRecordRequest(BaseModel):
+    record_id: str
+    character_id: str | None = None
+    character_name: str | None = None
+    project_id: str | None = None
+
+
+class BatchRenameRequest(BaseModel):
+    name: str
+    revision: int | None = None
 
 
 # 状态码到错误码的映射，保持 API 错误响应统一可追溯。
@@ -7850,6 +8018,492 @@ def create_app(
             trash_retention_days=trash_retention_days,
         )
         return {"database_environment": manager.active_environment, "maintenance": result}
+
+    # ── Gap-Fill 2: 可配置目录 API ─────────────────────────────────────
+
+    @app.get("/api/settings/directory")
+    def get_directory_settings_api() -> dict[str, object]:
+        """读取数据、图片、缓存和临时目录配置。"""
+        return {
+            "database_environment": manager.active_environment,
+            "directory": get_directory_settings(manager),
+        }
+
+    @app.put("/api/settings/directory")
+    def update_directory_settings_api(request: DirectorySettingsRequest) -> dict[str, object]:
+        """更新目录配置。传入空字符串恢复默认。"""
+        result = set_directory_settings(
+            manager,
+            data_dir=request.data_dir,
+            images_dir=request.images_dir,
+            cache_dir=request.cache_dir,
+            tmp_dir=request.tmp_dir,
+        )
+        return {
+            "database_environment": manager.active_environment,
+            "directory": result,
+            "message": "目录配置已保存。",
+        }
+
+    @app.post("/api/settings/directory/check")
+    def check_directory_api(request: CheckDirectoryRequest) -> dict[str, object]:
+        """检查目录路径的权限、空间和可写性。"""
+        result = check_directory_access(request.path)
+        return {"database_environment": manager.active_environment, "check": result}
+
+    # ── Gap-Fill 2: 回收站 API ─────────────────────────────────────────
+
+    @app.get("/api/recycle-bin")
+    def list_recycle_bin_api(
+        entity_type: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, object]:
+        """列出回收站条目。"""
+        result = list_recycle_bin(
+            manager, entity_type=entity_type, limit=limit, offset=offset
+        )
+        return {"database_environment": manager.active_environment, "recycle_bin": result}
+
+    @app.post("/api/recycle-bin")
+    def add_to_recycle_bin_api(request: RecycleBinEntryRequest) -> dict[str, object]:
+        """将一个被软删的实体登记到回收站。"""
+        try:
+            result = add_to_recycle_bin(
+                manager,
+                entity_type=request.entity_type,
+                entity_id=request.entity_id,
+                entity_name=request.entity_name,
+                source_table=request.source_table,
+                payload_json=request.payload,
+                expires_at=request.expires_at,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return {"database_environment": manager.active_environment, "entry": result}
+
+    @app.post("/api/recycle-bin/{entry_id}/restore")
+    def restore_recycle_bin_api(entry_id: str) -> dict[str, object]:
+        """从回收站恢复条目（返回 payload 供业务模块恢复）。"""
+        result = restore_from_recycle_bin(manager, entry_id)
+        if not result:
+            raise HTTPException(status_code=404, detail="回收站条目不存在")
+        return {"database_environment": manager.active_environment, "entry": result}
+
+    @app.post("/api/recycle-bin/purge")
+    def purge_recycle_bin_api(request: PurgeRecycleBinRequest) -> dict[str, object]:
+        """彻底清除回收站条目。"""
+        result = purge_recycle_bin(
+            manager,
+            entry_id=request.entry_id,
+            entity_type=request.entity_type,
+            older_than_days=request.older_than_days,
+        )
+        return {"database_environment": manager.active_environment, "purge": result}
+
+    # ── Gap-Fill 2: 工作流验证运行 API ────────────────────────────────
+
+    @app.post("/api/workflow-validation-runs")
+    def create_validation_run_api(request: ValidationRunRequest) -> dict[str, object]:
+        """创建工作流验证运行记录。"""
+        try:
+            result = create_validation_run(
+                manager,
+                workflow_id=request.workflow_id,
+                workflow_version_id=request.workflow_version_id,
+                draft_id=request.draft_id,
+                run_type=request.run_type,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return {"database_environment": manager.active_environment, "run": result}
+
+    @app.get("/api/workflow-validation-runs")
+    def list_validation_runs_api(
+        workflow_id: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, object]:
+        """列出工作流验证运行记录。"""
+        result = list_validation_runs(
+            manager, workflow_id=workflow_id, status=status, limit=limit, offset=offset
+        )
+        return {"database_environment": manager.active_environment, "runs": result}
+
+    @app.get("/api/workflow-validation-runs/{run_id}")
+    def get_validation_run_api(run_id: str) -> dict[str, object]:
+        """获取单条验证运行记录。"""
+        result = get_validation_run(manager, run_id)
+        if not result:
+            raise HTTPException(status_code=404, detail="验证运行记录不存在")
+        return {"database_environment": manager.active_environment, "run": result}
+
+    @app.patch("/api/workflow-validation-runs/{run_id}")
+    def update_validation_run_api(
+        run_id: str, request: UpdateValidationRunRequest
+    ) -> dict[str, object]:
+        """更新验证运行记录。"""
+        try:
+            result = update_validation_run(
+                manager,
+                run_id,
+                status=request.status,
+                errors=request.errors,
+                warnings=request.warnings,
+                node_count=request.node_count,
+                connection_count=request.connection_count,
+                duration_ms=request.duration_ms,
+                comfyui_response=request.comfyui_response,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        if not result:
+            raise HTTPException(status_code=404, detail="验证运行记录不存在")
+        return {"database_environment": manager.active_environment, "run": result}
+
+    # ── Gap-Fill 2: 转场结构块 API ────────────────────────────────────
+
+    @app.post("/api/transition-blocks")
+    def create_transition_block_api(request: TransitionBlockRequest) -> dict[str, object]:
+        """创建转场结构块。"""
+        try:
+            result = create_transition_block(
+                manager,
+                project_id=request.project_id,
+                source_page_id=request.source_page_id,
+                target_page_id=request.target_page_id,
+                transition_type=request.transition_type,
+                duration_frames=request.duration_frames,
+                in_frame=request.in_frame,
+                out_frame=request.out_frame,
+                params=request.params,
+                sort_order=request.sort_order,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return {"database_environment": manager.active_environment, "block": result}
+
+    @app.get("/api/projects/{project_id}/transition-blocks")
+    def list_transition_blocks_api(project_id: str) -> dict[str, object]:
+        """列出项目的所有转场结构块。"""
+        result = list_transition_blocks(manager, project_id)
+        return {"database_environment": manager.active_environment, "blocks": result}
+
+    @app.get("/api/transition-blocks/{block_id}")
+    def get_transition_block_api(block_id: str) -> dict[str, object]:
+        """获取单个转场结构块。"""
+        result = get_transition_block(manager, block_id)
+        if not result:
+            raise HTTPException(status_code=404, detail="转场结构块不存在")
+        return {"database_environment": manager.active_environment, "block": result}
+
+    @app.patch("/api/transition-blocks/{block_id}")
+    def update_transition_block_api(
+        block_id: str, request: UpdateTransitionBlockRequest
+    ) -> dict[str, object]:
+        """更新转场结构块。"""
+        try:
+            result = update_transition_block(
+                manager,
+                block_id,
+                transition_type=request.transition_type,
+                duration_frames=request.duration_frames,
+                in_frame=request.in_frame,
+                out_frame=request.out_frame,
+                params=request.params,
+                sort_order=request.sort_order,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        if not result:
+            raise HTTPException(status_code=404, detail="转场结构块不存在")
+        return {"database_environment": manager.active_environment, "block": result}
+
+    @app.delete("/api/transition-blocks/{block_id}")
+    def delete_transition_block_api(block_id: str) -> dict[str, object]:
+        """删除转场结构块。"""
+        deleted = delete_transition_block(manager, block_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="转场结构块不存在")
+        return {"database_environment": manager.active_environment, "deleted": True}
+
+    # ── Gap-Fill 2: 自动保存 API ──────────────────────────────────────
+
+    @app.post("/api/autosave/snapshots")
+    def create_autosave_api(request: AutosaveSnapshotRequest) -> dict[str, object]:
+        """创建自动保存快照。"""
+        try:
+            result = create_autosave_snapshot(
+                manager,
+                project_id=request.project_id,
+                entity_type=request.entity_type,
+                entity_id=request.entity_id,
+                operation_type=request.operation_type,
+                payload=request.payload,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return {"database_environment": manager.active_environment, "snapshot": result}
+
+    @app.get("/api/projects/{project_id}/autosave")
+    def list_autosave_api(
+        project_id: str,
+        entity_type: str | None = None,
+        entity_id: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, object]:
+        """列出项目的自动保存快照。"""
+        result = list_autosave_snapshots(
+            manager,
+            project_id,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            limit=limit,
+            offset=offset,
+        )
+        return {"database_environment": manager.active_environment, "autosave": result}
+
+    @app.get("/api/projects/{project_id}/autosave/latest")
+    def get_latest_autosave_api(
+        project_id: str, entity_type: str, entity_id: str
+    ) -> dict[str, object]:
+        """获取指定实体的最新自动保存快照。"""
+        result = get_latest_autosave(manager, project_id, entity_type, entity_id)
+        return {"database_environment": manager.active_environment, "snapshot": result}
+
+    # ── Gap-Fill 2: 阻塞项 API ────────────────────────────────────────
+
+    @app.post("/api/blocking-issues")
+    def create_blocking_issue_api(request: BlockingIssueRequest) -> dict[str, object]:
+        """创建阻塞项记录。"""
+        try:
+            result = create_blocking_issue(
+                manager,
+                project_id=request.project_id,
+                batch_id=request.batch_id,
+                severity=request.severity,
+                category=request.category,
+                page_id=request.page_id,
+                field_path=request.field_path,
+                message=request.message,
+                detail=request.detail,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return {"database_environment": manager.active_environment, "issue": result}
+
+    @app.get("/api/blocking-issues")
+    def list_blocking_issues_api(
+        project_id: str | None = None,
+        batch_id: str | None = None,
+        status: str | None = None,
+        severity: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, object]:
+        """列出阻塞项。"""
+        result = list_blocking_issues(
+            manager,
+            project_id=project_id,
+            batch_id=batch_id,
+            status=status,
+            severity=severity,
+            limit=limit,
+            offset=offset,
+        )
+        return {"database_environment": manager.active_environment, "issues": result}
+
+    @app.patch("/api/blocking-issues/{issue_id}")
+    def update_blocking_issue_api(
+        issue_id: str, request: UpdateBlockingIssueRequest
+    ) -> dict[str, object]:
+        """更新阻塞项状态。"""
+        try:
+            result = update_blocking_issue(manager, issue_id, status=request.status)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        if not result:
+            raise HTTPException(status_code=404, detail="阻塞项不存在")
+        return {"database_environment": manager.active_environment, "issue": result}
+
+    # ── Gap-Fill 2: 素材模板 API ──────────────────────────────────────
+
+    @app.post("/api/material-templates")
+    def create_material_template_api(request: MaterialTemplateRequest) -> dict[str, object]:
+        """创建素材模板（镜头模板/场景包/转场包）。"""
+        try:
+            result = create_material_template(
+                manager,
+                name=request.name,
+                template_type=request.template_type,
+                description=request.description,
+                pages=request.pages,
+                tags=request.tags,
+                preview_file_id=request.preview_file_id,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return {"database_environment": manager.active_environment, "template": result}
+
+    @app.get("/api/material-templates")
+    def list_material_templates_api(
+        template_type: str | None = None,
+        include_archived: bool = False,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, object]:
+        """列出素材模板。"""
+        result = list_material_templates(
+            manager,
+            template_type=template_type,
+            include_archived=include_archived,
+            limit=limit,
+            offset=offset,
+        )
+        return {"database_environment": manager.active_environment, "templates": result}
+
+    @app.get("/api/material-templates/{template_id}")
+    def get_material_template_api(template_id: str) -> dict[str, object]:
+        """获取单个素材模板。"""
+        result = get_material_template(manager, template_id)
+        if not result:
+            raise HTTPException(status_code=404, detail="素材模板不存在")
+        return {"database_environment": manager.active_environment, "template": result}
+
+    @app.patch("/api/material-templates/{template_id}")
+    def update_material_template_api(
+        template_id: str, request: UpdateMaterialTemplateRequest
+    ) -> dict[str, object]:
+        """更新素材模板。"""
+        result = update_material_template(
+            manager,
+            template_id,
+            name=request.name,
+            description=request.description,
+            pages=request.pages,
+            tags=request.tags,
+            preview_file_id=request.preview_file_id,
+            is_archived=request.is_archived,
+        )
+        if not result:
+            raise HTTPException(status_code=404, detail="素材模板不存在")
+        return {"database_environment": manager.active_environment, "template": result}
+
+    @app.delete("/api/material-templates/{template_id}")
+    def delete_material_template_api(template_id: str) -> dict[str, object]:
+        """删除素材模板。"""
+        deleted = delete_material_template(manager, template_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="素材模板不存在")
+        return {"database_environment": manager.active_environment, "deleted": True}
+
+    # ── Gap-Fill 2: 素材页引用模式 API ────────────────────────────────
+
+    @app.patch("/api/material-pages/{page_id}/reference-mode")
+    def set_material_page_reference_mode_api(
+        page_id: str, request: MaterialPageReferenceModeRequest
+    ) -> dict[str, object]:
+        """设置素材页的引用模式（independent/link）。"""
+        try:
+            result = set_material_page_reference_mode(manager, page_id, request.mode)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        if not result:
+            raise HTTPException(status_code=404, detail="素材页不存在")
+        return {"database_environment": manager.active_environment, "page": result}
+
+    # ── Gap-Fill 2: 规格完整性检查 API ────────────────────────────────
+
+    @app.get("/api/characters/{character_id}/spec-completeness")
+    def check_spec_completeness_api(character_id: str) -> dict[str, object]:
+        """检查人物规格完整性，返回变体×规格的缺失项矩阵。"""
+        result = check_spec_completeness(manager, character_id)
+        return {"database_environment": manager.active_environment, "completeness": result}
+
+    # ── Gap-Fill 2: 批量粘贴 spec_value API ───────────────────────────
+
+    @app.post("/api/character-spec-values/batch-paste")
+    def batch_paste_spec_values_api(request: BatchPasteSpecValuesRequest) -> dict[str, object]:
+        """批量创建或更新 spec_value。"""
+        result = batch_paste_spec_values(
+            manager,
+            character_id=request.character_id,
+            variant_id=request.variant_id,
+            spec_values=request.spec_values,
+        )
+        return {"database_environment": manager.active_environment, "result": result}
+
+    # ── Gap-Fill 2: spec_value 预览图上传 API ─────────────────────────
+
+    @app.post("/api/character-spec-values/{spec_value_id}/preview")
+    def upload_spec_value_preview_api(
+        spec_value_id: str, file: UploadFile
+    ) -> dict[str, object]:
+        """上传 spec_value 的预览图。"""
+        storage_dir = manager.data_root / "storage" / "character_previews"
+        file_data = file.file.read()
+        result = upload_spec_value_preview(
+            manager,
+            spec_value_id,
+            file_data=file_data,
+            filename=file.filename or "preview.png",
+            storage_dir=storage_dir,
+        )
+        if not result:
+            raise HTTPException(status_code=404, detail="spec_value 不存在")
+        return {"database_environment": manager.active_environment, "spec_value": result}
+
+    # ── Gap-Fill 2: 从查询结果创建/关联人物 API ────────────────────────
+
+    @app.post("/api/character-database/link")
+    def link_query_record_api(request: LinkQueryRecordRequest) -> dict[str, object]:
+        """将角色查询库中的记录关联到人物库。"""
+        try:
+            result = link_query_record_to_character(
+                manager,
+                record_id=request.record_id,
+                character_id=request.character_id,
+                character_name=request.character_name,
+                project_id=request.project_id,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return {"database_environment": manager.active_environment, "link": result}
+
+    @app.get("/api/character-database/{record_id}/link")
+    def get_linked_character_api(record_id: str) -> dict[str, object]:
+        """查询记录是否已关联人物。"""
+        result = get_linked_character_for_record(manager, record_id)
+        return {"database_environment": manager.active_environment, "link": result}
+
+    # ── Gap-Fill 2: 批次改名 API ──────────────────────────────────────
+
+    @app.patch("/api/batches/{batch_id}")
+    def rename_batch_api(
+        batch_id: str, request: BatchRenameRequest
+    ) -> dict[str, object]:
+        """重命名批次（支持 revision 并发保护）。"""
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        with manager.connection() as conn:
+            existing = conn.execute(
+                "SELECT * FROM batches WHERE id = ?", (batch_id,)
+            ).fetchone()
+            if not existing:
+                raise HTTPException(status_code=404, detail="批次不存在")
+            if request.revision is not None and existing["revision"] != request.revision:
+                raise HTTPException(status_code=409, detail="revision 冲突")
+            conn.execute(
+                "UPDATE batches SET name = ?, updated_at = ? WHERE id = ?",
+                (request.name, now, batch_id),
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT * FROM batches WHERE id = ?", (batch_id,)
+            ).fetchone()
+        return {"database_environment": manager.active_environment, "batch": dict(row)}
 
     # ── MOD-12: 旧笔记扫描 API ────────────────────────────────────────
 

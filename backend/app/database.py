@@ -644,6 +644,10 @@ class DatabaseManager:
                 connection, "v0.9.3", "Add star_rating/color_label/review_note to image_instances, image_tags and image_tag_links tables",
                 self._migrate_image_review_enhancements,
             )
+            self._run_migration(
+                connection, "v0.9.4", "Gap-fill 2: directory settings, recycle_bin, workflow_validation_runs, transition_blocks, blocking_issues, material_templates, material_page_reference_mode, character_spec_preview, autosave_snapshots",
+                self._migrate_gap_fill_2,
+            )
             marker = connection.execute(
                 "SELECT value FROM atelier_meta WHERE key = 'environment'"
             ).fetchone()
@@ -2464,6 +2468,219 @@ class DatabaseManager:
             "CREATE INDEX IF NOT EXISTS idx_image_tag_links_tag "
             "ON image_tag_links(tag_id)"
         )
+
+    def _migrate_gap_fill_2(self, connection) -> None:
+        """v0.9.4 Gap-fill 2: 补全剩余后端缺口。
+
+        包含：
+        - MOD-11: 目录配置默认值 + recycle_bin 表
+        - MOD-05: workflow_validation_runs 表
+        - MOD-04: transition_blocks 表 + autosave_snapshots 表
+        - MOD-06: blocking_issues 表
+        - MOD-02: material_templates 表 + material_pages.reference_mode 字段
+        """
+        now = datetime.now(timezone.utc).isoformat()
+
+        # ── MOD-11: 目录配置默认值 ──
+        dir_defaults = [
+            ("directory.data_dir", ""),
+            ("directory.images_dir", ""),
+            ("directory.cache_dir", ""),
+            ("directory.tmp_dir", ""),
+        ]
+        for key, value in dir_defaults:
+            connection.execute(
+                "INSERT OR IGNORE INTO app_settings(key, value, updated_at) VALUES (?, ?, ?)",
+                (key, value, now),
+            )
+
+        # ── MOD-11: recycle_bin 表（统一回收站视图） ──
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS recycle_bin (
+                id TEXT PRIMARY KEY,
+                entity_type TEXT NOT NULL,
+                entity_id TEXT NOT NULL,
+                entity_name TEXT NOT NULL DEFAULT '',
+                source_table TEXT NOT NULL,
+                payload_json TEXT,
+                deleted_at TEXT NOT NULL,
+                expires_at TEXT,
+                created_at TEXT NOT NULL,
+                UNIQUE (entity_type, entity_id)
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_recycle_bin_type ON recycle_bin(entity_type)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_recycle_bin_deleted ON recycle_bin(deleted_at)"
+        )
+
+        # ── MOD-05: workflow_validation_runs 表 ──
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS workflow_validation_runs (
+                id TEXT PRIMARY KEY,
+                workflow_id TEXT,
+                workflow_version_id TEXT,
+                draft_id TEXT,
+                run_type TEXT NOT NULL DEFAULT 'precheck',
+                status TEXT NOT NULL DEFAULT 'pending',
+                errors_json TEXT NOT NULL DEFAULT '[]',
+                warnings_json TEXT NOT NULL DEFAULT '[]',
+                node_count INTEGER NOT NULL DEFAULT 0,
+                connection_count INTEGER NOT NULL DEFAULT 0,
+                duration_ms INTEGER,
+                comfyui_response_json TEXT,
+                started_at TEXT,
+                completed_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (workflow_id)
+                    REFERENCES workflows(id) ON DELETE SET NULL,
+                FOREIGN KEY (workflow_version_id)
+                    REFERENCES workflow_versions(id) ON DELETE SET NULL,
+                FOREIGN KEY (draft_id)
+                    REFERENCES workflow_drafts(id) ON DELETE SET NULL
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_validation_runs_workflow "
+            "ON workflow_validation_runs(workflow_id)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_validation_runs_status "
+            "ON workflow_validation_runs(status)"
+        )
+
+        # ── MOD-04: transition_blocks 表（转场结构块） ──
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS transition_blocks (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                source_page_id TEXT,
+                target_page_id TEXT,
+                transition_type TEXT NOT NULL DEFAULT 'cut',
+                duration_frames INTEGER NOT NULL DEFAULT 0,
+                in_frame INTEGER,
+                out_frame INTEGER,
+                params_json TEXT NOT NULL DEFAULT '{}',
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                revision INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (project_id)
+                    REFERENCES projects(id) ON DELETE CASCADE,
+                FOREIGN KEY (source_page_id)
+                    REFERENCES shot_pages(id) ON DELETE SET NULL,
+                FOREIGN KEY (target_page_id)
+                    REFERENCES shot_pages(id) ON DELETE SET NULL
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_transition_blocks_project "
+            "ON transition_blocks(project_id)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_transition_blocks_source "
+            "ON transition_blocks(source_page_id)"
+        )
+
+        # ── MOD-04: autosave_snapshots 表（自动保存） ──
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS autosave_snapshots (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                entity_type TEXT NOT NULL,
+                entity_id TEXT NOT NULL,
+                operation_type TEXT NOT NULL DEFAULT 'update',
+                payload_json TEXT NOT NULL,
+                is_recovered INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (project_id)
+                    REFERENCES projects(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_autosave_project_entity "
+            "ON autosave_snapshots(project_id, entity_type, entity_id)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_autosave_created "
+            "ON autosave_snapshots(created_at)"
+        )
+
+        # ── MOD-06: blocking_issues 表（阻塞项持久化） ──
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS blocking_issues (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                batch_id TEXT,
+                severity TEXT NOT NULL DEFAULT 'error',
+                category TEXT NOT NULL DEFAULT 'general',
+                page_id TEXT,
+                field_path TEXT,
+                message TEXT NOT NULL,
+                detail_json TEXT,
+                status TEXT NOT NULL DEFAULT 'open',
+                resolved_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (project_id)
+                    REFERENCES projects(id) ON DELETE CASCADE,
+                FOREIGN KEY (batch_id)
+                    REFERENCES batches(id) ON DELETE SET NULL
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_blocking_issues_project "
+            "ON blocking_issues(project_id)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_blocking_issues_status "
+            "ON blocking_issues(status)"
+        )
+
+        # ── MOD-02: material_templates 表（镜头模板/场景包/转场包） ──
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS material_templates (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                template_type TEXT NOT NULL DEFAULT 'shot_template',
+                description TEXT NOT NULL DEFAULT '',
+                pages_json TEXT NOT NULL DEFAULT '[]',
+                tags_json TEXT NOT NULL DEFAULT '[]',
+                preview_file_id TEXT,
+                is_archived INTEGER NOT NULL DEFAULT 0,
+                revision INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (preview_file_id)
+                    REFERENCES files(id) ON DELETE SET NULL
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_material_templates_type "
+            "ON material_templates(template_type)"
+        )
+
+        # ── MOD-02: material_pages.reference_mode 字段 ──
+        mp_cols = [row["name"] for row in connection.execute("PRAGMA table_info(material_pages)").fetchall()]
+        if "reference_mode" not in mp_cols:
+            connection.execute(
+                "ALTER TABLE material_pages ADD COLUMN reference_mode TEXT NOT NULL DEFAULT 'independent'"
+            )
 
     def _migrate_comfyui_instances(self, connection) -> None:
         """v0.8.0: 新增 comfyui_instances 表，支持多实例管理。
