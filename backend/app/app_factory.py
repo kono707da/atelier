@@ -160,6 +160,14 @@ from .gallery import (
     search_gallery_by_prompt,
     update_file_perceptual_hash,
 )
+from .thumbnail_worker import (
+    get_thumbnail_record,
+    list_thumbnails_for_file,
+    rebuild_all_thumbnails,
+    rebuild_thumbnails_for_file,
+    run_thumbnail_worker_once,
+    thumbnail_path_for,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -7271,6 +7279,88 @@ def create_app(
             "database_environment": manager.active_environment,
             "background_jobs": jobs,
             "count": len(jobs),
+        }
+
+    # ── 缩略图 worker API ────────────────────────────────────────────
+
+    @app.post("/api/thumbnails/worker/run")
+    def run_thumbnail_worker_api(
+        max_jobs: int = 10,
+    ) -> dict[str, object]:
+        """触发一轮缩略图 worker，处理 pending 的缩略图任务。"""
+        result = run_thumbnail_worker_once(manager, max_jobs=max_jobs)
+        return {
+            "database_environment": manager.active_environment,
+            "worker_result": result,
+        }
+
+    @app.get("/api/files/{file_id}/thumbnails")
+    def list_file_thumbnails_api(file_id: str) -> dict[str, object]:
+        """列出文件的所有缩略图记录。"""
+        if get_file_record(manager, file_id) is None:
+            raise HTTPException(status_code=404, detail="文件不存在")
+        items = list_thumbnails_for_file(manager, file_id)
+        return {
+            "database_environment": manager.active_environment,
+            "file_id": file_id,
+            "thumbnails": items,
+            "count": len(items),
+        }
+
+    @app.get("/api/files/{file_id}/thumbnails/{size_class}")
+    def get_file_thumbnail_api(
+        file_id: str,
+        size_class: str,
+    ) -> dict[str, object]:
+        """获取文件指定级别的缩略图记录。"""
+        record = get_thumbnail_record(manager, file_id, size_class)
+        if record is None:
+            raise HTTPException(status_code=404, detail="缩略图不存在")
+        return {
+            "database_environment": manager.active_environment,
+            "thumbnail": record,
+        }
+
+    @app.get("/api/files/{file_id}/thumbnails/{size_class}/image")
+    def serve_file_thumbnail_api(
+        file_id: str,
+        size_class: str,
+    ) -> FileResponse:
+        """直接返回缩略图图片文件。"""
+        record = get_thumbnail_record(manager, file_id, size_class)
+        if record is None:
+            raise HTTPException(status_code=404, detail="缩略图不存在")
+        if record.get("state") != "completed":
+            raise HTTPException(status_code=409, detail=f"缩略图状态为 {record.get('state')}，不可访问")
+        path = thumbnail_path_for(manager, file_id, size_class)
+        if not path.exists():
+            raise HTTPException(status_code=404, detail="缩略图文件不存在")
+        return FileResponse(
+            path=str(path),
+            media_type="image/webp",
+            filename=f"{file_id}_{size_class}.webp",
+        )
+
+    @app.post("/api/files/{file_id}/thumbnails/rebuild")
+    def rebuild_file_thumbnails_api(file_id: str) -> dict[str, object]:
+        """重建指定文件的所有级别缩略图。"""
+        if get_file_record(manager, file_id) is None:
+            raise HTTPException(status_code=404, detail="文件不存在")
+        result = rebuild_thumbnails_for_file(manager, file_id)
+        return {
+            "database_environment": manager.active_environment,
+            "rebuild_result": result,
+        }
+
+    @app.post("/api/thumbnails/rebuild-all")
+    def rebuild_all_thumbnails_api(
+        limit: int = 100,
+    ) -> dict[str, object]:
+        """批量重建所有文件的缩略图（最多 ``limit`` 个文件）。"""
+        result = rebuild_all_thumbnails(manager, limit=limit)
+        return {
+            "database_environment": manager.active_environment,
+            "rebuild_result": result,
         }
 
     # ── 阶段3.7 任务中心 API ────────────────────────────────────────
