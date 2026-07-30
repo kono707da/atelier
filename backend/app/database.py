@@ -636,6 +636,10 @@ class DatabaseManager:
                 connection, "v0.9.1", "Add gallery_index table, gallery_fts FTS5 virtual table and phash indexes for MOD-10 global gallery",
                 self._migrate_gallery,
             )
+            self._run_migration(
+                connection, "v0.9.2", "Add legacy_indexed_files table for MOD-12 legacy library indexing with checkpoints",
+                self._migrate_legacy_import,
+            )
             marker = connection.execute(
                 "SELECT value FROM atelier_meta WHERE key = 'environment'"
             ).fetchone()
@@ -2340,6 +2344,56 @@ class DatabaseManager:
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_export_jobs_status "
             "ON export_jobs(status, created_at DESC)"
+        )
+
+    def _migrate_legacy_import(self, connection) -> None:
+        """MOD-12: 历史图片原地索引表。
+
+        ``legacy_indexed_files`` 记录每个被索引的历史文件，作为检查点，
+        避免重复处理已确认文件。文件不存在时标记为 ``missing``，
+        不直接删除数据库记录（需求 §15）。
+
+        字段：
+        - id: 记录唯一 ID
+        - job_id: 关联 background_jobs.id（job_type='legacy_index'）
+        - source_path: 原始文件绝对路径
+        - content_hash: SHA-256 内容哈希（去重用）
+        - file_id: 关联 files 表的 ID（已导入则为非空，仅索引未导入则为空）
+        - status: indexed/skipped/missing/duplicate/error
+        - error_message: 失败原因
+        - created_at, updated_at
+        """
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS legacy_indexed_files (
+                id TEXT PRIMARY KEY,
+                job_id TEXT NOT NULL,
+                source_path TEXT NOT NULL,
+                content_hash TEXT,
+                file_id TEXT,
+                status TEXT NOT NULL DEFAULT 'indexed',
+                error_message TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (job_id)
+                    REFERENCES background_jobs(id) ON DELETE CASCADE,
+                FOREIGN KEY (file_id)
+                    REFERENCES files(id) ON DELETE SET NULL,
+                UNIQUE (job_id, source_path)
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_legacy_indexed_files_job "
+            "ON legacy_indexed_files(job_id, status)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_legacy_indexed_files_hash "
+            "ON legacy_indexed_files(content_hash)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_legacy_indexed_files_path "
+            "ON legacy_indexed_files(source_path)"
         )
 
     def _migrate_comfyui_instances(self, connection) -> None:

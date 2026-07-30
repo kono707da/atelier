@@ -173,6 +173,15 @@ from .export_runner import (
     execute_export_job,
     run_export_worker_once,
 )
+from .legacy_import import (
+    cancel_legacy_index,
+    create_legacy_index_job,
+    get_legacy_index_status,
+    index_legacy_library,
+    pause_legacy_index,
+    resume_legacy_index,
+    run_legacy_index_once,
+)
 from .maintenance_tasks import (
     clean_temp_files,
     clean_trash,
@@ -1485,6 +1494,13 @@ class ImportProjectPackageRequest(BaseModel):
 class ScanLegacyRequest(BaseModel):
     directory: str
     dry_run: bool = True
+
+
+class LegacyIndexRequest(BaseModel):
+    directory: str
+    link_mode: str = "hardlink"
+    force: bool = False
+    max_files: int = 200
 
 
 # ── MOD-11: 存储备份与维护请求模型 ──────────────────────────────────
@@ -7733,6 +7749,96 @@ def create_app(
             "database_environment": manager.active_environment,
             "dry_run": request.dry_run,
             "scan": result,
+        }
+
+    # ── MOD-12: 历史图片原地索引 API ──────────────────────────────────
+
+    @app.post("/api/import/legacy/index")
+    def create_legacy_index_job_api(request: LegacyIndexRequest) -> dict[str, object]:
+        """创建历史图片原地索引作业（后台增量，可暂停/恢复）。"""
+        try:
+            job = create_legacy_index_job(
+                manager,
+                request.directory,
+                link_mode=request.link_mode,
+                force=request.force,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return {
+            "database_environment": manager.active_environment,
+            "job": job,
+        }
+
+    @app.post("/api/import/legacy/index/run")
+    def run_legacy_index_worker_api(
+        max_files: int = 200,
+    ) -> dict[str, object]:
+        """执行一轮历史图片索引（领取一个 pending 作业并处理一批文件）。"""
+        result = run_legacy_index_once(manager, max_files=max_files)
+        return {
+            "database_environment": manager.active_environment,
+            "job": result,
+        }
+
+    @app.post("/api/import/legacy/index/{job_id}/execute")
+    def execute_legacy_index_job_api(
+        job_id: str,
+        request: LegacyIndexRequest | None = None,
+    ) -> dict[str, object]:
+        """直接执行指定作业的一轮索引（不经过领取队列）。"""
+        max_files = request.max_files if request else 200
+        try:
+            result = index_legacy_library(manager, job_id, max_files=max_files)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        return {
+            "database_environment": manager.active_environment,
+            "job": result,
+        }
+
+    @app.get("/api/import/legacy/index/{job_id}")
+    def get_legacy_index_status_api(job_id: str) -> dict[str, object]:
+        """查询历史图片索引作业状态。"""
+        result = get_legacy_index_status(manager, job_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail="作业不存在")
+        return {
+            "database_environment": manager.active_environment,
+            "job": result,
+        }
+
+    @app.post("/api/import/legacy/index/{job_id}/pause")
+    def pause_legacy_index_api(job_id: str) -> dict[str, object]:
+        """暂停历史图片索引作业。"""
+        result = pause_legacy_index(manager, job_id)
+        if result is None:
+            raise HTTPException(status_code=409, detail="作业不在 running 状态，无法暂停")
+        return {
+            "database_environment": manager.active_environment,
+            "job": result,
+        }
+
+    @app.post("/api/import/legacy/index/{job_id}/resume")
+    def resume_legacy_index_api(job_id: str) -> dict[str, object]:
+        """恢复暂停的历史图片索引作业。"""
+        result = resume_legacy_index(manager, job_id)
+        if result is None:
+            raise HTTPException(status_code=409, detail="作业不在 paused 状态，无法恢复")
+        return {
+            "database_environment": manager.active_environment,
+            "job": result,
+        }
+
+    @app.post("/api/import/legacy/index/{job_id}/cancel")
+    def cancel_legacy_index_api(job_id: str) -> dict[str, object]:
+        """取消历史图片索引作业。"""
+        result = cancel_legacy_index(manager, job_id)
+        if result is None:
+            raise HTTPException(status_code=409, detail="作业已处于终态，无法取消")
+        return {
+            "database_environment": manager.active_environment,
+            "job": result,
         }
 
     # Warm the production lookup cache before the first page request. Test
