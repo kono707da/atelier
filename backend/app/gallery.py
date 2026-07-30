@@ -352,6 +352,30 @@ def reindex_gallery(
             skipped += 1
         else:
             indexed += 1
+        # MOD-07: 发布图库索引进度事件（每 20 条或最后一条）
+        if indexed % 20 == 0 or (indexed + skipped) == total:
+            try:
+                from .event_bus import publish_event
+                publish_event("gallery.index_progress", {
+                    "file_id": file_id,
+                    "indexed": indexed,
+                    "skipped": skipped,
+                    "total": total,
+                    "force": force,
+                })
+            except Exception:  # noqa: BLE001
+                pass
+    # 索引完成事件
+    try:
+        from .event_bus import publish_event
+        publish_event("gallery.reindex_completed", {
+            "indexed": indexed,
+            "skipped": skipped,
+            "total": total,
+            "force": force,
+        })
+    except Exception:  # noqa: BLE001
+        pass
     return {"indexed": indexed, "skipped": skipped, "total": total}
 
 

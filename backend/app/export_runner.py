@@ -58,6 +58,15 @@ EXPORT_FORMAT_TO_MIME = {
 CONFLICT_STRATEGIES = ("overwrite", "skip", "suffix")
 
 
+def _publish_export_event(event_type: str, payload: dict[str, Any]) -> None:
+    """MOD-07: 发布导出事件到全局事件总线（失败不影响主流程）。"""
+    try:
+        from .event_bus import publish_event
+        publish_event(event_type, payload)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 # ──────────────────────────────────────────────────────────────────
 # 工具函数
 # ──────────────────────────────────────────────────────────────────
@@ -321,6 +330,12 @@ def execute_export_job(
         started_at=_now_iso(),
         environment=environment,
     )
+    _publish_export_event("export.job_started", {
+        "job_id": job_id,
+        "final_version_id": job.get("final_version_id"),
+        "preset_id": job.get("preset_id"),
+        "output_dir": str(output_dir),
+    })
 
     items = _load_items_with_file_info(manager, job["final_version_id"])
     total = len(items)
@@ -340,6 +355,9 @@ def execute_export_job(
             }, ensure_ascii=False),
             environment=environment,
         )
+        _publish_export_event("export.job_completed", {
+            "job_id": job_id, "exported": 0, "skipped": 0, "total": 0,
+        })
         return {"job_id": job_id, "status": "completed", "exported": 0, "skipped": 0}
 
     images_root = Path(manager.data_root) / "storage" / "images"
@@ -360,6 +378,13 @@ def execute_export_job(
                 completed_at=_now_iso(),
                 environment=environment,
             )
+            _publish_export_event("export.job_cancelled", {
+                "job_id": job_id,
+                "completed": completed,
+                "exported": len(exported_files),
+                "skipped": len(skipped_files),
+                "total": total,
+            })
             return {
                 "job_id": job_id,
                 "status": "cancelled",
@@ -447,6 +472,16 @@ def execute_export_job(
             completed_items=completed,
             environment=environment,
         )
+        # MOD-07: 发布单项导出进度事件
+        _publish_export_event("export.item_progress", {
+            "job_id": job_id,
+            "index": index,
+            "total": total,
+            "completed": completed,
+            "item_id": item["item_id"],
+            "output_filename": final_dest.name,
+            "copy_mode": copy_mode_used,
+        })
 
     # 生成 manifest
     manifest = {
@@ -508,6 +543,14 @@ def execute_export_job(
         result_json=result_json,
         environment=environment,
     )
+    _publish_export_event("export.job_completed", {
+        "job_id": job_id,
+        "exported": len(exported_files),
+        "skipped": len(skipped_files),
+        "total": total,
+        "manifest_path": str(manifest_path),
+        "csv_path": str(csv_path),
+    })
 
     return {
         "job_id": job_id,

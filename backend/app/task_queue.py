@@ -1137,6 +1137,18 @@ def _record_event(
         (event_id, task_id, event_type,
          json.dumps(event_data, ensure_ascii=False), now),
     )
+    # MOD-07: 同步发布到全局事件总线（供 /api/events SSE 推送）
+    # 注意：此函数在事务中调用，发布失败不应影响事务，因此捕获所有异常。
+    try:
+        from .event_bus import publish_event
+        publish_event(f"task.{event_type}", {
+            "task_id": task_id,
+            "event_type": event_type,
+            "event_data": event_data,
+            "recorded_at": now,
+        })
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _row_to_task(row: Any, *, include_item: bool = True) -> dict[str, Any]:

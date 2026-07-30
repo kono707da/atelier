@@ -181,6 +181,14 @@ from .maintenance_tasks import (
     restore_database,
     run_full_maintenance,
 )
+from .event_bus import (
+    DEFAULT_SSE_TIMEOUT_SECONDS,
+    EventBus,
+    get_global_bus,
+    publish_event,
+    set_global_bus,
+    sse_events_generator,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -1631,11 +1639,17 @@ def create_app(
         reconnect_interval=5.0,
     )
 
+    # MOD-07 全局事件总线
+    event_bus = EventBus()
+    set_global_bus(event_bus)
+
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         """应用生命周期：启动/停止 WebSocket 监听器。"""
         # 保存主事件循环引用，供同步路由中安全调度协程使用。
         app.state.main_event_loop = asyncio.get_running_loop()
+        # 绑定事件总线到主事件循环（供同步 worker 跨线程发布）
+        event_bus.bind_loop(app.state.main_event_loop)
         if environment != "test":
             await ws_listener.start()
             logger.info("ComfyUI WebSocket 监听器已启动")
@@ -1656,6 +1670,7 @@ def create_app(
     app.state.comfyui_client = comfyui_client
     app.state.progress_tracker = progress_tracker
     app.state.ws_listener = ws_listener
+    app.state.event_bus = event_bus
 
     def _refresh_comfyui_client() -> ComfyUIClient:
         """根据数据库最新设置重建 ComfyUI 客户端。"""
@@ -6853,6 +6868,68 @@ def create_app(
                 "X-Accel-Buffering": "no",
             },
         )
+
+    # ── MOD-07 全局 /api/events SSE ──────────────────────────────────
+
+    @app.get("/api/events")
+    async def global_events_sse(
+        request: Request,
+        types: str | None = None,
+        timeout: float | None = None,
+        max_events: int | None = None,
+    ):
+        """全局 SSE 事件流。
+
+        支持的查询参数：
+        - types: 逗号分隔的事件类型前缀，如 `task,thumbnail,export,gallery`。
+          为空时订阅所有事件。
+        - timeout: 单次连接最大时长（秒），默认 300。测试时必须设置终止条件。
+        - max_events: 收到这么多事件后主动断开（测试用）。
+
+        重连：
+        - 客户端断开后携带 `Last-Event-ID` 请求头重连。
+        - 服务端从环形缓冲回放错过的事件；若超出缓冲区则发送
+          `bus.reconnect` 事件提示客户端拉取历史。
+        """
+        last_event_id_raw = request.headers.get("Last-Event-ID")
+        last_event_id: int | None = None
+        if last_event_id_raw:
+            try:
+                last_event_id = int(last_event_id_raw)
+            except ValueError:
+                last_event_id = None
+
+        types_list = None
+        if types:
+            types_list = [t.strip() for t in types.split(",") if t.strip()]
+
+        timeout_seconds = (
+            float(timeout) if timeout is not None else DEFAULT_SSE_TIMEOUT_SECONDS
+        )
+
+        return StreamingResponse(
+            sse_events_generator(
+                event_bus,
+                last_event_id=last_event_id,
+                types=types_list,
+                timeout_seconds=timeout_seconds,
+                max_events=max_events,
+            ),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    @app.get("/api/events/stats")
+    def events_stats_api() -> dict[str, object]:
+        """返回事件总线状态统计。"""
+        return {
+            "database_environment": manager.active_environment,
+            "bus": event_bus.stats(),
+        }
 
     @app.post("/api/attempts/{attempt_id}/progress/poll")
     def poll_attempt_progress(attempt_id: str) -> dict[str, object]:

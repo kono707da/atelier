@@ -149,6 +149,24 @@ class ProgressTracker:
             except asyncio.QueueFull:
                 pass
 
+        # MOD-07: 转发到全局事件总线（供 /api/events SSE 推送）
+        try:
+            from .event_bus import publish_event
+            status = data.get("status", "running")
+            event_type = f"attempt.{status}" if status in (
+                "completed", "error", "interrupted"
+            ) else "attempt.progress"
+            publish_event(event_type, {
+                "prompt_id": prompt_id,
+                "status": status,
+                "current_node": data.get("current_node"),
+                "progress_value": data.get("progress_value"),
+                "progress_max": data.get("progress_max"),
+                "updated_at": data.get("updated_at"),
+            })
+        except Exception:  # noqa: BLE001
+            pass
+
 
 # ──────────────────────────────────────────────────────────────────
 # WebSocket 监听器

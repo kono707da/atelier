@@ -42,6 +42,15 @@ SIZE_CLASS_TO_PX: dict[str, int] = {
 }
 
 
+def _publish_thumbnail_event(event_type: str, payload: dict[str, Any]) -> None:
+    """MOD-07: 发布缩略图事件到全局事件总线（失败不影响主流程）。"""
+    try:
+        from .event_bus import publish_event
+        publish_event(event_type, payload)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 # ──────────────────────────────────────────────────────────────────
 # 缩略图文件路径
 # ──────────────────────────────────────────────────────────────────
@@ -329,6 +338,10 @@ def process_thumbnail_job(
         with manager.connection(environment) as conn:
             _fail_job(conn, job_id, reason="invalid_payload_missing_file_id_or_size_class", permanent=True)
             conn.commit()
+        _publish_thumbnail_event("thumbnail.failed", {
+            "job_id": job_id, "file_id": file_id, "size_class": size_class,
+            "reason": "invalid_payload",
+        })
         return {"job_id": job_id, "status": "failed", "reason": "invalid_payload"}
 
     try:
@@ -348,12 +361,20 @@ def process_thumbnail_job(
             )
             _fail_job(conn, job_id, reason=str(error), permanent=True)
             conn.commit()
+        _publish_thumbnail_event("thumbnail.failed", {
+            "job_id": job_id, "file_id": file_id, "size_class": size_class,
+            "reason": str(error), "permanent": True,
+        })
         return {"job_id": job_id, "status": "failed", "reason": str(error)}
     except Exception as error:  # noqa: BLE001 - 任何处理失败都回退 pending 重试
         logger.warning("缩略图生成失败 job=%s file=%s size=%s: %s", job_id, file_id, size_class, error)
         with manager.connection(environment) as conn:
             _fail_job(conn, job_id, reason=str(error), permanent=False)
             conn.commit()
+        _publish_thumbnail_event("thumbnail.failed", {
+            "job_id": job_id, "file_id": file_id, "size_class": size_class,
+            "reason": str(error), "permanent": False,
+        })
         return {"job_id": job_id, "status": "retry", "reason": str(error)}
 
     # 成功：写入 thumbnails 表 + 完成 job
@@ -382,6 +403,12 @@ def process_thumbnail_job(
         )
         conn.commit()
 
+    _publish_thumbnail_event("thumbnail.completed", {
+        "job_id": job_id, "file_id": file_id, "size_class": size_class,
+        "storage_key": result["storage_key"],
+        "width": result["width"], "height": result["height"],
+        "size_bytes": result["size_bytes"],
+    })
     return {"job_id": job_id, "status": "completed", "result": result}
 
 
@@ -415,6 +442,14 @@ def run_thumbnail_worker_once(
             failed += 1
         elif status == "retry":
             retried += 1
+        # MOD-07: 发布批次进度事件
+        _publish_thumbnail_event("thumbnail.batch_progress", {
+            "processed": processed,
+            "completed": completed,
+            "failed": failed,
+            "retried": retried,
+            "max_jobs": max_jobs,
+        })
 
     return {
         "processed": processed,
