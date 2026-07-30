@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -11595,5 +11596,208 @@ class DatabaseManager:
                 (workflow_id, slot_name),
             )
             return cursor.rowcount > 0
+
+    # ── MOD-11: 存储备份与维护 ─────────────────────────────────────────
+
+    def backup_database(
+        self,
+        target_path: str,
+        *,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        """使用 sqlite3 在线备份 API 将当前数据库复制到目标路径。
+
+        不直接复制正在写入的 db 文件，而是通过 ``Connection.backup`` 在源连接
+        活跃状态下安全生成一份快照，保证 WAL 中的待写数据也一并落盘。
+        """
+        target = environment or self._active_environment
+        descriptor = self.descriptor(target)
+        target_file = Path(target_path).resolve()
+        target_file.parent.mkdir(parents=True, exist_ok=True)
+        # 若目标已存在则先移除，保证备份内容是全新快照。
+        if target_file.exists():
+            target_file.unlink()
+        with self._lock, self.connection(target) as source:
+            destination = sqlite3.connect(str(target_file))
+            try:
+                source.backup(destination)
+            finally:
+                destination.close()
+        return {
+            "environment": target,
+            "source_path": str(descriptor.path),
+            "target_path": str(target_file),
+            "size_bytes": target_file.stat().st_size if target_file.exists() else 0,
+        }
+
+    def optimize_database(
+        self,
+        *,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        """执行 ``PRAGMA optimize`` 和 ``PRAGMA wal_checkpoint(TRUNCATE)``。
+
+        optimize 让查询计划器根据累积统计信息持久化更好的索引建议；
+        wal_checkpoint(TRUNCATE) 将 WAL 日志合并回主库并截断 WAL 文件，
+        释放磁盘空间并保证备份/复制主库文件时无需额外 WAL。
+        """
+        target = environment or self._active_environment
+        with self._lock, self.connection(target) as connection:
+            optimize_rows = connection.execute("PRAGMA optimize").fetchall()
+            checkpoint_row = connection.execute(
+                "PRAGMA wal_checkpoint(TRUNCATE)"
+            ).fetchone()
+        return {
+            "environment": target,
+            "optimize": [dict(row) for row in optimize_rows],
+            "wal_checkpoint": {
+                "busy": int(checkpoint_row[0]) if checkpoint_row else None,
+                "log": int(checkpoint_row[1]) if checkpoint_row else None,
+                "checkpointed": int(checkpoint_row[2]) if checkpoint_row else None,
+            },
+        }
+
+    def integrity_check(
+        self,
+        *,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        """执行 ``PRAGMA integrity_check``，返回完整性检查结果。"""
+        target = environment or self._active_environment
+        with self._lock, self.connection(target) as connection:
+            rows = connection.execute("PRAGMA integrity_check").fetchall()
+        results = [row[0] for row in rows]
+        return {
+            "environment": target,
+            "ok": len(results) == 1 and str(results[0]).lower() == "ok",
+            "results": results,
+        }
+
+    def get_system_info(
+        self,
+        *,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        """返回数据库路径、大小、迁移版本清单、表数量等系统信息。"""
+        target = environment or self._active_environment
+        descriptor = self.descriptor(target)
+        with self.connection(target) as connection:
+            table_count = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM sqlite_master "
+                    "WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+                ).fetchone()[0]
+            )
+            migrations = connection.execute(
+                "SELECT version, description, applied_at "
+                "FROM schema_migrations ORDER BY applied_at ASC"
+            ).fetchall()
+            journal_mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+            page_count = int(connection.execute("PRAGMA page_count").fetchone()[0])
+            page_size = int(connection.execute("PRAGMA page_size").fetchone()[0])
+        return {
+            "environment": target,
+            "active": target == self._active_environment,
+            "locked": target == self._locked_environment,
+            "data_root": str(self.data_root),
+            "database_path": str(descriptor.path),
+            "database_exists": descriptor.path.exists(),
+            "database_size_bytes": (
+                descriptor.path.stat().st_size if descriptor.path.exists() else 0
+            ),
+            "purpose": descriptor.purpose,
+            "journal_mode": str(journal_mode).upper(),
+            "page_count": page_count,
+            "page_size": page_size,
+            "table_count": table_count,
+            "migration_count": len(migrations),
+            "migrations": [dict(row) for row in migrations],
+        }
+
+    def check_orphaned_files(
+        self,
+        *,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        """检查 files 表中的 storage_key 对应的文件是否实际存在。
+
+        同时报告存储目录中未被数据库引用的孤立文件。
+        """
+        target = environment or self._active_environment
+        storage_root = self.data_root / "storage" / "images"
+        with self.connection(target) as connection:
+            rows = connection.execute(
+                "SELECT id, storage_key, original_name, state FROM files"
+            ).fetchall()
+        existing: list[dict[str, object]] = []
+        orphaned: list[dict[str, object]] = []
+        referenced_keys = set()
+        for row in rows:
+            storage_key = str(row["storage_key"])
+            referenced_keys.add(storage_key)
+            expected_path = storage_root / storage_key
+            record = {
+                "id": row["id"],
+                "storage_key": storage_key,
+                "original_name": row["original_name"],
+                "state": row["state"],
+                "expected_path": str(expected_path),
+                "exists": expected_path.exists(),
+            }
+            if expected_path.exists():
+                existing.append(record)
+            else:
+                orphaned.append(record)
+        unreferenced: list[dict[str, object]] = []
+        if storage_root.exists():
+            for entry in sorted(storage_root.iterdir()):
+                if entry.is_file() and entry.name not in referenced_keys:
+                    unreferenced.append(
+                        {
+                            "name": entry.name,
+                            "path": str(entry),
+                            "size_bytes": entry.stat().st_size,
+                        }
+                    )
+        return {
+            "environment": target,
+            "storage_root": str(storage_root),
+            "total_files_in_db": len(rows),
+            "existing_files": len(existing),
+            "orphaned_db_records": orphaned,
+            "unreferenced_storage_files": unreferenced,
+        }
+
+    def clear_cache(
+        self,
+        *,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        """清理临时文件和缓存目录。
+
+        清空 ``data_root/cache`` 和 ``data_root/tmp`` 两个目录的内容，
+        但保留目录本身以便后续写入无需重建。
+        """
+        target = environment or self._active_environment
+        cache_root = self.data_root / "cache"
+        temp_root = self.data_root / "tmp"
+        removed: dict[str, int] = {}
+        for label, root in (("cache", cache_root), ("tmp", temp_root)):
+            count = 0
+            if root.exists():
+                for entry in root.iterdir():
+                    if entry.is_dir() and not entry.is_symlink():
+                        shutil.rmtree(entry, ignore_errors=True)
+                        count += 1
+                    else:
+                        entry.unlink(missing_ok=True)
+                        count += 1
+            removed[label] = count
+        return {
+            "environment": target,
+            "cleared": removed,
+            "cache_root": str(cache_root),
+            "temp_root": str(temp_root),
+        }
 
 
