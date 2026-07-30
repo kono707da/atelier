@@ -626,6 +626,10 @@ class DatabaseManager:
                 connection, "v0.8.1", "Fix stale FK references to materials_old_v052 after materials table rebuild",
                 self._migrate_fix_materials_fk_references,
             )
+            self._run_migration(
+                connection, "v0.9.0", "Add final_versions/final_version_items/export_presets/export_jobs tables for MOD-09",
+                self._migrate_final_versions,
+            )
             marker = connection.execute(
                 "SELECT value FROM atelier_meta WHERE key = 'environment'"
             ).fetchone()
@@ -2242,6 +2246,94 @@ class DatabaseManager:
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_background_jobs_type "
             "ON background_jobs(job_type, status)"
+        )
+
+    def _migrate_final_versions(self, connection) -> None:
+        """MOD-09: 最终版本与导出表。"""
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS final_versions (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                is_archived INTEGER NOT NULL DEFAULT 0,
+                sort_order INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (project_id)
+                    REFERENCES projects(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_final_versions_project "
+            "ON final_versions(project_id, sort_order ASC)"
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS final_version_items (
+                id TEXT PRIMARY KEY,
+                final_version_id TEXT NOT NULL,
+                image_instance_id TEXT NOT NULL,
+                sort_order INTEGER NOT NULL,
+                source_shot_page_id TEXT,
+                source_branch_id TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (final_version_id)
+                    REFERENCES final_versions(id) ON DELETE CASCADE,
+                FOREIGN KEY (image_instance_id)
+                    REFERENCES image_instances(id) ON DELETE CASCADE,
+                UNIQUE (final_version_id, image_instance_id)
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_final_version_items_version "
+            "ON final_version_items(final_version_id, sort_order ASC)"
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS export_presets (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                format TEXT NOT NULL DEFAULT 'original',
+                copy_mode TEXT NOT NULL DEFAULT 'copy',
+                strip_metadata INTEGER NOT NULL DEFAULT 0,
+                output_pattern TEXT NOT NULL DEFAULT '{index:04d}_{name}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                CHECK (format IN ('png', 'jpeg', 'original')),
+                CHECK (copy_mode IN ('copy', 'hardlink', 'fallback'))
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS export_jobs (
+                id TEXT PRIMARY KEY,
+                final_version_id TEXT NOT NULL,
+                preset_id TEXT,
+                output_dir TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                total_items INTEGER NOT NULL DEFAULT 0,
+                completed_items INTEGER NOT NULL DEFAULT 0,
+                result_json TEXT,
+                error_message TEXT,
+                started_at TEXT,
+                completed_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (final_version_id)
+                    REFERENCES final_versions(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_export_jobs_status "
+            "ON export_jobs(status, created_at DESC)"
         )
 
     def _migrate_comfyui_instances(self, connection) -> None:
@@ -9868,6 +9960,372 @@ class DatabaseManager:
             "custom_node_count": custom_count,
             "synced_at": now,
         }
+
+    # ── MOD-09: Final Versions ────────────────────────────────────────
+
+    def list_final_versions(
+        self,
+        project_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> list[dict[str, object]]:
+        with self.connection(environment or self._active_environment) as conn:
+            rows = conn.execute(
+                "SELECT * FROM final_versions WHERE project_id = ? "
+                "ORDER BY sort_order ASC",
+                (project_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_final_version(
+        self,
+        final_version_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        with self.connection(environment or self._active_environment) as conn:
+            row = conn.execute(
+                "SELECT * FROM final_versions WHERE id = ?",
+                (final_version_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def create_final_version(
+        self,
+        project_id: str,
+        name: str,
+        description: str = "",
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        name = name.strip()
+        if not name:
+            raise ValueError("最终版本名称不能为空。")
+        if len(name) > 100:
+            raise ValueError("最终版本名称不能超过 100 字。")
+        now = datetime.now(timezone.utc).isoformat()
+        fv_id = str(uuid4())
+        env = environment or self._active_environment
+        with self._lock, self.connection(env) as conn:
+            max_order = conn.execute(
+                "SELECT COALESCE(MAX(sort_order), 0) FROM final_versions WHERE project_id = ?",
+                (project_id,),
+            ).fetchone()[0]
+            conn.execute(
+                "INSERT INTO final_versions (id, project_id, name, description, "
+                "is_archived, sort_order, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, 0, ?, ?, ?)",
+                (fv_id, project_id, name, description, max_order + 1, now, now),
+            )
+        result = self.get_final_version(fv_id, env)
+        return result  # type: ignore[return-value]
+
+    def update_final_version(
+        self,
+        final_version_id: str,
+        *,
+        name: str | None = None,
+        description: str | None = None,
+        is_archived: bool | None = None,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        now = datetime.now(timezone.utc).isoformat()
+        env = environment or self._active_environment
+        sets: list[str] = []
+        params: list[object] = []
+        if name is not None:
+            name = name.strip()
+            if not name:
+                raise ValueError("最终版本名称不能为空。")
+            sets.append("name = ?")
+            params.append(name)
+        if description is not None:
+            sets.append("description = ?")
+            params.append(description)
+        if is_archived is not None:
+            sets.append("is_archived = ?")
+            params.append(1 if is_archived else 0)
+        with self._lock, self.connection(env) as conn:
+            if sets:
+                sets.append("updated_at = ?")
+                params.extend([now, final_version_id])
+                conn.execute(
+                    f"UPDATE final_versions SET {', '.join(sets)} WHERE id = ?",
+                    params,
+                )
+        result = self.get_final_version(final_version_id, env)
+        if result is None:
+            raise ValueError("最终版本不存在。")
+        return result
+
+    def delete_final_version(
+        self,
+        final_version_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> bool:
+        env = environment or self._active_environment
+        with self._lock, self.connection(env) as conn:
+            cursor = conn.execute(
+                "DELETE FROM final_versions WHERE id = ?",
+                (final_version_id,),
+            )
+            return cursor.rowcount > 0
+
+    def list_final_version_items(
+        self,
+        final_version_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> list[dict[str, object]]:
+        env = environment or self._active_environment
+        with self.connection(env) as conn:
+            rows = conn.execute(
+                "SELECT fvi.*, ii.project_id, ii.shot_page_id, ii.file_id "
+                "FROM final_version_items fvi "
+                "JOIN image_instances ii ON ii.id = fvi.image_instance_id "
+                "WHERE fvi.final_version_id = ? "
+                "ORDER BY fvi.sort_order ASC",
+                (final_version_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def add_final_version_item(
+        self,
+        final_version_id: str,
+        image_instance_id: str,
+        sort_order: int | None = None,
+        source_shot_page_id: str | None = None,
+        source_branch_id: str | None = None,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        now = datetime.now(timezone.utc).isoformat()
+        item_id = str(uuid4())
+        env = environment or self._active_environment
+        with self._lock, self.connection(env) as conn:
+            if sort_order is None:
+                sort_order = conn.execute(
+                    "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM final_version_items "
+                    "WHERE final_version_id = ?",
+                    (final_version_id,),
+                ).fetchone()[0]
+            conn.execute(
+                "INSERT INTO final_version_items (id, final_version_id, image_instance_id, "
+                "sort_order, source_shot_page_id, source_branch_id, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (item_id, final_version_id, image_instance_id, sort_order,
+                 source_shot_page_id, source_branch_id, now, now),
+            )
+        return {"id": item_id, "final_version_id": final_version_id,
+                "image_instance_id": image_instance_id, "sort_order": sort_order}
+
+    def reorder_final_version_items(
+        self,
+        final_version_id: str,
+        item_ids: list[str],
+        environment: DatabaseEnvironment | None = None,
+    ) -> list[dict[str, object]]:
+        now = datetime.now(timezone.utc).isoformat()
+        env = environment or self._active_environment
+        with self._lock, self.connection(env) as conn:
+            for idx, item_id in enumerate(item_ids, start=1):
+                conn.execute(
+                    "UPDATE final_version_items SET sort_order = ?, updated_at = ? "
+                    "WHERE id = ? AND final_version_id = ?",
+                    (idx, now, item_id, final_version_id),
+                )
+        return self.list_final_version_items(final_version_id, env)
+
+    def remove_final_version_item(
+        self,
+        item_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> bool:
+        env = environment or self._active_environment
+        with self._lock, self.connection(env) as conn:
+            cursor = conn.execute(
+                "DELETE FROM final_version_items WHERE id = ?",
+                (item_id,),
+            )
+            return cursor.rowcount > 0
+
+    def generate_default_sequence(
+        self,
+        final_version_id: str,
+        project_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> list[dict[str, object]]:
+        """按场景页和页内采用顺序生成默认成片序列。"""
+        now = datetime.now(timezone.utc).isoformat()
+        env = environment or self._active_environment
+        with self._lock, self.connection(env) as conn:
+            # 清除现有条目
+            conn.execute(
+                "DELETE FROM final_version_items WHERE final_version_id = ?",
+                (final_version_id,),
+            )
+            # 按场景页顺序和采用排序获取已采用的图片实例
+            rows = conn.execute(
+                """
+                SELECT ii.id, ii.shot_page_id, ii.sort_order
+                FROM image_instances ii
+                JOIN shot_pages sp ON sp.id = ii.shot_page_id
+                JOIN small_scenes ss ON ss.id = sp.small_scene_id
+                WHERE ii.project_id = ? AND ii.is_adopted = 1
+                ORDER BY ss.sort_order ASC, sp.sort_order ASC, ii.sort_order ASC
+                """,
+                (project_id,),
+            ).fetchall()
+            items = []
+            for idx, row in enumerate(rows, start=1):
+                item_id = str(uuid4())
+                conn.execute(
+                    "INSERT INTO final_version_items (id, final_version_id, image_instance_id, "
+                    "sort_order, source_shot_page_id, source_branch_id, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, NULL, ?, ?)",
+                    (item_id, final_version_id, row["id"], idx,
+                     row["shot_page_id"], now, now),
+                )
+                items.append({
+                    "id": item_id,
+                    "final_version_id": final_version_id,
+                    "image_instance_id": row["id"],
+                    "sort_order": idx,
+                    "source_shot_page_id": row["shot_page_id"],
+                })
+        return items
+
+    # ── MOD-09: Export Presets & Jobs ─────────────────────────────────
+
+    def list_export_presets(
+        self,
+        environment: DatabaseEnvironment | None = None,
+    ) -> list[dict[str, object]]:
+        with self.connection(environment or self._active_environment) as conn:
+            rows = conn.execute(
+                "SELECT * FROM export_presets ORDER BY created_at DESC"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def create_export_preset(
+        self,
+        name: str,
+        description: str = "",
+        format: str = "original",
+        copy_mode: str = "copy",
+        strip_metadata: bool = False,
+        output_pattern: str = "{index:04d}_{name}",
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        now = datetime.now(timezone.utc).isoformat()
+        preset_id = str(uuid4())
+        env = environment or self._active_environment
+        with self._lock, self.connection(env) as conn:
+            conn.execute(
+                "INSERT INTO export_presets (id, name, description, format, copy_mode, "
+                "strip_metadata, output_pattern, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (preset_id, name.strip(), description, format, copy_mode,
+                 1 if strip_metadata else 0, output_pattern, now, now),
+            )
+        with self.connection(env) as conn:
+            row = conn.execute(
+                "SELECT * FROM export_presets WHERE id = ?", (preset_id,)
+            ).fetchone()
+        return dict(row) if row else {}
+
+    def delete_export_preset(
+        self,
+        preset_id: str,
+        environment: DatabaseEnvironment | None = None,
+    ) -> bool:
+        env = environment or self._active_environment
+        with self._lock, self.connection(env) as conn:
+            cursor = conn.execute(
+                "DELETE FROM export_presets WHERE id = ?", (preset_id,)
+            )
+            return cursor.rowcount > 0
+
+    def list_export_jobs(
+        self,
+        final_version_id: str | None = None,
+        status: str | None = None,
+        environment: DatabaseEnvironment | None = None,
+    ) -> list[dict[str, object]]:
+        env = environment or self._active_environment
+        with self.connection(env) as conn:
+            query = "SELECT * FROM export_jobs WHERE 1=1"
+            params: list[object] = []
+            if final_version_id:
+                query += " AND final_version_id = ?"
+                params.append(final_version_id)
+            if status:
+                query += " AND status = ?"
+                params.append(status)
+            query += " ORDER BY created_at DESC"
+            rows = conn.execute(query, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def create_export_job(
+        self,
+        final_version_id: str,
+        output_dir: str,
+        preset_id: str | None = None,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object]:
+        now = datetime.now(timezone.utc).isoformat()
+        job_id = str(uuid4())
+        env = environment or self._active_environment
+        with self._lock, self.connection(env) as conn:
+            # 统计条目数
+            total = conn.execute(
+                "SELECT COUNT(*) FROM final_version_items WHERE final_version_id = ?",
+                (final_version_id,),
+            ).fetchone()[0]
+            conn.execute(
+                "INSERT INTO export_jobs (id, final_version_id, preset_id, output_dir, "
+                "status, total_items, completed_items, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, 'pending', ?, 0, ?, ?)",
+                (job_id, final_version_id, preset_id, output_dir, total, now, now),
+            )
+        with self.connection(env) as conn:
+            row = conn.execute(
+                "SELECT * FROM export_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+        return dict(row) if row else {}
+
+    def update_export_job(
+        self,
+        job_id: str,
+        *,
+        status: str | None = None,
+        completed_items: int | None = None,
+        result_json: str | None = None,
+        error_message: str | None = None,
+        started_at: str | None = None,
+        completed_at: str | None = None,
+        environment: DatabaseEnvironment | None = None,
+    ) -> dict[str, object] | None:
+        now = datetime.now(timezone.utc).isoformat()
+        env = environment or self._active_environment
+        sets: list[str] = []
+        params: list[object] = []
+        for field, value in [
+            ("status", status), ("completed_items", completed_items),
+            ("result_json", result_json), ("error_message", error_message),
+            ("started_at", started_at), ("completed_at", completed_at),
+        ]:
+            if value is not None:
+                sets.append(f"{field} = ?")
+                params.append(value)
+        if sets:
+            sets.append("updated_at = ?")
+            params.extend([now, job_id])
+            with self._lock, self.connection(env) as conn:
+                conn.execute(
+                    f"UPDATE export_jobs SET {', '.join(sets)} WHERE id = ?",
+                    params,
+                )
+        with self.connection(env) as conn:
+            row = conn.execute(
+                "SELECT * FROM export_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+        return dict(row) if row else None
 
     def list_node_definitions(
         self,
