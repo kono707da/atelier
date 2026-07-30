@@ -630,6 +630,10 @@ class DatabaseManager:
                 connection, "v0.9.0", "Add final_versions/final_version_items/export_presets/export_jobs tables for MOD-09",
                 self._migrate_final_versions,
             )
+            self._run_migration(
+                connection, "v0.9.1", "Add gallery_index table, gallery_fts FTS5 virtual table and phash indexes for MOD-10 global gallery",
+                self._migrate_gallery,
+            )
             marker = connection.execute(
                 "SELECT value FROM atelier_meta WHERE key = 'environment'"
             ).fetchone()
@@ -2523,6 +2527,90 @@ class DatabaseManager:
             # 5. 重建索引
             for idx_sql in index_sqls:
                 connection.execute(idx_sql)
+
+    def _migrate_gallery(self, connection) -> None:
+        """v0.9.0: 全局图库索引表与 FTS5 全文检索（MOD-10）。
+
+        - ``gallery_index``: 文件级元数据索引，用于游标分页和筛选排序。
+          每个 file_id 一行，冗余保存来源项目/页面/任务、尺寸、格式、
+          种子和提取后的提示词文本，避免列表查询 JOIN 多张大表。
+        - ``gallery_fts``: FTS5 虚拟表，外部内容指向 gallery_index 的
+          prompt_text，提供提示词全文检索。
+        - 新增 ``idx_files_perceptual_hash`` 索引，加速近似图片搜索。
+
+        幂等：CREATE TABLE IF NOT EXISTS + CREATE VIRTUAL TABLE IF NOT EXISTS +
+        CREATE INDEX IF NOT EXISTS。
+        """
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS gallery_index (
+                file_id TEXT PRIMARY KEY,
+                project_id TEXT,
+                shot_page_id TEXT,
+                task_id TEXT,
+                attempt_id TEXT,
+                prompt_text TEXT NOT NULL DEFAULT '',
+                width INTEGER NOT NULL DEFAULT 0,
+                height INTEGER NOT NULL DEFAULT 0,
+                format TEXT NOT NULL DEFAULT '',
+                seed INTEGER,
+                mime_type TEXT NOT NULL DEFAULT '',
+                size_bytes INTEGER NOT NULL DEFAULT 0,
+                content_hash TEXT,
+                perceptual_hash TEXT,
+                state TEXT NOT NULL DEFAULT 'active',
+                source_created_at TEXT NOT NULL DEFAULT '',
+                indexed_at TEXT NOT NULL,
+                FOREIGN KEY (file_id)
+                    REFERENCES files(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_gallery_index_created "
+            "ON gallery_index(source_created_at DESC, file_id)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_gallery_index_project "
+            "ON gallery_index(project_id) WHERE project_id IS NOT NULL"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_gallery_index_mime "
+            "ON gallery_index(mime_type, source_created_at DESC)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_gallery_index_phash "
+            "ON gallery_index(perceptual_hash) WHERE perceptual_hash IS NOT NULL"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_gallery_index_content_hash "
+            "ON gallery_index(content_hash) WHERE content_hash IS NOT NULL"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_gallery_index_state "
+            "ON gallery_index(state, source_created_at DESC)"
+        )
+
+        # FTS5 虚拟表：外部内容表模式，避免数据重复存储。
+        # content_rowid 指向 gallery_index 的 rowid（隐式主键），
+        # 但 gallery_index 主键是 TEXT，因此使用外部内容 + 手动同步。
+        # 为简化同步逻辑，这里使用“自身内容”模式（不带 external_content），
+        # 由 gallery 服务层负责 INSERT/UPDATE/DELETE 三元组。
+        connection.execute(
+            """
+            CREATE VIRTUAL TABLE IF NOT EXISTS gallery_fts USING fts5(
+                file_id UNINDEXED,
+                prompt_text,
+                tokenize = 'unicode61'
+            )
+            """
+        )
+
+        # files 表上的感知哈希索引（近似图片搜索使用）
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_files_perceptual_hash "
+            "ON files(perceptual_hash) WHERE perceptual_hash IS NOT NULL"
+        )
 
     def activate(self, environment: DatabaseEnvironment) -> None:
         target_environment = self._validate_environment(environment)
