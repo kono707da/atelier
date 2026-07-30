@@ -143,6 +143,16 @@ from .output_receiver import (
     list_image_instances,
     parse_comfyui_outputs,
 )
+from .gallery import (
+    find_duplicate_images,
+    find_similar_images,
+    get_gallery_image_detail,
+    index_file_for_gallery,
+    list_gallery_images,
+    reindex_gallery,
+    search_gallery_by_prompt,
+    update_file_perceptual_hash,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -6917,6 +6927,136 @@ def create_app(
     # application factories must not start a shared background import thread.
     if environment != "test":
         character_database.status()
+
+    # ── MOD-10 全局图库 API ─────────────────────────────────────────
+
+    @app.get("/api/gallery")
+    def list_gallery_api(
+        cursor: str | None = None,
+        limit: int = 50,
+        project_id: str | None = None,
+        mime_type: str | None = None,
+        has_phash: bool | None = None,
+        state: str | None = None,
+        sort: str = "created_desc",
+    ) -> dict[str, object]:
+        """全局图库列表：游标分页 + 多条件筛选 + 多字段排序。"""
+        result = list_gallery_images(
+            manager,
+            cursor=cursor,
+            limit=limit,
+            project_id=project_id,
+            mime_type=mime_type,
+            has_phash=has_phash,
+            state=state,
+            sort=sort,
+        )
+        return {
+            "database_environment": manager.active_environment,
+            "items": result["items"],
+            "next_cursor": result["next_cursor"],
+            "limit": result["limit"],
+            "count": len(result["items"]),
+        }
+
+    @app.get("/api/gallery/search")
+    def search_gallery_api(
+        q: str,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, object]:
+        """FTS5 提示词全文检索。"""
+        result = search_gallery_by_prompt(
+            manager, q, cursor=cursor, limit=limit
+        )
+        return {
+            "database_environment": manager.active_environment,
+            "items": result["items"],
+            "next_cursor": result["next_cursor"],
+            "limit": result["limit"],
+            "query": result["query"],
+            "count": len(result["items"]),
+        }
+
+    @app.get("/api/gallery/{file_id}")
+    def get_gallery_detail_api(file_id: str) -> dict[str, object]:
+        """图库详情：文件元数据 + 索引行 + 关联图片实例 + 缩略图。"""
+        detail = get_gallery_image_detail(manager, file_id)
+        if not detail:
+            raise HTTPException(status_code=404, detail="文件不存在")
+        return {
+            "database_environment": manager.active_environment,
+            "detail": detail,
+        }
+
+    @app.get("/api/gallery/{file_id}/duplicates")
+    def find_duplicates_api(file_id: str, limit: int = 50) -> dict[str, object]:
+        """按内容哈希查找相同图片（精确去重）。"""
+        detail = get_gallery_image_detail(manager, file_id)
+        if not detail:
+            raise HTTPException(status_code=404, detail="文件不存在")
+        content_hash = detail["file"].get("content_hash") or ""
+        items = find_duplicate_images(
+            manager, content_hash, exclude_file_id=file_id, limit=limit
+        )
+        return {
+            "database_environment": manager.active_environment,
+            "content_hash": content_hash,
+            "items": items,
+            "count": len(items),
+        }
+
+    @app.get("/api/gallery/{file_id}/similar")
+    def find_similar_api(
+        file_id: str,
+        max_hamming_distance: int = 8,
+        limit: int = 50,
+    ) -> dict[str, object]:
+        """按感知哈希汉明距离查找近似图片。"""
+        items = find_similar_images(
+            manager,
+            file_id,
+            max_hamming_distance=max_hamming_distance,
+            limit=limit,
+        )
+        return {
+            "database_environment": manager.active_environment,
+            "items": items,
+            "count": len(items),
+        }
+
+    @app.post("/api/files/{file_id}/phash")
+    def compute_phash_api(file_id: str) -> dict[str, object]:
+        """计算并存储文件感知哈希。"""
+        try:
+            phash = update_file_perceptual_hash(manager, file_id)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        return {
+            "database_environment": manager.active_environment,
+            "file_id": file_id,
+            "perceptual_hash": phash,
+        }
+
+    @app.post("/api/gallery/index/{file_id}")
+    def index_file_api(file_id: str) -> dict[str, object]:
+        """为单个文件构建/刷新图库索引行。"""
+        result = index_file_for_gallery(manager, file_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail="文件不存在")
+        return {
+            "database_environment": manager.active_environment,
+            "gallery_index": result,
+        }
+
+    @app.post("/api/gallery/reindex")
+    def reindex_gallery_api(force: bool = False) -> dict[str, object]:
+        """增量重建图库索引（force=true 全量重建）。"""
+        stats = reindex_gallery(manager, force=force)
+        return {
+            "database_environment": manager.active_environment,
+            "stats": stats,
+        }
 
     if not FRONTEND_ROOT.exists():
         raise RuntimeError(f"Frontend directory does not exist: {FRONTEND_ROOT}")
