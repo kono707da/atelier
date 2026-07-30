@@ -173,6 +173,14 @@ from .export_runner import (
     execute_export_job,
     run_export_worker_once,
 )
+from .maintenance_tasks import (
+    clean_temp_files,
+    clean_trash,
+    rebuild_fts_index,
+    recompute_all_phash,
+    restore_database,
+    run_full_maintenance,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -1476,6 +1484,12 @@ class ScanLegacyRequest(BaseModel):
 
 class BackupDatabaseRequest(BaseModel):
     target_path: str = Field(..., description="备份目标文件的绝对或相对路径")
+
+
+class RestoreDatabaseRequest(BaseModel):
+    backup_path: str = Field(..., description="备份文件的绝对或相对路径")
+    pre_restore_backup: bool = Field(default=True, description="恢复前自动备份当前库")
+    pre_restore_backup_dir: str | None = Field(default=None, description="恢复前备份目录")
 
 
 # 状态码到错误码的映射，保持 API 错误响应统一可追溯。
@@ -7562,6 +7576,72 @@ def create_app(
         """清理临时文件和缓存目录。"""
         result = manager.clear_cache()
         return {"database_environment": manager.active_environment, "clear_cache": result}
+
+    @app.post("/api/maintenance/restore")
+    def restore_database_api(request: RestoreDatabaseRequest) -> dict[str, object]:
+        """从备份文件恢复数据库。
+
+        恢复前自动备份当前库，恢复后运行迁移、完整性检查和文件引用检查。
+        """
+        try:
+            result = restore_database(
+                manager,
+                request.backup_path,
+                pre_restore_backup=request.pre_restore_backup,
+                pre_restore_backup_dir=request.pre_restore_backup_dir,
+            )
+        except FileNotFoundError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return {"database_environment": manager.active_environment, "restore": result}
+
+    @app.post("/api/maintenance/rebuild-fts")
+    def rebuild_fts_api() -> dict[str, object]:
+        """重建 gallery_fts 全文索引。"""
+        result = rebuild_fts_index(manager)
+        return {"database_environment": manager.active_environment, "rebuild_fts": result}
+
+    @app.post("/api/maintenance/recompute-phash")
+    def recompute_phash_api(
+        limit: int = 100,
+    ) -> dict[str, object]:
+        """批量重算所有文件的感知哈希。"""
+        result = recompute_all_phash(manager, limit=limit)
+        return {"database_environment": manager.active_environment, "recompute_phash": result}
+
+    @app.post("/api/maintenance/clean-temp")
+    def clean_temp_api(
+        retention_days: int = 7,
+    ) -> dict[str, object]:
+        """清理过期临时文件。"""
+        result = clean_temp_files(manager, retention_days=retention_days)
+        return {"database_environment": manager.active_environment, "clean_temp": result}
+
+    @app.post("/api/maintenance/clean-trash")
+    def clean_trash_api(
+        retention_days: int = 30,
+    ) -> dict[str, object]:
+        """清理过期回收站项（物理删除超过保留期的软删除记录）。"""
+        result = clean_trash(manager, retention_days=retention_days)
+        return {"database_environment": manager.active_environment, "clean_trash": result}
+
+    @app.post("/api/maintenance/run-full")
+    def run_full_maintenance_api(
+        thumbnail_limit: int = 100,
+        phash_limit: int = 100,
+        temp_retention_days: int = 7,
+        trash_retention_days: int = 30,
+    ) -> dict[str, object]:
+        """运行全套维护任务（优化/重建缩略图/重建FTS/重算phash/清理临时/清理回收站/完整性检查）。"""
+        result = run_full_maintenance(
+            manager,
+            thumbnail_limit=thumbnail_limit,
+            phash_limit=phash_limit,
+            temp_retention_days=temp_retention_days,
+            trash_retention_days=trash_retention_days,
+        )
+        return {"database_environment": manager.active_environment, "maintenance": result}
 
     # ── MOD-12: 旧笔记扫描 API ────────────────────────────────────────
 
