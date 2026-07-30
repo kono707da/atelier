@@ -1379,6 +1379,35 @@ class CreateMaterialVersionRequest(BaseModel):
     label: str | None = Field(default=None, max_length=120)
 
 
+# ── MOD-12: 导入导出请求模型 ────────────────────────────────────────
+
+
+class ExportMaterialsPackageRequest(BaseModel):
+    material_ids: list[str] = Field(..., min_length=1)
+
+
+class ImportMaterialsPackageRequest(BaseModel):
+    manifest: dict[str, Any]
+    dry_run: bool = False
+
+
+class ImportProjectPackageRequest(BaseModel):
+    manifest: dict[str, Any]
+    dry_run: bool = False
+
+
+class ScanLegacyRequest(BaseModel):
+    directory: str
+    dry_run: bool = True
+
+
+# ── MOD-11: 存储备份与维护请求模型 ──────────────────────────────────
+
+
+class BackupDatabaseRequest(BaseModel):
+    target_path: str = Field(..., description="备份目标文件的绝对或相对路径")
+
+
 # 状态码到错误码的映射，保持 API 错误响应统一可追溯。
 _STATUS_CODE_TO_ERROR_CODE: dict[int, str] = {
     400: "VALIDATION_ERROR",
@@ -3572,6 +3601,34 @@ def create_app(
             "project": project,
         }
 
+    # ── MOD-12: 项目包导入导出 ─────────────────────────────────
+
+    @app.post("/api/projects/{project_id}/export-package")
+    def export_project_package(project_id: str) -> dict[str, object]:
+        try:
+            manifest = manager.export_project_package(project_id)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        return {
+            "database_environment": manager.active_environment,
+            "manifest": manifest,
+        }
+
+    @app.post("/api/projects/import-package")
+    def import_project_package(
+        request: ImportProjectPackageRequest,
+    ) -> dict[str, object]:
+        try:
+            result = manager.import_project_package(
+                request.manifest, dry_run=request.dry_run
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return {
+            "database_environment": manager.active_environment,
+            **result,
+        }
+
     @app.get("/api/projects/{project_id}/overview")
     def get_project_overview(project_id: str) -> dict[str, object]:
         project = manager.get_project(project_id)
@@ -5030,6 +5087,36 @@ def create_app(
             media_type=media_type,
             headers={"Cache-Control": "private, max-age=3600"},
         )
+
+    # ── MOD-12: 素材包导入导出 ─────────────────────────────────
+
+    @app.post("/api/materials/export-package")
+    def export_materials_package(
+        request: ExportMaterialsPackageRequest,
+    ) -> dict[str, object]:
+        try:
+            manifest = manager.export_materials_package(request.material_ids)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        return {
+            "database_environment": manager.active_environment,
+            "manifest": manifest,
+        }
+
+    @app.post("/api/materials/import-package")
+    def import_materials_package(
+        request: ImportMaterialsPackageRequest,
+    ) -> dict[str, object]:
+        try:
+            result = manager.import_materials_package(
+                request.manifest, dry_run=request.dry_run
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return {
+            "database_environment": manager.active_environment,
+            **result,
+        }
 
     # ── Character Database (Danbooru CSV lookup) ───────────────
 
@@ -6911,6 +6998,59 @@ def create_app(
                 "character_id": item.get("character_id"),
                 "character_name": item.get("character_name"),
             },
+        }
+
+    # ── MOD-11: 存储备份与维护 API ────────────────────────────────────
+
+    @app.post("/api/maintenance/backup")
+    def backup_database_api(request: BackupDatabaseRequest) -> dict[str, object]:
+        """在线备份当前数据库到目标路径。"""
+        result = manager.backup_database(request.target_path)
+        return {"database_environment": manager.active_environment, "backup": result}
+
+    @app.post("/api/maintenance/optimize")
+    def optimize_database_api() -> dict[str, object]:
+        """执行 PRAGMA optimize 和 wal_checkpoint(TRUNCATE)。"""
+        result = manager.optimize_database()
+        return {"database_environment": manager.active_environment, "optimize": result}
+
+    @app.get("/api/maintenance/integrity-check")
+    def integrity_check_api() -> dict[str, object]:
+        """执行 PRAGMA integrity_check，返回完整性检查结果。"""
+        result = manager.integrity_check()
+        return {"database_environment": manager.active_environment, "integrity": result}
+
+    @app.get("/api/maintenance/system-info")
+    def system_info_api() -> dict[str, object]:
+        """返回数据库路径、大小、迁移版本清单、表数量等系统信息。"""
+        result = manager.get_system_info()
+        return {"database_environment": manager.active_environment, "system_info": result}
+
+    @app.get("/api/maintenance/orphan-check")
+    def orphan_check_api() -> dict[str, object]:
+        """检查 files 表中的 storage_key 对应的文件是否实际存在。"""
+        result = manager.check_orphaned_files()
+        return {"database_environment": manager.active_environment, "orphan_check": result}
+
+    @app.post("/api/maintenance/clear-cache")
+    def clear_cache_api() -> dict[str, object]:
+        """清理临时文件和缓存目录。"""
+        result = manager.clear_cache()
+        return {"database_environment": manager.active_environment, "clear_cache": result}
+
+    # ── MOD-12: 旧笔记扫描 API ────────────────────────────────────────
+
+    @app.post("/api/import/scan-legacy")
+    def scan_legacy_notes_api(request: ScanLegacyRequest) -> dict[str, object]:
+        """扫描目录中的旧 AI 作图笔记（图片和元数据文件）。"""
+        try:
+            result = manager.scan_legacy_notes(request.directory)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return {
+            "database_environment": manager.active_environment,
+            "dry_run": request.dry_run,
+            "scan": result,
         }
 
     # Warm the production lookup cache before the first page request. Test
