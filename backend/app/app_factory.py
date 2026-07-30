@@ -731,6 +731,42 @@ class ReorderVariantsRequest(BaseModel):
     variant_ids: list[str]
 
 
+class CreateFinalVersionRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    description: str = Field(default="", max_length=500)
+
+
+class UpdateFinalVersionRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    description: str | None = Field(default=None, max_length=500)
+    is_archived: bool | None = None
+
+
+class AddFinalVersionItemRequest(BaseModel):
+    image_instance_id: str
+    sort_order: int | None = None
+    source_shot_page_id: str | None = None
+    source_branch_id: str | None = None
+
+
+class ReorderFinalVersionItemsRequest(BaseModel):
+    item_ids: list[str]
+
+
+class CreateExportPresetRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    description: str = Field(default="", max_length=500)
+    format: Literal["png", "jpeg", "original"] = "original"
+    copy_mode: Literal["copy", "hardlink", "fallback"] = "copy"
+    strip_metadata: bool = False
+    output_pattern: str = "{index:04d}_{name}"
+
+
+class CreateExportJobRequest(BaseModel):
+    output_dir: str = Field(min_length=1)
+    preset_id: str | None = None
+
+
 class CreateProjectSpecRequest(BaseModel):
     spec_type: str = Field(min_length=1, max_length=40)
     custom_label: str = Field(default="", max_length=80)
@@ -6809,6 +6845,221 @@ def create_app(
             filename=file_record.get("original_name", file_path.name),
             media_type=file_record.get("mime_type", "application/octet-stream"),
         )
+
+    # ── MOD-09: 最终版本与导出 ─────────────────────────────────────
+
+    @app.get("/api/projects/{project_id}/final-versions")
+    def list_final_versions_api(project_id: str) -> dict[str, object]:
+        items = manager.list_final_versions(project_id)
+        return {
+            "database_environment": manager.active_environment,
+            "items": items,
+            "total": len(items),
+        }
+
+    @app.post(
+        "/api/projects/{project_id}/final-versions",
+        status_code=status.HTTP_201_CREATED,
+    )
+    def create_final_version_api(
+        project_id: str, request: CreateFinalVersionRequest
+    ) -> dict[str, object]:
+        try:
+            fv = manager.create_final_version(
+                project_id, request.name, request.description
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return {
+            "database_environment": manager.active_environment,
+            "final_version": fv,
+        }
+
+    @app.patch("/api/final-versions/{final_version_id}")
+    def update_final_version_api(
+        final_version_id: str, request: UpdateFinalVersionRequest
+    ) -> dict[str, object]:
+        try:
+            fv = manager.update_final_version(
+                final_version_id,
+                name=request.name,
+                description=request.description,
+                is_archived=request.is_archived,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return {
+            "database_environment": manager.active_environment,
+            "final_version": fv,
+        }
+
+    @app.delete("/api/final-versions/{final_version_id}")
+    def delete_final_version_api(final_version_id: str) -> dict[str, object]:
+        deleted = manager.delete_final_version(final_version_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="最终版本不存在。")
+        return {
+            "database_environment": manager.active_environment,
+            "deleted": True,
+        }
+
+    @app.get("/api/final-versions/{final_version_id}/items")
+    def list_final_version_items_api(final_version_id: str) -> dict[str, object]:
+        items = manager.list_final_version_items(final_version_id)
+        return {
+            "database_environment": manager.active_environment,
+            "items": items,
+            "total": len(items),
+        }
+
+    @app.post(
+        "/api/final-versions/{final_version_id}/items",
+        status_code=status.HTTP_201_CREATED,
+    )
+    def add_final_version_item_api(
+        final_version_id: str, request: AddFinalVersionItemRequest
+    ) -> dict[str, object]:
+        if manager.get_final_version(final_version_id) is None:
+            raise HTTPException(status_code=404, detail="最终版本不存在。")
+        item = manager.add_final_version_item(
+            final_version_id,
+            request.image_instance_id,
+            sort_order=request.sort_order,
+            source_shot_page_id=request.source_shot_page_id,
+            source_branch_id=request.source_branch_id,
+        )
+        return {
+            "database_environment": manager.active_environment,
+            "item": item,
+        }
+
+    @app.put("/api/final-versions/{final_version_id}/items/reorder")
+    def reorder_final_version_items_api(
+        final_version_id: str, request: ReorderFinalVersionItemsRequest
+    ) -> dict[str, object]:
+        items = manager.reorder_final_version_items(
+            final_version_id, request.item_ids
+        )
+        return {
+            "database_environment": manager.active_environment,
+            "items": items,
+            "total": len(items),
+        }
+
+    @app.delete("/api/final-version-items/{item_id}")
+    def remove_final_version_item_api(item_id: str) -> dict[str, object]:
+        deleted = manager.remove_final_version_item(item_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="条目不存在。")
+        return {
+            "database_environment": manager.active_environment,
+            "deleted": True,
+        }
+
+    @app.post("/api/final-versions/{final_version_id}/generate-default-sequence")
+    def generate_default_sequence_api(final_version_id: str) -> dict[str, object]:
+        fv = manager.get_final_version(final_version_id)
+        if fv is None:
+            raise HTTPException(status_code=404, detail="最终版本不存在。")
+        items = manager.generate_default_sequence(
+            final_version_id, str(fv["project_id"])
+        )
+        return {
+            "database_environment": manager.active_environment,
+            "items": items,
+            "total": len(items),
+        }
+
+    @app.get("/api/export-presets")
+    def list_export_presets_api() -> dict[str, object]:
+        items = manager.list_export_presets()
+        return {
+            "database_environment": manager.active_environment,
+            "items": items,
+            "total": len(items),
+        }
+
+    @app.post(
+        "/api/export-presets",
+        status_code=status.HTTP_201_CREATED,
+    )
+    def create_export_preset_api(request: CreateExportPresetRequest) -> dict[str, object]:
+        preset = manager.create_export_preset(
+            request.name,
+            description=request.description,
+            format=request.format,
+            copy_mode=request.copy_mode,
+            strip_metadata=request.strip_metadata,
+            output_pattern=request.output_pattern,
+        )
+        return {
+            "database_environment": manager.active_environment,
+            "preset": preset,
+        }
+
+    @app.delete("/api/export-presets/{preset_id}")
+    def delete_export_preset_api(preset_id: str) -> dict[str, object]:
+        deleted = manager.delete_export_preset(preset_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="导出预设不存在。")
+        return {
+            "database_environment": manager.active_environment,
+            "deleted": True,
+        }
+
+    @app.get("/api/export-jobs")
+    def list_export_jobs_api(
+        final_version_id: str | None = None,
+        status_filter: str | None = None,
+    ) -> dict[str, object]:
+        items = manager.list_export_jobs(
+            final_version_id=final_version_id,
+            status=status_filter,
+        )
+        return {
+            "database_environment": manager.active_environment,
+            "items": items,
+            "total": len(items),
+        }
+
+    @app.post(
+        "/api/final-versions/{final_version_id}/export-jobs",
+        status_code=status.HTTP_201_CREATED,
+    )
+    def create_export_job_api(
+        final_version_id: str, request: CreateExportJobRequest
+    ) -> dict[str, object]:
+        if manager.get_final_version(final_version_id) is None:
+            raise HTTPException(status_code=404, detail="最终版本不存在。")
+        job = manager.create_export_job(
+            final_version_id,
+            request.output_dir,
+            preset_id=request.preset_id,
+        )
+        return {
+            "database_environment": manager.active_environment,
+            "job": job,
+        }
+
+    @app.patch("/api/export-jobs/{job_id}")
+    def update_export_job_api(
+        job_id: str,
+        status: str | None = None,
+        completed_items: int | None = None,
+        error_message: str | None = None,
+    ) -> dict[str, object]:
+        job = manager.update_export_job(
+            job_id,
+            status=status,
+            completed_items=completed_items,
+            error_message=error_message,
+        )
+        if job is None:
+            raise HTTPException(status_code=404, detail="导出任务不存在。")
+        return {
+            "database_environment": manager.active_environment,
+            "job": job,
+        }
 
     @app.get("/api/background-jobs")
     def list_background_jobs_api(
