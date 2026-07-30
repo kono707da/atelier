@@ -135,13 +135,20 @@ from .comfyui_progress import (
     sse_progress_generator,
 )
 from .output_receiver import (
+    adopt_image_instance,
     collect_attempt_outputs,
+    copy_params_from_instance,
     get_file_path,
     get_file_record,
     get_image_instance,
+    get_image_instance_tracking,
     list_background_jobs,
     list_image_instances,
     parse_comfyui_outputs,
+    reject_image_instance,
+    reorder_adopted_image_instances,
+    set_representative_image_instance,
+    unadopt_image_instance,
 )
 
 
@@ -729,6 +736,10 @@ class CopyCharacterVariantRequest(BaseModel):
 
 class ReorderVariantsRequest(BaseModel):
     variant_ids: list[str]
+
+
+class ReorderAdoptedRequest(BaseModel):
+    instance_ids: list[str]
 
 
 class CreateProjectSpecRequest(BaseModel):
@@ -6809,6 +6820,91 @@ def create_app(
             filename=file_record.get("original_name", file_path.name),
             media_type=file_record.get("mime_type", "application/octet-stream"),
         )
+
+    # ── MOD-08: 图片审片操作 ───────────────────────────────────────
+
+    @app.post("/api/image-instances/{instance_id}/adopt")
+    def adopt_image_instance_api(instance_id: str) -> dict[str, object]:
+        try:
+            result = adopt_image_instance(manager, instance_id)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        if result is None:
+            raise HTTPException(status_code=404, detail="图片实例不存在")
+        return {
+            "database_environment": manager.active_environment,
+            "image_instance": result,
+        }
+
+    @app.post("/api/image-instances/{instance_id}/reject")
+    def reject_image_instance_api(instance_id: str) -> dict[str, object]:
+        try:
+            result = reject_image_instance(manager, instance_id)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        if result is None:
+            raise HTTPException(status_code=404, detail="图片实例不存在")
+        return {
+            "database_environment": manager.active_environment,
+            "image_instance": result,
+        }
+
+    @app.post("/api/image-instances/{instance_id}/unadopt")
+    def unadopt_image_instance_api(instance_id: str) -> dict[str, object]:
+        result = unadopt_image_instance(manager, instance_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail="图片实例不存在")
+        return {
+            "database_environment": manager.active_environment,
+            "image_instance": result,
+        }
+
+    @app.post("/api/image-instances/{instance_id}/representative")
+    def set_representative_api(instance_id: str) -> dict[str, object]:
+        try:
+            result = set_representative_image_instance(manager, instance_id)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        if result is None:
+            raise HTTPException(status_code=404, detail="图片实例不存在")
+        return {
+            "database_environment": manager.active_environment,
+            "image_instance": result,
+        }
+
+    @app.put("/api/shot-pages/{shot_page_id}/adopted-order")
+    def reorder_adopted_api(
+        shot_page_id: str, request: ReorderAdoptedRequest
+    ) -> dict[str, object]:
+        items = reorder_adopted_image_instances(
+            manager, shot_page_id, request.instance_ids
+        )
+        return {
+            "database_environment": manager.active_environment,
+            "shot_page_id": shot_page_id,
+            "items": items,
+            "total": len(items),
+        }
+
+    @app.get("/api/image-instances/{instance_id}/tracking")
+    def get_tracking_api(instance_id: str) -> dict[str, object]:
+        result = get_image_instance_tracking(manager, instance_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail="图片实例不存在")
+        return {
+            "database_environment": manager.active_environment,
+            "tracking": result,
+        }
+
+    @app.post("/api/image-instances/{instance_id}/copy-params")
+    def copy_params_api(instance_id: str) -> dict[str, object]:
+        result = copy_params_from_instance(manager, instance_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail="图片实例不存在")
+        return {
+            "database_environment": manager.active_environment,
+            "params": result,
+        }
 
     @app.get("/api/background-jobs")
     def list_background_jobs_api(

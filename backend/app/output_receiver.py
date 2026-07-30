@@ -627,6 +627,218 @@ def get_file_record(
     return dict(row) if row else None
 
 
+# ── MOD-08: 审片操作 ─────────────────────────────────────────────
+
+
+def adopt_image_instance(
+    manager: Any,
+    instance_id: str,
+    *,
+    environment: str | None = None,
+) -> dict[str, Any] | None:
+    """采用图片实例。已淘汰的实例不能采用。"""
+    now = datetime.now(timezone.utc).isoformat()
+    with manager.connection(environment) as conn:
+        row = conn.execute(
+            "SELECT id, is_rejected FROM image_instances WHERE id = ?",
+            (instance_id,),
+        ).fetchone()
+        if not row:
+            return None
+        if row["is_rejected"]:
+            raise ValueError("已淘汰的图片实例不能采用。")
+        conn.execute(
+            "UPDATE image_instances SET is_adopted = 1, adopted_at = ?, updated_at = ? WHERE id = ?",
+            (now, now, instance_id),
+        )
+        conn.commit()
+        result = conn.execute(
+            "SELECT * FROM image_instances WHERE id = ?", (instance_id,)
+        ).fetchone()
+    return dict(result) if result else None
+
+
+def reject_image_instance(
+    manager: Any,
+    instance_id: str,
+    *,
+    environment: str | None = None,
+) -> dict[str, Any] | None:
+    """淘汰图片实例。已采用的实例不能淘汰。"""
+    now = datetime.now(timezone.utc).isoformat()
+    with manager.connection(environment) as conn:
+        row = conn.execute(
+            "SELECT id, is_adopted FROM image_instances WHERE id = ?",
+            (instance_id,),
+        ).fetchone()
+        if not row:
+            return None
+        if row["is_adopted"]:
+            raise ValueError("已采用的图片实例不能淘汰。")
+        conn.execute(
+            "UPDATE image_instances SET is_rejected = 1, rejected_at = ?, updated_at = ? WHERE id = ?",
+            (now, now, instance_id),
+        )
+        conn.commit()
+        result = conn.execute(
+            "SELECT * FROM image_instances WHERE id = ?", (instance_id,)
+        ).fetchone()
+    return dict(result) if result else None
+
+
+def unadopt_image_instance(
+    manager: Any,
+    instance_id: str,
+    *,
+    environment: str | None = None,
+) -> dict[str, Any] | None:
+    """取消采用图片实例。"""
+    now = datetime.now(timezone.utc).isoformat()
+    with manager.connection(environment) as conn:
+        row = conn.execute(
+            "SELECT id FROM image_instances WHERE id = ?",
+            (instance_id,),
+        ).fetchone()
+        if not row:
+            return None
+        conn.execute(
+            "UPDATE image_instances SET is_adopted = 0, adopted_at = NULL, "
+            "is_representative = 0, representative_at = NULL, updated_at = ? WHERE id = ?",
+            (now, instance_id),
+        )
+        conn.commit()
+        result = conn.execute(
+            "SELECT * FROM image_instances WHERE id = ?", (instance_id,)
+        ).fetchone()
+    return dict(result) if result else None
+
+
+def set_representative_image_instance(
+    manager: Any,
+    instance_id: str,
+    *,
+    environment: str | None = None,
+) -> dict[str, Any] | None:
+    """标记图片实例为代表图。必须是已采用状态。同时取消同页其他代表图。"""
+    now = datetime.now(timezone.utc).isoformat()
+    with manager.connection(environment) as conn:
+        row = conn.execute(
+            "SELECT id, shot_page_id, is_adopted FROM image_instances WHERE id = ?",
+            (instance_id,),
+        ).fetchone()
+        if not row:
+            return None
+        if not row["is_adopted"]:
+            raise ValueError("只有已采用的图片实例才能标记为代表图。")
+        # 取消同页其他代表图
+        conn.execute(
+            "UPDATE image_instances SET is_representative = 0, representative_at = NULL, updated_at = ? "
+            "WHERE shot_page_id = ? AND id != ? AND is_representative = 1",
+            (now, row["shot_page_id"], instance_id),
+        )
+        conn.execute(
+            "UPDATE image_instances SET is_representative = 1, representative_at = ?, updated_at = ? WHERE id = ?",
+            (now, now, instance_id),
+        )
+        conn.commit()
+        result = conn.execute(
+            "SELECT * FROM image_instances WHERE id = ?", (instance_id,)
+        ).fetchone()
+    return dict(result) if result else None
+
+
+def reorder_adopted_image_instances(
+    manager: Any,
+    shot_page_id: str,
+    instance_ids: list[str],
+    *,
+    environment: str | None = None,
+) -> list[dict[str, Any]]:
+    """重新排序已采用的图片实例。"""
+    now = datetime.now(timezone.utc).isoformat()
+    with manager.connection(environment) as conn:
+        for idx, iid in enumerate(instance_ids, start=1):
+            conn.execute(
+                "UPDATE image_instances SET sort_order = ?, updated_at = ? "
+                "WHERE id = ? AND shot_page_id = ? AND is_adopted = 1",
+                (idx, now, iid, shot_page_id),
+            )
+        conn.commit()
+        rows = conn.execute(
+            "SELECT * FROM image_instances WHERE shot_page_id = ? AND is_adopted = 1 "
+            "ORDER BY sort_order ASC",
+            (shot_page_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_image_instance_tracking(
+    manager: Any,
+    instance_id: str,
+    *,
+    environment: str | None = None,
+) -> dict[str, Any] | None:
+    """获取图片实例的完整生成追踪信息。"""
+    with manager.connection(environment) as conn:
+        row = conn.execute(
+            "SELECT * FROM image_instances WHERE id = ?",
+            (instance_id,),
+        ).fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        # 解析 snapshot_json
+        if result.get("snapshot_json"):
+            try:
+                result["snapshot"] = json.loads(result["snapshot_json"])
+            except (json.JSONDecodeError, TypeError):
+                result["snapshot"] = None
+        else:
+            result["snapshot"] = None
+        # 解析 resolved_json
+        if result.get("resolved_json"):
+            try:
+                result["resolved"] = json.loads(result["resolved_json"])
+            except (json.JSONDecodeError, TypeError):
+                result["resolved"] = None
+        else:
+            result["resolved"] = None
+        # 关联文件记录
+        file_row = conn.execute(
+            "SELECT * FROM files WHERE id = ?",
+            (result.get("file_id"),),
+        ).fetchone()
+        result["file"] = dict(file_row) if file_row else None
+    return result
+
+
+def copy_params_from_instance(
+    manager: Any,
+    instance_id: str,
+    *,
+    environment: str | None = None,
+) -> dict[str, Any] | None:
+    """从图片实例复制参数，返回可用于再次生成的参数快照。"""
+    tracking = get_image_instance_tracking(manager, instance_id, environment=environment)
+    if not tracking:
+        return None
+    snapshot = tracking.get("snapshot") or {}
+    return {
+        "source_instance_id": instance_id,
+        "project_id": tracking.get("project_id"),
+        "shot_page_id": tracking.get("shot_page_id"),
+        "workflow_version_id": tracking.get("workflow_version_id"),
+        "seed": tracking.get("seed"),
+        "effective_config": snapshot.get("effective_config"),
+        "api_json": snapshot.get("api_json"),
+        "character_id": snapshot.get("character_id"),
+        "variant_id": snapshot.get("variant_id"),
+        "field_sources": snapshot.get("field_sources"),
+        "material_mappings": snapshot.get("material_mappings"),
+        "spec_values": snapshot.get("spec_values"),
+    }
+
+
 def list_background_jobs(
     manager: Any,
     *,

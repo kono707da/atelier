@@ -911,5 +911,259 @@ class OutputApiTests(_OutputTestBase):
         self.assertEqual(data["image_instance"]["id"], instance_id)
 
 
+# ── MOD-08: 图片审片测试 ──────────────────────────────────────────
+
+
+class ImageReviewApiTests(_OutputTestBase):
+    """图片审片操作接口测试。"""
+
+    def _create_test_instance(self, snapshot: dict | None = None) -> dict:
+        """创建一个测试图片实例。"""
+        project_id, shot_page_ids, _, _ = self._setup_full_project(page_count=1)
+        shot_page_id = shot_page_ids[0]
+        file_data = {
+            "file_id": f"file-{shot_page_id}",
+            "storage_key": f"file-{shot_page_id}.png",
+            "original_name": "output.png",
+            "mime_type": "image/png",
+            "size_bytes": 512,
+            "content_hash": f"hash-{shot_page_id}",
+        }
+        create_file_record(self.manager, file_data)
+        return create_image_instance(
+            self.manager,
+            project_id=project_id,
+            shot_page_id=shot_page_id,
+            task_id=None,
+            attempt_id=None,
+            file_id=file_data["file_id"],
+            node_id=None,
+            workflow_version_id=None,
+            prompt_id=None,
+            width=64,
+            height=64,
+            img_format="PNG",
+            seed=42,
+            resolved_json=None,
+            snapshot_json=snapshot,
+        )
+
+    def test_adopt_image_instance(self) -> None:
+        instance = self._create_test_instance()
+        response = self.client.post(
+            f"/api/image-instances/{instance['id']}/adopt"
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()["image_instance"]
+        self.assertTrue(result["is_adopted"])
+        self.assertIsNotNone(result["adopted_at"])
+
+    def test_adopt_missing_returns_404(self) -> None:
+        response = self.client.post(
+            "/api/image-instances/missing-id/adopt"
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_reject_image_instance(self) -> None:
+        instance = self._create_test_instance()
+        response = self.client.post(
+            f"/api/image-instances/{instance['id']}/reject"
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()["image_instance"]
+        self.assertTrue(result["is_rejected"])
+        self.assertIsNotNone(result["rejected_at"])
+
+    def test_adopt_and_reject_mutually_exclusive(self) -> None:
+        instance = self._create_test_instance()
+        # 先采用
+        self.client.post(f"/api/image-instances/{instance['id']}/adopt")
+        # 尝试淘汰已采用的 → 400
+        response = self.client.post(
+            f"/api/image-instances/{instance['id']}/reject"
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_reject_then_adopt_blocked(self) -> None:
+        instance = self._create_test_instance()
+        self.client.post(f"/api/image-instances/{instance['id']}/reject")
+        response = self.client.post(
+            f"/api/image-instances/{instance['id']}/adopt"
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_unadopt_image_instance(self) -> None:
+        instance = self._create_test_instance()
+        self.client.post(f"/api/image-instances/{instance['id']}/adopt")
+        response = self.client.post(
+            f"/api/image-instances/{instance['id']}/unadopt"
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()["image_instance"]
+        self.assertFalse(result["is_adopted"])
+        self.assertIsNone(result["adopted_at"])
+
+    def test_set_representative_requires_adopted(self) -> None:
+        instance = self._create_test_instance()
+        response = self.client.post(
+            f"/api/image-instances/{instance['id']}/representative"
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_set_representative_after_adopt(self) -> None:
+        instance = self._create_test_instance()
+        self.client.post(f"/api/image-instances/{instance['id']}/adopt")
+        response = self.client.post(
+            f"/api/image-instances/{instance['id']}/representative"
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()["image_instance"]
+        self.assertTrue(result["is_representative"])
+        self.assertIsNotNone(result["representative_at"])
+
+    def test_representative_exclusive_per_page(self) -> None:
+        """同一页面只能有一个代表图。"""
+        instance1 = self._create_test_instance()
+        # 创建第二个实例（同页面）
+        shot_page_id = instance1["shot_page_id"]
+        project_id = instance1["project_id"]
+        file_data2 = {
+            "file_id": f"file-2-{shot_page_id}",
+            "storage_key": f"file-2-{shot_page_id}.png",
+            "original_name": "output2.png",
+            "mime_type": "image/png",
+            "size_bytes": 512,
+            "content_hash": f"hash-2-{shot_page_id}",
+        }
+        create_file_record(self.manager, file_data2)
+        instance2 = create_image_instance(
+            self.manager,
+            project_id=project_id,
+            shot_page_id=shot_page_id,
+            task_id=None,
+            attempt_id=None,
+            file_id=file_data2["file_id"],
+            node_id=None,
+            workflow_version_id=None,
+            prompt_id=None,
+            width=64,
+            height=64,
+            img_format="PNG",
+            seed=43,
+            resolved_json=None,
+            snapshot_json=None,
+        )
+        # 都采用
+        self.client.post(f"/api/image-instances/{instance1['id']}/adopt")
+        self.client.post(f"/api/image-instances/{instance2['id']}/adopt")
+        # 第一个设为代表图
+        self.client.post(
+            f"/api/image-instances/{instance1['id']}/representative"
+        )
+        # 第二个设为代表图
+        self.client.post(
+            f"/api/image-instances/{instance2['id']}/representative"
+        )
+        # 第一个不再是代表图
+        r1 = get_image_instance(self.manager, instance1["id"])
+        self.assertFalse(r1["is_representative"])
+        r2 = get_image_instance(self.manager, instance2["id"])
+        self.assertTrue(r2["is_representative"])
+
+    def test_reorder_adopted_instances(self) -> None:
+        """重新排序已采用的图片实例。"""
+        instance1 = self._create_test_instance()
+        shot_page_id = instance1["shot_page_id"]
+        project_id = instance1["project_id"]
+        # 创建第二、三个实例
+        instances = [instance1]
+        for i in range(2, 4):
+            fd = {
+                "file_id": f"file-{i}-{shot_page_id}",
+                "storage_key": f"file-{i}-{shot_page_id}.png",
+                "original_name": f"output{i}.png",
+                "mime_type": "image/png",
+                "size_bytes": 512,
+                "content_hash": f"hash-{i}-{shot_page_id}",
+            }
+            create_file_record(self.manager, fd)
+            inst = create_image_instance(
+                self.manager,
+                project_id=project_id,
+                shot_page_id=shot_page_id,
+                task_id=None,
+                attempt_id=None,
+                file_id=fd["file_id"],
+                node_id=None,
+                workflow_version_id=None,
+                prompt_id=None,
+                width=64,
+                height=64,
+                img_format="PNG",
+                seed=i * 10,
+                resolved_json=None,
+                snapshot_json=None,
+            )
+            instances.append(inst)
+        # 全部采用
+        for inst in instances:
+            self.client.post(f"/api/image-instances/{inst['id']}/adopt")
+        # 重新排序（反转）
+        reordered_ids = [instances[2]["id"], instances[1]["id"], instances[0]["id"]]
+        response = self.client.put(
+            f"/api/shot-pages/{shot_page_id}/adopted-order",
+            json={"instance_ids": reordered_ids},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        items = response.json()["items"]
+        self.assertEqual([i["id"] for i in items], reordered_ids)
+        self.assertEqual([i["sort_order"] for i in items], [1, 2, 3])
+
+    def test_get_tracking(self) -> None:
+        snapshot = {
+            "effective_config": {"cfg": 7.0},
+            "api_json": {"prompt": {"1": {"class_type": "test"}}},
+            "character_id": "char-1",
+            "variant_id": "var-1",
+        }
+        instance = self._create_test_instance(snapshot=snapshot)
+        response = self.client.get(
+            f"/api/image-instances/{instance['id']}/tracking"
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        tracking = response.json()["tracking"]
+        self.assertEqual(tracking["seed"], 42)
+        self.assertIsNotNone(tracking["snapshot"])
+        self.assertEqual(tracking["snapshot"]["effective_config"]["cfg"], 7.0)
+        self.assertIsNotNone(tracking["file"])
+
+    def test_copy_params(self) -> None:
+        snapshot = {
+            "effective_config": {"cfg": 7.0},
+            "api_json": {"prompt": {"1": {"class_type": "test"}}},
+            "character_id": "char-1",
+            "variant_id": "var-1",
+            "field_sources": {},
+            "material_mappings": {},
+            "spec_values": {},
+        }
+        instance = self._create_test_instance(snapshot=snapshot)
+        response = self.client.post(
+            f"/api/image-instances/{instance['id']}/copy-params"
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        params = response.json()["params"]
+        self.assertEqual(params["source_instance_id"], instance["id"])
+        self.assertEqual(params["seed"], 42)
+        self.assertEqual(params["effective_config"]["cfg"], 7.0)
+        self.assertEqual(params["character_id"], "char-1")
+
+    def test_copy_params_missing_returns_404(self) -> None:
+        response = self.client.post(
+            "/api/image-instances/missing-id/copy-params"
+        )
+        self.assertEqual(response.status_code, 404)
+
+
 if __name__ == "__main__":
     unittest.main()

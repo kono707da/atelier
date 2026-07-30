@@ -2170,6 +2170,22 @@ class DatabaseManager:
             "CREATE INDEX IF NOT EXISTS idx_image_instances_task "
             "ON image_instances(task_id) WHERE task_id IS NOT NULL"
         )
+        # MOD-08: 审片状态字段
+        ii_cols = [row["name"] for row in connection.execute("PRAGMA table_info(image_instances)").fetchall()]
+        if "is_rejected" not in ii_cols:
+            connection.execute("ALTER TABLE image_instances ADD COLUMN is_rejected INTEGER NOT NULL DEFAULT 0")
+        if "rejected_at" not in ii_cols:
+            connection.execute("ALTER TABLE image_instances ADD COLUMN rejected_at TEXT")
+        if "is_representative" not in ii_cols:
+            connection.execute("ALTER TABLE image_instances ADD COLUMN is_representative INTEGER NOT NULL DEFAULT 0")
+        if "representative_at" not in ii_cols:
+            connection.execute("ALTER TABLE image_instances ADD COLUMN representative_at TEXT")
+        if "adopted_at" not in ii_cols:
+            connection.execute("ALTER TABLE image_instances ADD COLUMN adopted_at TEXT")
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_image_instances_adopted "
+            "ON image_instances(shot_page_id, is_adopted, sort_order) WHERE is_adopted = 1"
+        )
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_image_instances_attempt "
             "ON image_instances(attempt_id) WHERE attempt_id IS NOT NULL"
