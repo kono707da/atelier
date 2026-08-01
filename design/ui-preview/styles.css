@@ -2971,6 +2971,10 @@ button {
   background: #fff;
 }
 
+.character-spec-simple-editor [hidden] {
+  display: none !important;
+}
+
 .character-spec-simple-editor .character-spec-name-field,
 .character-spec-simple-editor .character-spec-prompt-field,
 .character-spec-simple-editor .character-spec-editor-actions {
@@ -2984,6 +2988,51 @@ button {
 .character-spec-simple-editor .character-spec-name-field input[readonly] {
   color: #6f788b;
   background: #f4f5f8;
+}
+
+.character-spec-readonly {
+  display: grid;
+  gap: 13px;
+  min-width: 0;
+}
+
+.character-spec-readonly-name,
+.character-spec-readonly-prompt {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.character-spec-readonly-name > span,
+.character-spec-readonly-prompt > span {
+  color: #747e91;
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.character-spec-readonly-name strong {
+  color: #2f3b57;
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.character-spec-prompt-content {
+  width: 100%;
+  min-height: 72px;
+  padding: 11px 12px;
+  border: 1px solid #e1e5ed;
+  border-radius: 10px;
+  color: #34405b;
+  font-size: 11px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: #f8f9fb;
+}
+
+.character-spec-prompt-content.is-empty {
+  color: #9aa1af;
 }
 
 .character-simple-spec-create .modal-input {

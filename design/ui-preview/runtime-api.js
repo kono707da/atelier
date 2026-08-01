@@ -4435,16 +4435,27 @@
   function specValueEditor(value) {
     const label = specLabel(value);
     const canRename = value.spec_type === "custom";
+    const prompt = value.prompt || "";
     return `
       <form
-        class="character-spec-editor character-spec-simple-editor"
+        class="character-spec-editor character-spec-simple-editor is-viewing"
         data-inline-action="save-spec-value"
         data-spec-value-id="${escapeHtml(value.id)}"
         data-spec-id="${escapeHtml(value.spec_id)}"
         data-spec-type="${escapeHtml(value.spec_type)}"
         data-original-name="${escapeHtml(label)}"
       >
-        <label class="character-spec-field character-spec-name-field">
+        <div class="character-spec-readonly" data-spec-display>
+          <div class="character-spec-readonly-name">
+            <span>规格名称</span>
+            <strong data-spec-name-output>${escapeHtml(label)}</strong>
+          </div>
+          <div class="character-spec-readonly-prompt">
+            <span>提示词</span>
+            <div class="character-spec-prompt-content${prompt.trim() ? "" : " is-empty"}" data-spec-prompt-output>${escapeHtml(prompt || "尚未填写提示词")}</div>
+          </div>
+        </div>
+        <label class="character-spec-field character-spec-name-field" data-spec-edit-field hidden>
           <span>规格名称</span>
           <input
             name="spec_name"
@@ -4459,14 +4470,15 @@
             title="${canRename ? "" : "旧版内置规格名称不可修改"}"
           />
         </label>
-        <label class="character-spec-field character-spec-prompt-field">
+        <label class="character-spec-field character-spec-prompt-field" data-spec-edit-field hidden>
           <span>提示词</span>
-          <textarea name="prompt" rows="5" placeholder="输入这个规格使用的提示词">${escapeHtml(value.prompt || "")}</textarea>
+          <textarea name="prompt" rows="5" placeholder="输入这个规格使用的提示词">${escapeHtml(prompt)}</textarea>
         </label>
         <div class="character-spec-editor-actions">
           <span class="spec-save-status" role="status"></span>
           <button class="btn small danger-soft" type="button" data-api-action="delete-character-spec" data-spec-id="${escapeHtml(value.spec_id)}">删除规格</button>
-          <button class="btn small primary" type="submit">保存规格</button>
+          <button class="btn small" type="button" data-api-action="edit-character-spec">编辑</button>
+          <button class="btn small primary" type="submit" hidden>保存规格</button>
         </div>
       </form>
     `;
@@ -12265,6 +12277,15 @@
       return;
     }
 
+    if (button.dataset.apiAction === "edit-character-spec") {
+      const form = button.closest(".character-spec-simple-editor");
+      if (!form) return;
+      setCharacterSpecEditorMode(form, true);
+      form.elements.spec_name?.focus();
+      form.elements.spec_name?.select();
+      return;
+    }
+
     if (button.dataset.apiAction === "load-more-characters") {
       await loadCharacters(true);
       return;
@@ -12985,6 +13006,8 @@
       const input = specId
         ? document.querySelector(`.character-spec-simple-editor input[data-spec-id="${cssEscape(specId)}"]`)
         : null;
+      const form = input?.closest(".character-spec-simple-editor");
+      if (form) setCharacterSpecEditorMode(form, true);
       input?.focus();
       input?.select();
       if (typeof showToast === "function") showToast("规格已添加，请填写名称和提示词");
@@ -12996,6 +13019,20 @@
         button.textContent = "添加规格";
       }
     }
+  }
+
+  function setCharacterSpecEditorMode(form, editing) {
+    form.classList.toggle("is-editing", editing);
+    form.classList.toggle("is-viewing", !editing);
+    const display = form.querySelector("[data-spec-display]");
+    if (display) display.hidden = editing;
+    form.querySelectorAll("[data-spec-edit-field]").forEach((field) => {
+      field.hidden = !editing;
+    });
+    const editButton = form.querySelector('[data-api-action="edit-character-spec"]');
+    const submitButton = form.querySelector('button[type="submit"]');
+    if (editButton) editButton.hidden = editing;
+    if (submitButton) submitButton.hidden = !editing;
   }
 
   async function submitCharacterSpecValue(form) {
@@ -13028,8 +13065,16 @@
         method: "PATCH",
         body: JSON.stringify({ prompt }),
       });
+      const nameOutput = form.querySelector("[data-spec-name-output]");
+      const promptOutput = form.querySelector("[data-spec-prompt-output]");
+      if (nameOutput) nameOutput.textContent = specName;
+      if (promptOutput) {
+        promptOutput.textContent = prompt || "尚未填写提示词";
+        promptOutput.classList.toggle("is-empty", !prompt.trim());
+      }
       status.textContent = "已保存";
       status.className = "spec-save-status success";
+      setCharacterSpecEditorMode(form, false);
       if (typeof showToast === "function") showToast(`规格「${specName}」已保存`);
     } catch (requestError) {
       status.textContent = requestError.message;
