@@ -2508,6 +2508,8 @@
           class="story-tree-row story-tree-small-scene"
           type="button"
           data-small-scene-id="${escapeHtml(smallScene.id)}"
+          data-context-menu="small-scene"
+          data-name="${escapeHtml(smallScene.name)}"
           data-story-tree-action="open-small-scene"
           title="双击进入小场景画布"
         >
@@ -2584,7 +2586,12 @@
         <div class="story-directory-scroll">
           <ul class="story-tree">
             <li class="story-tree-branch story-tree-root">
-              <div class="story-tree-row story-tree-root-row">
+              <div
+                class="story-tree-row story-tree-root-row"
+                data-context-menu="story-root"
+                data-project-id="${escapeHtml(project.id)}"
+                data-name="${escapeHtml(project.name)}"
+              >
                 <span class="story-tree-chevron">⌄</span>
                 <span class="story-tree-icon root">A</span>
                 <span class="story-tree-name">${escapeHtml(project.name)}</span>
@@ -2596,7 +2603,10 @@
                       class="story-tree-row story-tree-chapter"
                       type="button"
                       data-story-tree-node="chapter"
+                      data-context-menu="chapter"
                       data-chapter-id="${escapeHtml(chapter.id)}"
+                      data-name="${escapeHtml(chapter.name)}"
+                      data-large-scene-count="${chapter.large_scenes.length}"
                     >
                       <span class="story-tree-chevron">⌄</span>
                       <span class="story-tree-icon chapter">CH</span>
@@ -2610,7 +2620,9 @@
                             class="story-tree-row story-tree-large-scene"
                             type="button"
                             data-story-tree-node="large-scene"
+                            data-context-menu="large-scene"
                             data-large-scene-id="${escapeHtml(largeScene.id)}"
+                            data-name="${escapeHtml(largeScene.name)}"
                           >
                             <span class="story-tree-chevron">⌄</span>
                             <span class="story-tree-icon large-scene">LS</span>
@@ -8690,6 +8702,7 @@
   const renameTypeNames = {
     chapter: "章节",
     "large-scene": "大场景",
+    "small-scene": "小场景",
     character: "人物",
     "character-variant": "形象",
     "project-spec": "自定义规格标签",
@@ -8730,6 +8743,8 @@
         return `/api/chapters/${id}`;
       case "large-scene":
         return `/api/large-scenes/${id}`;
+      case "small-scene":
+        return `/api/small-scenes/${id}`;
       case "character":
         return `/api/characters/${id}`;
       case "character-variant":
@@ -8783,7 +8798,7 @@
   }
 
   async function refreshAfterRename(type, id) {
-    if (type === "chapter" || type === "large-scene") {
+    if (type === "chapter" || type === "large-scene" || type === "small-scene") {
       const project = await resolveCurrentProject();
       await renderProductionStoryCanvasV3(project);
       return;
@@ -8835,6 +8850,24 @@
     }
   }
 
+  async function deleteSmallScene(smallSceneId, name) {
+    if (!await confirmDialog({
+      title: `删除小场景「${name}」`,
+      message: "其中的场景页、素材关联和页面映射也会一并删除，此操作无法撤销。",
+      confirmText: "删除"
+    })) {
+      return;
+    }
+    try {
+      await request(`/api/small-scenes/${smallSceneId}`, { method: "DELETE" });
+      const project = await resolveCurrentProject();
+      await renderProductionStoryCanvasV3(project);
+      if (typeof showToast === "function") showToast(`小场景「${name}」已删除`);
+    } catch (requestError) {
+      if (typeof showToast === "function") showToast(requestError.message);
+    }
+  }
+
   function ensureContextMenu() {
     let menu = document.getElementById("structure-context-menu");
     if (menu) return menu;
@@ -8866,21 +8899,45 @@
     menu.dataset.contextCharacterId = data.characterId || "";
     const list = menu.querySelector(".structure-context-menu-list");
     if (list) {
-      list.innerHTML = type === "character-variant"
-        ? `
+      if (type === "story-root") {
+        list.innerHTML = `
+          <li class="structure-context-menu-item" data-menu-action="add-chapter" role="menuitem" tabindex="0">新建章节</li>
+        `;
+      } else if (type === "chapter") {
+        list.innerHTML = `
+          <li class="structure-context-menu-item" data-menu-action="add-large-scene" role="menuitem" tabindex="0">添加大场景</li>
+          <li class="structure-context-menu-item" data-menu-action="rename" role="menuitem" tabindex="0">改名</li>
+          <li class="structure-context-menu-item danger" data-menu-action="delete" role="menuitem" tabindex="0">删除</li>
+        `;
+      } else if (type === "large-scene") {
+        list.innerHTML = `
+          <li class="structure-context-menu-item" data-menu-action="add-small-scene" role="menuitem" tabindex="0">添加小场景</li>
+          <li class="structure-context-menu-item" data-menu-action="rename" role="menuitem" tabindex="0">改名</li>
+          <li class="structure-context-menu-item danger" data-menu-action="delete" role="menuitem" tabindex="0">删除</li>
+        `;
+      } else if (type === "small-scene") {
+        list.innerHTML = `
+          <li class="structure-context-menu-item" data-menu-action="open-small-scene" role="menuitem" tabindex="0">打开小场景画布</li>
+          <li class="structure-context-menu-item" data-menu-action="rename" role="menuitem" tabindex="0">改名</li>
+          <li class="structure-context-menu-item danger" data-menu-action="delete" role="menuitem" tabindex="0">删除</li>
+        `;
+      } else if (type === "character-variant") {
+        list.innerHTML = `
           <li class="structure-context-menu-item" data-menu-action="rename" role="menuitem" tabindex="0">改名</li>
           <li class="structure-context-menu-item" data-menu-action="copy" role="menuitem" tabindex="0">复制</li>
           <li class="structure-context-menu-item" data-menu-action="move-up" role="menuitem" tabindex="0">上移</li>
           <li class="structure-context-menu-item" data-menu-action="move-down" role="menuitem" tabindex="0">下移</li>
           <li class="structure-context-menu-item danger" data-menu-action="delete" role="menuitem" tabindex="0">删除</li>
-        `
-        : `
+        `;
+      } else {
+        list.innerHTML = `
           <li class="structure-context-menu-item" data-menu-action="rename" role="menuitem" tabindex="0">改名</li>
           <li class="structure-context-menu-item danger" data-menu-action="delete" role="menuitem" tabindex="0">删除</li>
         `;
+      }
     }
     const menuWidth = 168;
-    const menuHeight = type === "character-variant" ? 190 : 88;
+    const menuHeight = Math.max(48, (list?.children.length || 1) * 38 + 12);
     const safeX = Math.min(x, window.innerWidth - menuWidth - 8);
     const safeY = Math.min(y, window.innerHeight - menuHeight - 8);
     menu.style.left = `${Math.max(8, safeX)}px`;
@@ -8915,6 +8972,15 @@
     const trigger = target.closest("[data-context-menu]");
     if (!trigger) return false;
     const type = trigger.dataset.contextMenu;
+    if (type === "story-root") {
+      showContextMenu(
+        "story-root",
+        { id: trigger.dataset.projectId, name: trigger.dataset.name },
+        x,
+        y
+      );
+      return true;
+    }
     if (type === "chapter") {
       showContextMenu(
         "chapter",
@@ -8933,6 +8999,18 @@
         "large-scene",
         {
           id: trigger.dataset.largeSceneId,
+          name: trigger.dataset.name,
+        },
+        x,
+        y
+      );
+      return true;
+    }
+    if (type === "small-scene") {
+      showContextMenu(
+        "small-scene",
+        {
+          id: trigger.dataset.smallSceneId,
           name: trigger.dataset.name,
         },
         x,
@@ -11782,7 +11860,15 @@
       const specType = menu.dataset.contextSpecType;
       const characterId = menu.dataset.contextCharacterId;
       hideContextMenu();
-      if (action === "rename") {
+      if (action === "add-chapter" && type === "story-root") {
+        openChapterModal();
+      } else if (action === "add-large-scene" && type === "chapter") {
+        openLargeSceneModal(id, name);
+      } else if (action === "add-small-scene" && type === "large-scene") {
+        openSmallSceneCreateDialog(id, name);
+      } else if (action === "open-small-scene" && type === "small-scene") {
+        openSmallSceneRoute(id);
+      } else if (action === "rename") {
         if (type === "project-spec" && specType !== "custom") {
           if (typeof showToast === "function") showToast("仅自定义规格可改标签");
           return;
@@ -11804,6 +11890,8 @@
           await deleteChapter(id, name, largeSceneCount);
         } else if (type === "large-scene") {
           await deleteLargeScene(id, name);
+        } else if (type === "small-scene") {
+          await deleteSmallScene(id, name);
         } else if (type === "character") {
           await deleteCharacter(id, name);
         } else if (type === "character-variant") {

@@ -155,6 +155,17 @@ class FrontendRouteContractTests(unittest.TestCase):
         self.assertNotIn('data-api-action="archive-character-variant"', self.source)
         self.assertNotIn("function characterVariantList(", self.source)
 
+    def test_story_directory_has_context_menus_for_structure_nodes(self) -> None:
+        self.assertIn('data-context-menu="story-root"', self.source)
+        self.assertIn('data-context-menu="chapter"', self.source)
+        self.assertIn('data-context-menu="large-scene"', self.source)
+        self.assertIn('data-context-menu="small-scene"', self.source)
+        self.assertIn('data-menu-action="add-chapter"', self.source)
+        self.assertIn('data-menu-action="add-large-scene"', self.source)
+        self.assertIn('data-menu-action="add-small-scene"', self.source)
+        self.assertIn('data-menu-action="open-small-scene"', self.source)
+        self.assertIn("deleteSmallScene", self.source)
+
 
 if __name__ == "__main__":
     unittest.main()
