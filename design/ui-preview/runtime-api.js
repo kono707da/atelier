@@ -4492,6 +4492,7 @@
         </label>
         <div class="character-spec-editor-actions">
           <span class="spec-save-status" role="status"></span>
+          <button class="btn small" type="button" data-gap-action="spec-preview-upload" data-spec-value-id="${escapeHtml(value.id)}">上传预览</button>
           <button class="btn small primary" type="submit">保存此规格</button>
         </div>
       </form>
@@ -4796,7 +4797,7 @@
         ? characterTrashCard
         : characterCard;
       grid.innerHTML = characterListState.items.length
-        ? characterListState.items.map(cardRenderer).join("")
+        ? characterListState.items.map((character) => cardRenderer(character)).join("")
         : characterEmptyState(filtered);
       if (summary) {
         const heading = characterListState.trash
@@ -6516,7 +6517,7 @@
       ? escapeHtml((page.content || "").slice(0, 120) + "…")
       : escapeHtml(page.content || "暂无内容");
     return `
-      <article class="material-page-card" data-material-page-id="${escapeHtml(page.id)}">
+      <article class="material-page-card" data-material-page-id="${escapeHtml(page.id)}" data-reference-mode="${escapeHtml(page.reference_mode || "independent")}">
         <div class="material-page-card-preview">${preview}</div>
         <div class="material-page-card-body">
           <div class="material-page-card-head">
@@ -10194,33 +10195,49 @@
         await renderProductionProjects();
       } else if (pageKey === "characters") {
         await renderProductionCharacters();
+        await window.AtelierGapFillUI?.enhance(pageKey);
       } else if (pageKey === "character-database") {
         await renderCharacterDatabasePage();
+        await window.AtelierGapFillUI?.enhance(pageKey);
       } else if (pageKey === "materials") {
         await renderMaterialsPage();
+        await window.AtelierGapFillUI?.enhance(pageKey);
       } else if (pageKey === "material-detail") {
         await renderMaterialDetailPage();
+        await window.AtelierGapFillUI?.enhance(pageKey);
       } else if (pageKey === "developer") {
         // 开发进度由用户点击后按需读取，避免把文档状态写死在页面里。
       } else if (pageKey === "workflows") {
         await renderProductionWorkflows();
       } else if (pageKey === "workflow-canvas") {
         await renderProductionWorkflowCanvas();
+        await window.AtelierGapFillUI?.enhance(pageKey);
       } else if (pageKey === "batch") {
         const project = await resolveCurrentProject();
         applyProjectHeader(project, pageKey);
         await renderProductionBatch(project);
+        await window.AtelierGapFillUI?.enhance(pageKey, project);
       } else if (pageKey === "tasks") {
         const project = await resolveCurrentProject();
         applyProjectHeader(project, pageKey);
         await renderProductionTasks(project);
+        await window.AtelierGapFillUI?.enhance(pageKey, project);
+      } else if (pageKey === "library" || pageKey === "image-detail") {
+        await window.AtelierGapFillUI?.render(pageKey, null);
       } else if (pageKey === "settings") {
         await renderProductionSettings();
+        await window.AtelierGapFillUI?.render(pageKey, null);
       } else if (pageKey !== "settings") {
         const project = await resolveCurrentProject();
         applyProjectHeader(project, pageKey);
         if (pageKey === "overview") await renderProductionOverview(project);
-        else if (pageKey === "story-canvas") await renderProductionStoryCanvasV3(project);
+        else if (pageKey === "story-canvas") {
+          await renderProductionStoryCanvasV3(project);
+          await window.AtelierGapFillUI?.enhance(pageKey, project);
+        }
+        else if (["review", "assembly", "export"].includes(pageKey)) {
+          await window.AtelierGapFillUI?.render(pageKey, project);
+        }
         else applyProductionEmptyState();
       }
       const safety = document.getElementById("database-safety-status");

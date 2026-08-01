@@ -309,6 +309,22 @@ class _GalleryTestBase(unittest.TestCase):
 class GalleryIndexTests(_GalleryTestBase):
     """图库索引测试。"""
 
+    def test_phash_reads_current_storage_images_directory(self) -> None:
+        """当前产出目录 storage/images 中的文件可以计算感知哈希。"""
+        file_id = "current-storage-phash"
+        record = self._create_file(
+            file_id=file_id,
+            image_bytes=_make_png_with_pattern(64, 64, seed=17),
+        )
+        legacy_path = self.images_dir / record["storage_key"]
+        current_dir = Path(self._tmp.name) / "storage" / "images"
+        current_dir.mkdir(parents=True, exist_ok=True)
+        legacy_path.replace(current_dir / record["storage_key"])
+
+        phash = update_file_perceptual_hash(self.manager, file_id)
+
+        self.assertEqual(len(phash), 16)
+
     def test_index_single_file(self) -> None:
         """单文件索引写入 gallery_index 和 gallery_fts。"""
         file_id = "idx-file-1"

@@ -175,7 +175,12 @@ def extract_prompt_text(instance: dict[str, Any]) -> str:
 
 def _get_storage_path(manager: Any, storage_key: str) -> Path:
     """返回文件在本地图库中的物理路径。"""
-    return Path(manager.data_root) / "images" / storage_key
+    data_root = Path(manager.data_root)
+    current_path = data_root / "storage" / "images" / storage_key
+    legacy_path = data_root / "images" / storage_key
+    if current_path.exists() or not legacy_path.exists():
+        return current_path
+    return legacy_path
 
 
 def update_file_perceptual_hash(
