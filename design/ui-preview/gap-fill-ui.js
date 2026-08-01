@@ -730,6 +730,57 @@
     content.innerHTML = `<form id="gap-template-form" class="gap-template-form"><input type="hidden" name="template_id" /><label class="gap-field"><span>名称</span><input name="name" required /></label><label class="gap-field"><span>类型</span><select name="template_type"><option value="shot_template">镜头模板</option><option value="scene_pack">场景包</option><option value="transition_pack">转场包</option></select></label><label class="gap-field span-2"><span>说明</span><input name="description" /></label><label class="gap-field span-2"><span>标签（逗号分隔）</span><input name="tags" /></label><label class="gap-field span-2"><span>页面 JSON 数组</span><textarea name="pages" rows="4">[]</textarea></label><div class="gap-row-actions span-2"><button class="btn primary" type="submit">保存模板</button><button class="btn" type="button" data-gap-action="template-reset">清空表单</button></div></form><div class="gap-template-list">${templates.map(templateCard).join("") || '<p class="gap-muted">还没有素材模板。</p>'}</div>`;
   }
 
+  function materialKindLabel(kind) {
+    return ({ single: "普通素材", shot_template: "镜头模板", scene_pack: "场景包", transition_pack: "转场包" })[kind] || kind;
+  }
+
+  function materialPackItemMarkup(item) {
+    return `<article class="gap-pack-item" data-pack-item-id="${escapeHtml(item.id)}">
+      <div><strong>${escapeHtml(shortId(item.member_material_id))}</strong><small>素材 ${escapeHtml(item.member_material_id)}${item.member_material_page_id ? ` · 页 ${escapeHtml(shortId(item.member_material_page_id))}` : " · 使用整份素材"}</small></div>
+      <input class="field" name="slot_role" maxlength="80" value="${escapeHtml(item.slot_role || "")}" placeholder="用途，例如：背景" aria-label="成员用途" />
+      <input class="field" name="sort_order" type="number" min="0" value="${Number(item.sort_order) || 0}" aria-label="顺序" />
+      <button class="btn small" type="button" data-gap-action="pack-item-save">保存</button>
+      <button class="btn small danger-soft" type="button" data-gap-action="pack-item-delete">移除</button>
+    </article>`;
+  }
+
+  async function refreshMaterialModulePanel() {
+    const materialId = currentParams().get("material");
+    const formPanel = document.querySelector(".material-detail-form-panel");
+    if (!materialId || !formPanel) return;
+    let panel = document.getElementById("gap-material-module-panel");
+    if (!panel) {
+      panel = document.createElement("section");
+      panel.id = "gap-material-module-panel";
+      panel.className = "material-pages-panel gap-material-module-panel";
+      const pagesPanel = document.getElementById("material-pages-panel");
+      (pagesPanel || formPanel).insertAdjacentElement(pagesPanel ? "beforebegin" : "afterend", panel);
+    }
+    if (panel.dataset.loading === "1") return;
+    panel.dataset.loading = "1";
+    panel.innerHTML = loading("正在读取素材结构…");
+    try {
+      const [materialPayload, resolvedPayload, packPayload] = await Promise.all([
+        request(`/api/materials/${encodeURIComponent(materialId)}`),
+        request(`/api/materials/${encodeURIComponent(materialId)}/pages/resolved`),
+        request(`/api/materials/${encodeURIComponent(materialId)}/pack-items`),
+      ]);
+      const material = materialPayload.material || materialPayload;
+      const items = packPayload.items || [];
+      const isPack = material.kind && material.kind !== "single";
+      panel.innerHTML = `<div class="material-pages-header gap-material-module-head"><div><h3>素材结构</h3><p>普通素材可切换为模板或素材包；链接素材会自动解析来源页。</p></div><label class="gap-field gap-kind-field"><span>结构类型</span><select data-gap-material-kind data-material-id="${escapeHtml(materialId)}">${["single","shot_template","scene_pack","transition_pack"].map((kind) => `<option value="${kind}"${material.kind === kind ? " selected" : ""}>${materialKindLabel(kind)}</option>`).join("")}</select></label></div>
+        <div class="gap-material-resolution"><span>引用方式 <strong>${material.link_mode === "link" ? "链接引用" : "独立素材"}</strong></span><span>有效素材页 <strong>${Number(resolvedPayload.total) || 0}</strong></span><span>包成员 <strong>${items.length}</strong></span></div>
+        <div class="gap-pack-manager"${isPack ? "" : " hidden"}>
+          <form id="gap-pack-item-form" class="gap-pack-add-form"><input type="hidden" name="pack_material_id" value="${escapeHtml(materialId)}" /><label class="gap-field"><span>成员素材 ID</span><input name="member_material_id" required placeholder="粘贴要加入的素材 ID" /></label><label class="gap-field"><span>成员素材页 ID（可选）</span><input name="member_material_page_id" placeholder="留空表示整份素材" /></label><label class="gap-field"><span>用途</span><input name="slot_role" maxlength="80" placeholder="背景、构图、转场…" /></label><label class="gap-field"><span>顺序</span><input name="sort_order" type="number" min="0" value="${items.length}" /></label><button class="btn primary" type="submit">添加成员</button></form>
+          <div class="gap-pack-list">${items.map(materialPackItemMarkup).join("") || '<p class="gap-muted">这个素材包还没有成员。</p>'}</div>
+        </div>`;
+    } catch (error) {
+      panel.innerHTML = `<div class="gap-fill-error"><strong>素材结构加载失败</strong><span>${escapeHtml(error.message)}</span><button class="btn small" data-gap-action="material-module-refresh">重试</button></div>`;
+    } finally {
+      panel.dataset.loading = "0";
+    }
+  }
+
   function enhanceMaterialDetail() {
     document.querySelectorAll(".material-page-card[data-material-page-id]").forEach((card) => {
       if (card.querySelector("[data-gap-reference-mode]")) return;
@@ -744,6 +795,9 @@
       select.value = mode;
       actions.prepend(select);
     });
+    if (!document.getElementById("gap-material-module-panel")) {
+      refreshMaterialModulePanel().catch((error) => toast(error.message));
+    }
   }
 
   function enhanceCharacters() {
@@ -761,21 +815,54 @@
     const modal = ensureModal("gap-completeness-modal", "人物规格完整性", `<div id="gap-completeness-content">${loading("正在检查变体 × 规格矩阵…")}</div>`, "wide");
     showModal(modal.id);
     const payload = await request(`/api/characters/${encodeURIComponent(characterId)}/spec-completeness`);
-    const result = payload.completeness || {};
-    const matrix = result.matrix || {};
-    const rows = Object.values(matrix);
-    document.getElementById("gap-completeness-content").innerHTML = `<div class="gap-system-metrics"><div><span>变体</span><strong>${Number(result.variant_count) || rows.length}</strong></div><div><span>规格</span><strong>${Number(result.spec_count) || 0}</strong></div><div><span>完整单元格</span><strong>${Number(result.complete_cells) || 0}</strong></div><div><span>缺失单元格</span><strong>${Number(result.incomplete_cells) || 0}</strong></div></div><div class="gap-completeness-list">${rows.map((variant) => `<section><strong>${escapeHtml(variant.name)}</strong>${Object.values(variant.specs || {}).map((spec) => `<div class="${spec.missing?.length ? "missing" : "complete"}"><span>${escapeHtml(spec.name)}</span><small>${spec.missing?.length ? `缺少：${spec.missing.join("、")}` : "完整"}</small></div>`).join("")}</section>`).join("") || '<p class="gap-muted">没有可检查的规格。</p>'}</div>`;
+    const result = payload.completeness || payload || {};
+    const missing = result.missing_required || [];
+    const affectedPages = new Set(missing.flatMap((item) => item.affected_shot_pages || []).map((page) => page.shot_page_id));
+    const grouped = missing.reduce((output, item) => {
+      (output[item.variant_name || item.variant_id] ||= []).push(item);
+      return output;
+    }, {});
+    document.getElementById("gap-completeness-content").innerHTML = `<div class="gap-system-metrics"><div><span>变体</span><strong>${Number(result.variant_count) || 0}</strong></div><div><span>必填规格</span><strong>${Number(result.required_spec_count) || 0}</strong></div><div><span>缺失项</span><strong>${missing.length}</strong></div><div><span>受影响分镜页</span><strong>${affectedPages.size}</strong></div></div>${result.is_complete ? '<div class="gap-complete-banner">所有必填人物规格均已完整，可以用于项目页面。</div>' : `<div class="gap-completeness-list">${Object.entries(grouped).map(([variantName, items]) => `<section><strong>${escapeHtml(variantName)}</strong>${items.map((item) => `<div class="missing"><span>${escapeHtml(item.spec_label || item.spec_id)}</span><small>${(item.affected_shot_pages || []).length ? `影响 ${(item.affected_shot_pages || []).length} 个分镜页` : "尚未被分镜页使用"}</small></div>`).join("")}</section>`).join("") || '<p class="gap-muted">没有可检查的规格。</p>'}</div>`}`;
   }
 
   function showBatchPaste(characterId) {
-    const modal = ensureModal("gap-batch-paste-modal", "批量粘贴人物规格", `<form id="gap-batch-paste-form" class="gap-form-stack"><input type="hidden" name="character_id" /><label class="gap-field"><span>目标变体</span><select name="variant_id"></select></label><label class="gap-field"><span>JSON 数组或 TSV</span><textarea name="values" rows="14" placeholder='[{"spec_type":"full_body","prompt":"...","lora_name":"..."}]'></textarea><small>TSV 首行字段可用：spec_type、custom_label、prompt、lora_name、lora_weight、model_override、notes。</small></label><button class="btn primary" type="submit">解析并写入</button></form>`, "wide");
+    const modal = ensureModal("gap-batch-paste-modal", "批量粘贴人物规格", `<form id="gap-batch-paste-form" class="gap-form-stack"><input type="hidden" name="character_id" /><label class="gap-field"><span>默认目标变体</span><select name="variant_id"></select></label><label class="gap-field"><span>JSON 数组或 TSV</span><textarea name="values" rows="14" placeholder='[{"spec_type":"full_body","prompt":"...","lora_name":"..."}]'></textarea><small>可用字段：variant_id、spec_id、spec_type、custom_label、prompt、lora_name、lora_weight、model_override、notes。</small></label><div class="gap-batch-options"><label><input type="checkbox" name="apply_variant_defaults" checked /> 空值采用变体默认参数</label><label><input type="checkbox" name="dry_run" /> 只预览，不写入数据库</label></div><div class="gap-row-actions"><button class="btn primary" type="submit">解析并执行</button><button class="btn" type="button" data-gap-action="batch-paste-preview">先做预览</button></div><pre class="gap-result-box" data-batch-paste-result hidden></pre></form>`, "wide");
     const form = modal.querySelector("form");
     form.elements.character_id.value = characterId;
     form.elements.variant_id.innerHTML = '<option value="">正在读取变体…</option>';
     showModal(modal.id);
-    request(`/api/characters/${encodeURIComponent(characterId)}/variants`).then((payload) => {
-      form.elements.variant_id.innerHTML = (payload.items || []).map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`).join("");
+    request(`/api/characters/${encodeURIComponent(characterId)}/matrix`).then((payload) => {
+      form._specMatrix = payload;
+      form.elements.variant_id.innerHTML = (payload.variants || []).map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`).join("");
     }).catch((error) => toast(error.message));
+  }
+
+  function characterBatchEntries(form) {
+    const values = parseBatchPaste(form.elements.values.value);
+    const matrix = form._specMatrix || {};
+    return values.map((value) => {
+      let specId = value.spec_id || "";
+      if (!specId) {
+        const spec = (matrix.specs || []).find((item) => item.spec_type === value.spec_type && (!value.custom_label || item.custom_label === value.custom_label));
+        specId = spec?.id || "";
+      }
+      if (!specId) throw new Error(`找不到规格：${value.custom_label || value.spec_type || "未指定"}`);
+      const entry = { variant_id: value.variant_id || form.elements.variant_id.value, spec_id: specId };
+      ["prompt","lora_name","model_override","notes"].forEach((key) => { if (value[key] !== undefined) entry[key] = value[key]; });
+      if (value.lora_weight !== undefined && value.lora_weight !== "") entry.lora_weight = Number(value.lora_weight);
+      return entry;
+    });
+  }
+
+  async function submitCharacterBatchPaste(form, forceDryRun = null) {
+    const entries = characterBatchEntries(form);
+    const dryRun = forceDryRun === null ? form.elements.dry_run.checked : forceDryRun;
+    const payload = await request(`/api/characters/${encodeURIComponent(form.elements.character_id.value)}/spec-values/batch-paste`, { method: "POST", body: JSON.stringify({ entries, apply_variant_defaults: form.elements.apply_variant_defaults.checked, dry_run: dryRun }) });
+    const resultBox = form.querySelector("[data-batch-paste-result]");
+    resultBox.hidden = false;
+    resultBox.textContent = JSON.stringify({ 模式: dryRun ? "预览" : "已写入", 成功: payload.applied, 跳过: payload.skipped, 明细: payload.entries }, null, 2);
+    toast(dryRun ? `预览完成：${Number(payload.applied) || 0} 项可写入` : `批量写入完成：${Number(payload.applied) || 0} 项`);
+    return payload;
   }
 
   function parseBatchPaste(text) {
@@ -828,6 +915,23 @@
     return output;
   }
 
+  function collectLargeScenes(tree) {
+    return (tree?.chapters || []).flatMap((chapter) => (chapter.large_scenes || []).map((scene) => ({ ...scene, chapter_name: chapter.name })));
+  }
+
+  function sceneOptions(largeScenes, selectedLargeSceneId = "") {
+    const scenes = largeScenes.find((item) => String(item.id) === String(selectedLargeSceneId))?.small_scenes || [];
+    return '<option value="">未指定</option>' + scenes.map((scene) => `<option value="${escapeHtml(scene.id)}">${escapeHtml(scene.name)}</option>`).join("");
+  }
+
+  function sceneTransitionSection(largeScenes, groups) {
+    const firstLarge = largeScenes[0];
+    const allItems = groups.flatMap((group) => group.items.map((item, index) => ({ ...item, large_scene_name: group.largeScene.name, group_ids: group.items.map((entry) => entry.id), item_index: index })));
+    return `<section class="gap-scene-transition-panel"><div class="gap-section-title"><div><strong>大场景内转场</strong><span>管理小场景之间的镜头衔接顺序，与下方的分镜页转场分开保存。</span></div><span>${allItems.length} 个</span></div>
+      ${largeScenes.length ? `<form id="gap-scene-transition-form" class="gap-scene-transition-form"><label class="gap-field"><span>所属大场景</span><select name="large_scene_id" data-gap-large-scene-select>${largeScenes.map((scene) => `<option value="${escapeHtml(scene.id)}">${escapeHtml(scene.chapter_name)} / ${escapeHtml(scene.name)}</option>`).join("")}</select></label><label class="gap-field"><span>来源小场景</span><select name="source_small_scene_id" data-gap-source-scene>${sceneOptions(largeScenes, firstLarge?.id)}</select></label><label class="gap-field"><span>目标小场景</span><select name="target_small_scene_id" data-gap-target-scene>${sceneOptions(largeScenes, firstLarge?.id)}</select></label><label class="gap-field"><span>名称</span><input name="name" maxlength="80" value="场景转场" required /></label><label class="gap-field"><span>方式</span><select name="transition_type"><option value="cut">直接切换</option><option value="fade">淡入淡出</option><option value="dissolve">叠化</option><option value="wipe">划像</option><option value="slide">滑动</option><option value="custom">自定义</option></select></label><label class="gap-field"><span>持续帧</span><input name="duration_frames" type="number" min="0" value="0" /></label><button class="btn primary" type="submit">添加场景转场</button></form>` : '<p class="gap-muted">请先创建大场景和小场景。</p>'}
+      <div class="gap-scene-transition-list">${allItems.map((item) => `<article data-scene-transition-id="${escapeHtml(item.id)}" data-large-scene-id="${escapeHtml(item.large_scene_id)}" data-group-ids="${escapeHtml(JSON.stringify(item.group_ids))}"><div class="gap-scene-transition-copy"><small>${escapeHtml(item.large_scene_name)}</small><strong>${escapeHtml(shortId(item.source_small_scene_id))} → ${escapeHtml(shortId(item.target_small_scene_id))}</strong></div><input class="field" name="transition_name" maxlength="80" value="${escapeHtml(item.name)}" aria-label="转场名称" /><select class="field" name="transition_type">${["cut","fade","dissolve","wipe","slide","custom"].map((type) => `<option value="${type}"${item.transition_type === type ? " selected" : ""}>${type}</option>`).join("")}</select><input class="field" name="duration_frames" type="number" min="0" value="${Number(item.duration_frames) || 0}" aria-label="持续帧" /><div class="gap-row-actions"><button class="btn small" data-gap-action="scene-transition-move" data-direction="up"${item.item_index === 0 ? " disabled" : ""}>↑</button><button class="btn small" data-gap-action="scene-transition-move" data-direction="down"${item.item_index === item.group_ids.length - 1 ? " disabled" : ""}>↓</button><button class="btn small" data-gap-action="scene-transition-save">保存</button><button class="btn small danger-soft" data-gap-action="scene-transition-delete">删除</button></div></article>`).join("") || '<p class="gap-muted">还没有大场景内转场。</p>'}</div></section>`;
+  }
+
   async function openStoryTools() {
     const modal = ensureModal("gap-story-tools-modal", "转场与自动保存", `<div id="gap-story-tools-content">${loading("正在读取转场结构和自动保存历史…")}</div>`, "wide");
     showModal(modal.id);
@@ -845,9 +949,14 @@
     ]);
     const blocks = blocksPayload.blocks?.items || blocksPayload.blocks || [];
     const autosaves = autosavePayload.autosave?.items || [];
+    const largeScenes = collectLargeScenes(treePayload);
+    const groups = await Promise.all(largeScenes.map(async (largeScene) => {
+      const payload = await request(`/api/large-scenes/${encodeURIComponent(largeScene.id)}/transitions`);
+      return { largeScene, items: payload.items || [] };
+    }));
     const pages = collectShotPages(treePayload);
     const options = '<option value="">未指定</option>' + pages.map((page) => `<option value="${escapeHtml(page.id)}">${escapeHtml(page.name)}</option>`).join("");
-    content.innerHTML = `<div class="gap-story-tools-grid"><section><div class="gap-section-title"><strong>转场结构块</strong><span>${blocks.length} 个</span></div><form id="gap-transition-form" class="gap-form-stack"><div class="gap-two-fields"><label class="gap-field"><span>来源页</span><select name="source_page_id">${options}</select></label><label class="gap-field"><span>目标页</span><select name="target_page_id">${options}</select></label></div><div class="gap-two-fields"><label class="gap-field"><span>类型</span><select name="transition_type"><option value="cut">直接切换</option><option value="fade">淡入淡出</option><option value="dissolve">叠化</option><option value="wipe">划像</option><option value="custom">自定义</option></select></label><label class="gap-field"><span>持续帧</span><input name="duration_frames" type="number" min="0" value="0" /></label></div><button class="btn primary" type="submit">添加转场</button></form><div class="gap-transition-list">${blocks.map((block) => `<article><div><strong>${escapeHtml(block.transition_type)}</strong><small>${shortId(block.source_page_id)} → ${shortId(block.target_page_id)} · ${Number(block.duration_frames) || 0} 帧</small></div><button class="btn small danger-soft" data-gap-action="transition-delete" data-block-id="${escapeHtml(block.id)}">删除</button></article>`).join("") || '<p class="gap-muted">还没有转场结构块。</p>'}</div></section><section><div class="gap-section-title"><strong>自动保存历史</strong><button class="btn small" data-gap-action="autosave-now">保存当前画布恢复点</button></div><div class="gap-autosave-list">${autosaves.map((item) => `<article><span>${escapeHtml(item.operation_type || "update")}</span><div><strong>${escapeHtml(item.entity_type)} · ${shortId(item.entity_id)}</strong><small>${formatDate(item.created_at)}</small></div></article>`).join("") || '<p class="gap-muted">还没有自动保存记录。</p>'}</div></section></div>`;
+    content.innerHTML = `${sceneTransitionSection(largeScenes, groups)}<div class="gap-story-tools-grid"><section><div class="gap-section-title"><strong>分镜页转场结构块</strong><span>${blocks.length} 个</span></div><form id="gap-transition-form" class="gap-form-stack"><div class="gap-two-fields"><label class="gap-field"><span>来源页</span><select name="source_page_id">${options}</select></label><label class="gap-field"><span>目标页</span><select name="target_page_id">${options}</select></label></div><div class="gap-two-fields"><label class="gap-field"><span>类型</span><select name="transition_type"><option value="cut">直接切换</option><option value="fade">淡入淡出</option><option value="dissolve">叠化</option><option value="wipe">划像</option><option value="custom">自定义</option></select></label><label class="gap-field"><span>持续帧</span><input name="duration_frames" type="number" min="0" value="0" /></label></div><button class="btn primary" type="submit">添加分镜页转场</button></form><div class="gap-transition-list">${blocks.map((block) => `<article><div><strong>${escapeHtml(block.transition_type)}</strong><small>${shortId(block.source_page_id)} → ${shortId(block.target_page_id)} · ${Number(block.duration_frames) || 0} 帧</small></div><button class="btn small danger-soft" data-gap-action="transition-delete" data-block-id="${escapeHtml(block.id)}">删除</button></article>`).join("") || '<p class="gap-muted">还没有分镜页转场结构块。</p>'}</div></section><section><div class="gap-section-title"><strong>自动保存历史</strong><button class="btn small" data-gap-action="autosave-now">保存当前画布恢复点</button></div><div class="gap-autosave-list">${autosaves.map((item) => `<article><span>${escapeHtml(item.operation_type || "update")}</span><div><strong>${escapeHtml(item.entity_type)} · ${shortId(item.entity_id)}</strong><small>${formatDate(item.created_at)}</small></div></article>`).join("") || '<p class="gap-muted">还没有自动保存记录。</p>'}</div></section></div>`;
   }
 
   function enhanceWorkflowCanvas() {
@@ -1060,6 +1169,20 @@
       if (action === "legacy-create-job") { const payload = await request("/api/import/legacy/index", { method: "POST", body: JSON.stringify({ directory: document.getElementById("gap-legacy-directory")?.value || "", link_mode: document.getElementById("gap-legacy-link-mode")?.value || "hardlink", force: false, max_files: 200 }) }); renderLegacyJob(payload.job); return importResult(payload); }
       if (["legacy-status","legacy-pause","legacy-resume","legacy-cancel","legacy-execute"].includes(action)) { const suffix = ({"legacy-status":"","legacy-pause":"/pause","legacy-resume":"/resume","legacy-cancel":"/cancel","legacy-execute":"/execute"})[action]; const payload = await request(`/api/import/legacy/index/${encodeURIComponent(button.dataset.jobId)}${suffix}`, { method: action === "legacy-status" ? "GET" : "POST", body: action === "legacy-execute" ? JSON.stringify({ directory: document.getElementById("gap-legacy-directory")?.value || ".", link_mode: "hardlink", force: false, max_files: 200 }) : (action === "legacy-status" ? undefined : "{}") }); renderLegacyJob(payload.job); return importResult(payload); }
       if (action === "templates-open") return openTemplates();
+      if (action === "material-module-refresh") return refreshMaterialModulePanel();
+      if (action === "pack-item-save") {
+        const item = button.closest("[data-pack-item-id]");
+        await request(`/api/material-pack-items/${encodeURIComponent(item.dataset.packItemId)}`, { method: "PATCH", body: JSON.stringify({ slot_role: item.querySelector('[name="slot_role"]').value.trim(), sort_order: Number(item.querySelector('[name="sort_order"]').value) || 0 }) });
+        toast("素材包成员已更新");
+        return refreshMaterialModulePanel();
+      }
+      if (action === "pack-item-delete") {
+        const item = button.closest("[data-pack-item-id]");
+        if (!window.confirm("从素材包中移除这个成员？素材本身不会被删除。")) return;
+        await request(`/api/material-pack-items/${encodeURIComponent(item.dataset.packItemId)}`, { method: "DELETE" });
+        toast("素材包成员已移除");
+        return refreshMaterialModulePanel();
+      }
       if (action === "template-reset") { document.getElementById("gap-template-form")?.reset(); document.querySelector('#gap-template-form [name="template_id"]').value = ""; return; }
       if (action === "template-delete") { if (!window.confirm("删除这个素材模板？")) return; await request(`/api/material-templates/${encodeURIComponent(button.dataset.templateId)}`, { method: "DELETE" }); return refreshTemplates(); }
       if (action === "template-edit") { const payload = await request(`/api/material-templates/${encodeURIComponent(button.dataset.templateId)}`); const template = payload.template || {}; const form = document.getElementById("gap-template-form"); form.elements.template_id.value = template.id; form.elements.name.value = template.name || ""; form.elements.template_type.value = template.template_type || "shot_template"; form.elements.description.value = template.description || ""; form.elements.tags.value = (parseJson(template.tags_json, []) || []).join(", "); form.elements.pages.value = JSON.stringify(parseJson(template.pages_json, []), null, 2); return; }
@@ -1081,6 +1204,7 @@
       }
       if (action === "character-completeness") return showCompleteness(button.dataset.characterId);
       if (action === "character-batch-paste") return showBatchPaste(button.dataset.characterId);
+      if (action === "batch-paste-preview") return submitCharacterBatchPaste(button.closest("form"), true);
       if (action === "character-link") {
         const name = button.dataset.recordName;
         const characterName = window.prompt("人物库名称", name);
@@ -1091,6 +1215,29 @@
       }
       if (action === "story-tools-open") return openStoryTools();
       if (action === "transition-delete") { await request(`/api/transition-blocks/${encodeURIComponent(button.dataset.blockId)}`, { method: "DELETE" }); return refreshStoryTools(); }
+      if (action === "scene-transition-save") {
+        const item = button.closest("[data-scene-transition-id]");
+        await request(`/api/transitions/${encodeURIComponent(item.dataset.sceneTransitionId)}`, { method: "PATCH", body: JSON.stringify({ name: item.querySelector('[name="transition_name"]').value.trim(), transition_type: item.querySelector('[name="transition_type"]').value, duration_frames: Number(item.querySelector('[name="duration_frames"]').value) || 0 }) });
+        toast("场景转场已保存");
+        return refreshStoryTools();
+      }
+      if (action === "scene-transition-delete") {
+        const item = button.closest("[data-scene-transition-id]");
+        if (!window.confirm("删除这个大场景内转场？")) return;
+        await request(`/api/transitions/${encodeURIComponent(item.dataset.sceneTransitionId)}`, { method: "DELETE" });
+        toast("场景转场已删除");
+        return refreshStoryTools();
+      }
+      if (action === "scene-transition-move") {
+        const item = button.closest("[data-scene-transition-id]");
+        const ids = parseJson(item.dataset.groupIds, []);
+        const index = ids.indexOf(item.dataset.sceneTransitionId);
+        const target = button.dataset.direction === "up" ? index - 1 : index + 1;
+        if (index < 0 || target < 0 || target >= ids.length) return;
+        [ids[index], ids[target]] = [ids[target], ids[index]];
+        await request(`/api/large-scenes/${encodeURIComponent(item.dataset.largeSceneId)}/transitions/reorder`, { method: "PUT", body: JSON.stringify({ transition_ids: ids }) });
+        return refreshStoryTools();
+      }
       if (action === "autosave-now") { await request("/api/autosave/snapshots", { method: "POST", body: JSON.stringify({ project_id: projectId(), entity_type: "project", entity_id: projectId(), operation_type: "manual_checkpoint", payload: { url: window.location.search, saved_from: "frontend", surface: "story_canvas" } }) }); toast("画布恢复点已保存"); return refreshStoryTools(); }
       if (action === "workflow-validation-open") return openWorkflowValidation(button.dataset.workflowId);
       if (action === "workflow-validation-run") return runWorkflowValidation(button.dataset.workflowId);
@@ -1134,19 +1281,28 @@
         toast("素材模板已保存");
         return refreshTemplates();
       }
+      if (form.id === "gap-pack-item-form") {
+        event.preventDefault();
+        const packId = form.elements.pack_material_id.value;
+        await request(`/api/materials/${encodeURIComponent(packId)}/pack-items`, { method: "POST", body: JSON.stringify({ member_material_id: form.elements.member_material_id.value.trim(), member_material_page_id: form.elements.member_material_page_id.value.trim() || null, slot_role: form.elements.slot_role.value.trim(), sort_order: Number(form.elements.sort_order.value) || 0 }) });
+        toast("素材已加入素材包");
+        return refreshMaterialModulePanel();
+      }
       if (form.id === "gap-batch-paste-form") {
         event.preventDefault();
-        const values = parseBatchPaste(form.elements.values.value);
-        const payload = await request("/api/character-spec-values/batch-paste", { method: "POST", body: JSON.stringify({ character_id: form.elements.character_id.value, variant_id: form.elements.variant_id.value, spec_values: values }) });
-        toast(`批量写入完成：${Number(payload.result?.created) || 0} 新建，${Number(payload.result?.updated) || 0} 更新`);
-        closeModal("gap-batch-paste-modal");
-        window.location.reload();
-        return;
+        return submitCharacterBatchPaste(form);
       }
       if (form.id === "gap-transition-form") {
         event.preventDefault();
         await request("/api/transition-blocks", { method: "POST", body: JSON.stringify({ project_id: projectId(), source_page_id: form.elements.source_page_id.value || null, target_page_id: form.elements.target_page_id.value || null, transition_type: form.elements.transition_type.value, duration_frames: Number(form.elements.duration_frames.value) || 0, sort_order: 0 }) });
         toast("转场结构块已添加");
+        return refreshStoryTools();
+      }
+      if (form.id === "gap-scene-transition-form") {
+        event.preventDefault();
+        const largeSceneId = form.elements.large_scene_id.value;
+        await request(`/api/large-scenes/${encodeURIComponent(largeSceneId)}/transitions`, { method: "POST", body: JSON.stringify({ name: form.elements.name.value.trim(), transition_type: form.elements.transition_type.value, duration_frames: Number(form.elements.duration_frames.value) || 0, description: "", source_small_scene_id: form.elements.source_small_scene_id.value || null, target_small_scene_id: form.elements.target_small_scene_id.value || null }) });
+        toast("大场景内转场已添加");
         return refreshStoryTools();
       }
       if (form.id === "gap-blocker-form") {
@@ -1162,6 +1318,26 @@
   }
 
   async function handleChange(event) {
+    const largeSceneSelect = event.target.closest("[data-gap-large-scene-select]");
+    if (largeSceneSelect) {
+      const form = largeSceneSelect.closest("form");
+      const tree = await request(`/api/projects/${encodeURIComponent(projectId())}/story-tree`);
+      const options = sceneOptions(collectLargeScenes(tree), largeSceneSelect.value);
+      form.querySelector("[data-gap-source-scene]").innerHTML = options;
+      form.querySelector("[data-gap-target-scene]").innerHTML = options;
+      return;
+    }
+    const kindSelect = event.target.closest("[data-gap-material-kind]");
+    if (kindSelect) {
+      try {
+        await request(`/api/materials/${encodeURIComponent(kindSelect.dataset.materialId)}/kind`, { method: "PATCH", body: JSON.stringify({ kind: kindSelect.value }) });
+        toast(`素材结构已切换为${materialKindLabel(kindSelect.value)}`);
+        await refreshMaterialModulePanel();
+      } catch (error) {
+        toast(error.message);
+      }
+      return;
+    }
     const select = event.target.closest("[data-gap-reference-mode]");
     if (!select) return;
     try {

@@ -7627,10 +7627,40 @@
     }
   }
 
+  function projectDeletionImpactMessage(impact, permanent = false) {
+    const counts = impact?.counts || {};
+    const totals = impact?.totals || {};
+    const countLines = [
+      `章节 ${Number(counts.chapters) || 0} · 大场景 ${Number(counts.large_scenes) || 0} · 小场景 ${Number(counts.small_scenes) || 0}`,
+      `分镜页 ${Number(counts.shot_pages) || 0} · 关联素材 ${Number(counts.linked_materials) || 0} · 人物 ${Number(counts.characters) || 0}`,
+      `批次 ${Number(counts.batches) || 0} · 任务 ${Number(counts.tasks) || 0} · 图片实例 ${Number(counts.image_instances) || 0}`,
+      `历史记录 ${Number(totals.history) || 0} · 受影响项目数据共 ${Number(totals.affected) || 0} 项`,
+    ];
+    const warnings = Array.isArray(impact?.warnings) ? impact.warnings : [];
+    return [
+      permanent ? "永久删除后无法恢复。" : "项目将移入回收站，可以恢复。",
+      "",
+      ...countLines,
+      ...(warnings.length ? ["", ...warnings.map((warning) => `注意：${warning}`)] : []),
+    ].join("\n");
+  }
+
+  async function loadProjectDeletionImpact(projectId) {
+    const payload = await request(`/api/projects/${encodeURIComponent(projectId)}/deletion-impact`);
+    return payload.impact || payload;
+  }
+
   async function deleteProject(projectId, name) {
+    let impact;
+    try {
+      impact = await loadProjectDeletionImpact(projectId);
+    } catch (requestError) {
+      if (typeof showToast === "function") showToast(`无法读取删除影响：${requestError.message}`);
+      return;
+    }
     if (!await confirmDialog({
       title: `删除项目「${name}」`,
-      message: "项目将移入回收站，可恢复。继续删除？",
+      message: projectDeletionImpactMessage(impact, false),
       confirmText: "移入回收站",
       danger: true,
     })) {
@@ -7646,9 +7676,16 @@
   }
 
   async function permanentDeleteProject(projectId, name) {
+    let impact;
+    try {
+      impact = await loadProjectDeletionImpact(projectId);
+    } catch (requestError) {
+      if (typeof showToast === "function") showToast(`无法读取删除影响：${requestError.message}`);
+      return;
+    }
     if (!await confirmDialog({
       title: `永久删除「${name}」`,
-      message: "永久删除后无法恢复，项目数据将彻底清除。",
+      message: projectDeletionImpactMessage(impact, true),
       confirmText: "永久删除",
       danger: true,
     })) {

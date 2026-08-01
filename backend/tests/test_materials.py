@@ -662,7 +662,9 @@ class MaterialLinkModeTests(unittest.TestCase):
         self.assertEqual(copy["source_material_id"], source["id"])
         # 独立副本有自己的页面
         pages_resp = self.client.get(f"/api/materials/{copy['id']}/pages")
-        self.assertEqual(pages_resp.json()["total"], 1)
+        # 当前主线创建素材时会自动生成默认页，随后测试又添加一页；
+        # 独立副本应完整复制这两页。
+        self.assertEqual(pages_resp.json()["total"], 2)
 
     def test_link_copy_does_not_duplicate_pages(self) -> None:
         source = self._create_source_material()
@@ -681,10 +683,10 @@ class MaterialLinkModeTests(unittest.TestCase):
         resolved = self.client.get(
             f"/api/materials/{copy['id']}/pages/resolved"
         )
-        self.assertEqual(resolved.json()["total"], 1)
-        self.assertEqual(
-            resolved.json()["pages"][0]["name"],
+        self.assertEqual(resolved.json()["total"], 2)
+        self.assertIn(
             "源页面",
+            [page["name"] for page in resolved.json()["pages"]],
         )
 
     def test_default_mode_is_independent(self) -> None:

@@ -98,6 +98,35 @@ class GapFillFrontendContractTests(unittest.TestCase):
         ):
             self.assertIn(action, self.source)
 
+    def test_mod_01_project_delete_shows_backend_impact_before_confirmation(self) -> None:
+        self.assertIn("/deletion-impact", self.runtime)
+        self.assertIn("projectDeletionImpactMessage", self.runtime)
+        self.assertLess(
+            self.runtime.index("loadProjectDeletionImpact(projectId)"),
+            self.runtime.index("message: projectDeletionImpactMessage(impact, false)"),
+        )
+
+    def test_mod_02_material_structure_and_pack_controls_are_present(self) -> None:
+        for route in ("/pages/resolved", "/kind", "/pack-items", "/api/material-pack-items/"):
+            self.assertIn(route, self.source)
+        for action in ("pack-item-save", "pack-item-delete", "material-module-refresh"):
+            self.assertIn(action, self.source)
+        self.assertIn("data-gap-material-kind", self.source)
+
+    def test_mod_03_character_batch_paste_uses_canonical_matrix_contract(self) -> None:
+        self.assertIn("/matrix", self.source)
+        self.assertIn("/spec-values/batch-paste", self.source)
+        self.assertIn("apply_variant_defaults", self.source)
+        self.assertIn("dry_run", self.source)
+        self.assertNotIn('request("/api/character-spec-values/batch-paste"', self.source)
+
+    def test_mod_04_scene_transitions_are_distinct_from_page_transition_blocks(self) -> None:
+        self.assertIn("gap-scene-transition-form", self.source)
+        self.assertIn("scene-transition-save", self.source)
+        self.assertIn("scene-transition-move", self.source)
+        self.assertIn("/transitions/reorder", self.source)
+        self.assertIn("/api/transition-blocks", self.source)
+
     def test_story_tree_pages_are_collected_from_pages_arrays(self) -> None:
         self.assertIn('parentKey === "pages"', self.source)
         self.assertIn('value.small_scene_id !== undefined', self.source)

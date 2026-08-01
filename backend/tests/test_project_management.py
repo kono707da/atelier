@@ -667,17 +667,43 @@ class ProjectDeletionImpactTests(IsolatedTestCase):
         """项目存在文件记录时,应给出文件清理告警。"""
         create = self.client.post("/api/projects", json={"name": "文件项目"})
         project_id = create.json()["project"]["id"]
-        # 直接通过 manager 注入一条 file 记录,模拟生成产物
-        with self.manager.connection("test") as conn:
-            from uuid import uuid4
+        # 当前 files 是全局文件记录，项目归属由 image_instances 建立。
+        from uuid import uuid4
+        from backend.app.output_receiver import create_file_record, create_image_instance
 
-            file_id = str(uuid4())
-            conn.execute(
-                "INSERT INTO files (id, project_id, relative_path, original_filename, "
-                "content_hash, size_bytes, mime_type) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (file_id, project_id, "test.png", "test.png", "abc", 100, "image/png"),
-            )
+        chapter = self.manager.create_chapter(project_id, "第一章")
+        large_scene = self.manager.create_large_scene(chapter["id"], "大场景")
+        small_scene = self.manager.create_small_scene(large_scene["id"], "小场景")
+        shot_page = self.manager.create_shot_page(small_scene["id"], "分镜页")
+        file_id = str(uuid4())
+        create_file_record(
+            self.manager,
+            {
+                "file_id": file_id,
+                "storage_key": f"{file_id}.png",
+                "original_name": "test.png",
+                "content_hash": "abc",
+                "size_bytes": 100,
+                "mime_type": "image/png",
+            },
+        )
+        create_image_instance(
+            self.manager,
+            project_id=project_id,
+            shot_page_id=shot_page["id"],
+            task_id=None,
+            attempt_id=None,
+            file_id=file_id,
+            node_id=None,
+            workflow_version_id=None,
+            prompt_id=None,
+            width=64,
+            height=64,
+            img_format="PNG",
+            seed=1,
+            resolved_json=None,
+            snapshot_json=None,
+        )
 
         response = self.client.get(f"/api/projects/{project_id}/deletion-impact")
         impact = response.json()["impact"]

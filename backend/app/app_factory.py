@@ -210,9 +210,9 @@ from .gap_fill_2 import (
     VALID_TEMPLATE_TYPES,
     VALID_TRANSITION_TYPES,
     add_to_recycle_bin,
-    batch_paste_spec_values,
+    batch_paste_spec_values as gap_batch_paste_spec_values,
     check_directory_access,
-    check_spec_completeness,
+    check_spec_completeness as gap_check_spec_completeness,
     create_autosave_snapshot,
     create_blocking_issue,
     create_material_template,
@@ -921,7 +921,7 @@ class BatchPasteSpecValueEntry(BaseModel):
         return value
 
 
-class BatchPasteSpecValuesRequest(BaseModel):
+class CharacterBatchPasteSpecValuesRequest(BaseModel):
     entries: list[BatchPasteSpecValueEntry]
     apply_variant_defaults: bool = False
     dry_run: bool = False
@@ -1162,18 +1162,25 @@ class ReorderTransitionsRequest(BaseModel):
 
 
 class CreateShotPageRequest(BaseModel):
-    title: str = Field(min_length=1, max_length=120)
+    title: str | None = Field(default=None, min_length=1, max_length=120)
+    name: str | None = Field(default=None, min_length=1, max_length=120)
     branch_id: str | None = None
     description: str = Field(default="", max_length=500)
     prompt_text: str = Field(default="", max_length=50000)
     negative_prompt: str = Field(default="", max_length=20000)
 
-    @field_validator("title")
+    @field_validator("title", "name")
     @classmethod
-    def title_not_blank(cls, value: str) -> str:
-        if not value.strip():
+    def title_not_blank(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
             raise ValueError("分镜页标题不能为空。")
         return value
+
+    @model_validator(mode="after")
+    def title_or_name_required(self):
+        if not (self.title or self.name):
+            raise ValueError("分镜页标题不能为空。")
+        return self
 
 
 class UpdateShotPageRequest(BaseModel):
@@ -1734,7 +1741,7 @@ class MaterialPageReferenceModeRequest(BaseModel):
     mode: str
 
 
-class BatchPasteSpecValuesRequest(BaseModel):
+class GapBatchPasteSpecValuesRequest(BaseModel):
     character_id: str
     variant_id: str
     spec_values: list[dict]
@@ -4977,7 +4984,7 @@ def create_app(
 
     @app.post("/api/characters/{character_id}/spec-values/batch-paste")
     def batch_paste_spec_values(
-        character_id: str, request: BatchPasteSpecValuesRequest
+        character_id: str, request: CharacterBatchPasteSpecValuesRequest
     ) -> dict[str, object]:
         if manager.get_character(character_id) is None:
             raise HTTPException(status_code=404, detail="人物不存在。")
@@ -5005,6 +5012,7 @@ def create_app(
             raise HTTPException(status_code=400, detail=str(error)) from error
         return {
             "database_environment": manager.active_environment,
+            "completeness": result,
             **result,
         }
 
@@ -5258,12 +5266,12 @@ def create_app(
         status_code=status.HTTP_201_CREATED,
     )
     def create_material_version(
-        material_id: str, request: CreateMaterialVersionRequest
+        material_id: str, request: CreateMaterialVersionRequest | None = None
     ) -> dict[str, object]:
         if manager.get_material(material_id) is None:
             raise HTTPException(status_code=404, detail="素材不存在。")
         version = manager.create_material_version(
-            material_id, label=request.label
+            material_id, label=request.label if request else None
         )
         if version is None:
             raise HTTPException(status_code=404, detail="素材不存在。")
@@ -5281,6 +5289,7 @@ def create_app(
             "database_environment": manager.active_environment,
             "material_id": material_id,
             "items": items,
+            "versions": items,
             "total": len(items),
         }
 
@@ -5389,7 +5398,7 @@ def create_app(
             )
         except ValueError as error:
             msg = str(error)
-            if "不存在" in msg:
+            if msg in {"包素材不存在。", "成员素材不存在。"}:
                 raise HTTPException(status_code=404, detail=msg) from error
             raise HTTPException(status_code=422, detail=msg) from error
         return {
@@ -5883,7 +5892,7 @@ def create_app(
         try:
             shot_page = manager.create_shot_page(
                 small_scene_id,
-                request.title,
+                request.title or request.name or "",
                 branch_id=request.branch_id,
                 description=request.description,
                 prompt_text=request.prompt_text,
@@ -6310,6 +6319,7 @@ def create_app(
             "database_environment": manager.active_environment,
             "material_id": material_id,
             "pages": pages,
+            "total": len(pages),
         }
 
     @app.post("/api/materials/{material_id}/pages")
@@ -6330,6 +6340,7 @@ def create_app(
             raise HTTPException(status_code=code, detail=msg) from error
         return {
             "database_environment": manager.active_environment,
+            "page": page,
             **page,
         }
 
@@ -6341,6 +6352,7 @@ def create_app(
             raise HTTPException(status_code=404, detail="素材页不存在")
         return {
             "database_environment": manager.active_environment,
+            "page": page,
             **page,
         }
 
@@ -6362,6 +6374,7 @@ def create_app(
             raise HTTPException(status_code=404, detail="素材页不存在")
         return {
             "database_environment": manager.active_environment,
+            "page": page,
             **page,
         }
 
@@ -8733,15 +8746,15 @@ def create_app(
     @app.get("/api/characters/{character_id}/spec-completeness")
     def check_spec_completeness_api(character_id: str) -> dict[str, object]:
         """检查人物规格完整性，返回变体×规格的缺失项矩阵。"""
-        result = check_spec_completeness(manager, character_id)
+        result = gap_check_spec_completeness(manager, character_id)
         return {"database_environment": manager.active_environment, "completeness": result}
 
     # ── Gap-Fill 2: 批量粘贴 spec_value API ───────────────────────────
 
     @app.post("/api/character-spec-values/batch-paste")
-    def batch_paste_spec_values_api(request: BatchPasteSpecValuesRequest) -> dict[str, object]:
+    def batch_paste_spec_values_api(request: GapBatchPasteSpecValuesRequest) -> dict[str, object]:
         """批量创建或更新 spec_value。"""
-        result = batch_paste_spec_values(
+        result = gap_batch_paste_spec_values(
             manager,
             character_id=request.character_id,
             variant_id=request.variant_id,

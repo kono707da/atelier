@@ -3563,8 +3563,8 @@ class DatabaseManager:
                      WHERE bat.project_id = p.id) AS task_count,
                     (SELECT COUNT(*) FROM image_instances ii
                      WHERE ii.project_id = p.id) AS image_instance_count,
-                    (SELECT COUNT(*) FROM files f
-                     WHERE f.project_id = p.id) AS file_count
+                    (SELECT COUNT(DISTINCT ii.file_id) FROM image_instances ii
+                     WHERE ii.project_id = p.id) AS file_count
                 FROM projects p
                 WHERE p.id = ?
                 """,
@@ -6479,6 +6479,7 @@ class DatabaseManager:
                 SELECT m.id, m.name, m.material_type, m.description,
                        m.validation_status, m.preview_thumbnail_path,
                        m.archived_at, m.deleted_at, m.source_material_id,
+                       m.link_mode, m.kind,
                        m.created_at, m.updated_at
                 FROM materials m
                 {where_sql}
@@ -6520,6 +6521,7 @@ class DatabaseManager:
                        prompt_text, negative_prompt, validation_status, notes,
                        preview_original_path, preview_thumbnail_path,
                        archived_at, deleted_at, source_material_id,
+                       link_mode, kind,
                        created_at, updated_at
                 FROM materials
                 WHERE id = ? AND deleted_at IS NULL
@@ -6581,6 +6583,9 @@ class DatabaseManager:
             "notes": notes,
             "preview_original_path": None,
             "preview_thumbnail_path": None,
+            "source_material_id": None,
+            "link_mode": "independent",
+            "kind": "single",
             "created_at": now,
             "updated_at": now,
         }
@@ -8436,7 +8441,7 @@ class DatabaseManager:
             rows = connection.execute(
                 """SELECT id, material_id, name, description, content, prompt_text, negative_prompt,
                           preview_original_path, preview_thumbnail_path, source_page_id,
-                          sort_order, created_at, updated_at
+                          reference_mode, sort_order, created_at, updated_at
                    FROM material_pages
                    WHERE material_id = ?
                    ORDER BY sort_order ASC""",
@@ -8454,7 +8459,7 @@ class DatabaseManager:
             row = connection.execute(
                 """SELECT id, material_id, name, description, content, prompt_text, negative_prompt,
                           preview_original_path, preview_thumbnail_path, source_page_id,
-                          sort_order, created_at, updated_at
+                          reference_mode, sort_order, created_at, updated_at
                    FROM material_pages WHERE id = ?""",
                 (material_page_id,),
             ).fetchone()
