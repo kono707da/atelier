@@ -2581,7 +2581,7 @@ button {
 }
 
 .atelier-modal.character-detail-modal {
-  width: 92vw;
+  width: min(980px, calc(100vw - 32px));
   max-height: 90vh;
   display: flex;
   flex-direction: column;
@@ -2656,6 +2656,69 @@ button {
   gap: 14px;
 }
 
+.character-advanced-management {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(249, 250, 253, 0.82);
+}
+
+.character-advanced-management > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 13px 15px;
+  color: #556078;
+  cursor: pointer;
+  list-style: none;
+}
+
+.character-advanced-management > summary::-webkit-details-marker {
+  display: none;
+}
+
+.character-advanced-management > summary > span:first-child {
+  display: grid;
+  gap: 3px;
+}
+
+.character-advanced-management > summary strong {
+  color: #394358;
+  font-size: 11px;
+}
+
+.character-advanced-management > summary small,
+.character-advanced-hint {
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.character-advanced-management[open] .character-advanced-hint {
+  font-size: 0;
+}
+
+.character-advanced-management[open] .character-advanced-hint::after {
+  content: "收起";
+  font-size: 9px;
+}
+
+.character-advanced-content {
+  display: grid;
+  gap: 12px;
+  padding: 0 12px 12px;
+  border-top: 1px solid var(--line);
+}
+
+.character-advanced-content > section:first-child {
+  margin-top: 12px;
+}
+
+.character-advanced-tools {
+  justify-content: flex-end;
+  padding-top: 12px;
+}
+
 .character-expanded {
   display: flex;
   flex-direction: column;
@@ -2689,8 +2752,18 @@ button {
   font-size: 11px;
   font-weight: 600;
   background: #fff;
-  cursor: pointer;
+  cursor: grab;
   transition: all 0.15s ease;
+}
+
+.variant-tab:active {
+  cursor: grabbing;
+}
+
+.variant-tab.dragging {
+  opacity: 0.46;
+  transform: scale(0.97);
+  box-shadow: none;
 }
 
 .variant-tab:hover {

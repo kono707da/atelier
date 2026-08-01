@@ -125,6 +125,18 @@ class FrontendRouteContractTests(unittest.TestCase):
         self.assertIn(".stage3-flow-steps", styles)
         self.assertIn(".stage3-advanced-grid", styles)
 
+    def test_character_library_defaults_to_simple_editor(self) -> None:
+        self.assertNotIn('id="character-tag-filter"', self.source)
+        self.assertIn("管理人物形象和不同景别的生图参数", self.source)
+        self.assertIn("添加景别", self.source)
+        self.assertIn("character-advanced-management", self.source)
+        self.assertNotIn('placeholder="例如：近景特写"', self.source)
+        self.assertIn('draggable="true"', self.source)
+        self.assertIn('data-menu-action="copy"', self.source)
+        self.assertIn('data-menu-action="move-up"', self.source)
+        self.assertNotIn('data-api-action="archive-character-variant"', self.source)
+        self.assertNotIn("function characterVariantList(", self.source)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -4326,9 +4326,6 @@
     const total = stats.spec_total || 0;
     const variantCount = stats.variant_count != null ? stats.variant_count : (character.variant_count || 0);
     const completeness = total > 0 ? `${filled}/${total}` : "0/0";
-    const tags = Array.isArray(character.tags) ? character.tags : [];
-    const visibleTags = tags.slice(0, 3);
-    const extraTags = Math.max(0, tags.length - visibleTags.length);
     const isArchived = Boolean(character.archived_at);
     const hasCover = Boolean(character.cover_path);
     const initial = escapeHtml((character.name || "?").slice(0, 1).toUpperCase());
@@ -4351,13 +4348,9 @@
         </div>
         <div class="character-block-body">
           <div class="character-block-name">${escapeHtml(character.name)}</div>
-          <div class="character-block-meta">${variantCount} 个变体 · ${specCount} 个规格</div>
-          <div class="character-block-tags">
-            ${visibleTags.map((tag) => `<span class="character-mini-tag">${escapeHtml(tag)}</span>`).join("")}
-            ${extraTags ? `<span class="character-mini-tag">+${extraTags}</span>` : ""}
-          </div>
+          <div class="character-block-meta">${variantCount} 个形象 · ${specCount} 个景别</div>
           <div class="character-block-stats">
-            <span class="stats-pill ${filled > 0 ? "" : "muted"}">规格 ${completeness}</span>
+            <span class="stats-pill ${filled > 0 ? "" : "muted"}">景别 ${completeness}</span>
             <span class="character-card-time">${escapeHtml(characterDate(character.updated_at))}</span>
           </div>
           <div class="character-card-actions">
@@ -4392,7 +4385,7 @@
         </div>
         <div class="character-block-body">
           <div class="character-block-name">${escapeHtml(character.name)}</div>
-          <div class="character-block-meta">${variantCount} 个变体</div>
+          <div class="character-block-meta">${variantCount} 个形象</div>
           <div class="character-block-stats">
             <span class="character-card-time">删除于 ${escapeHtml(deletedAt)}</span>
           </div>
@@ -4472,7 +4465,7 @@
         </div>
         <label class="character-spec-field character-spec-field-wide">
           <span>提示词</span>
-          <textarea name="prompt" rows="3" placeholder="输入当前人物、当前变体在这个景别下使用的提示词">${escapeHtml(value.prompt || "")}</textarea>
+          <textarea name="prompt" rows="3" placeholder="输入当前人物、当前形象在这个景别下使用的提示词">${escapeHtml(value.prompt || "")}</textarea>
         </label>
         <div class="character-spec-field-grid">
           <label class="character-spec-field">
@@ -4495,7 +4488,7 @@
         <div class="character-spec-editor-actions">
           <span class="spec-save-status" role="status"></span>
           <button class="btn small" type="button" data-gap-action="spec-preview-upload" data-spec-value-id="${escapeHtml(value.id)}">上传预览</button>
-          <button class="btn small primary" type="submit">保存此规格</button>
+          <button class="btn small primary" type="submit">保存此景别</button>
         </div>
       </form>
     `;
@@ -4507,9 +4500,9 @@
     return `
       <section class="character-expanded" data-character-id="${escapeHtml(character.id)}">
         <div class="variant-tabs-bar">
-          <div class="variant-tabs" role="tablist">
+          <div class="variant-tabs" role="tablist" data-character-id="${escapeHtml(character.id)}">
             ${variants.map((v) => variantTab(v, v.id === activeVariantId)).join("")}
-            <button class="variant-tab-add" type="button" data-api-action="add-variant" data-character-id="${escapeHtml(character.id)}" aria-label="添加变体">+</button>
+            <button class="variant-tab-add" type="button" data-api-action="add-variant" data-character-id="${escapeHtml(character.id)}" aria-label="添加形象">+</button>
           </div>
           <form class="character-inline-form variant-tab-form" data-inline-action="create-variant" data-character-id="${escapeHtml(character.id)}" hidden>
             <input class="modal-input" name="name" maxlength="80" autocomplete="off" placeholder="例如：裙装" required />
@@ -4520,10 +4513,10 @@
         <div class="character-expanded-main">
           <div class="character-expanded-head">
             <div>
-              <div class="character-expanded-title">规格</div>
-              <div class="character-expanded-sub">${specs.length} 个规格 · 全局共享 · 当前变体：${escapeHtml(defaultVariant ? defaultVariant.name : "无")}</div>
+              <div class="character-expanded-title">景别规格</div>
+              <div class="character-expanded-sub">为每种形象分别填写全身、半身或特写参数 · 当前形象：${escapeHtml(defaultVariant ? defaultVariant.name : "无")}</div>
             </div>
-            <button class="btn small soft" type="button" data-api-action="add-spec" data-project-id="${escapeHtml(character.project_id)}">添加规格</button>
+            <button class="btn small primary" type="button" data-api-action="add-spec" data-project-id="${escapeHtml(character.project_id)}">添加景别</button>
           </div>
           <div
             class="character-spec-editor-list"
@@ -4532,19 +4525,16 @@
           >
             ${activeVariantId
               ? '<div class="character-spec-editor-loading">正在读取规格内容…</div>'
-              : '<div class="character-spec-editor-empty">请先创建一个形象变体。</div>'}
+              : '<div class="character-spec-editor-empty">请先创建一个形象。</div>'}
           </div>
           <form class="character-inline-form" data-inline-action="create-spec" data-project-id="${escapeHtml(character.project_id)}" hidden>
-            <label class="label">类型</label>
+            <label class="label">景别</label>
             <select class="modal-input" name="spec_type">
               <option value="full_body">全身</option>
               <option value="half_body">半身</option>
               <option value="close_up">特写</option>
-              <option value="custom">自定义</option>
             </select>
-            <label class="label">自定义标签（仅自定义类型需要）</label>
-            <input class="modal-input" name="custom_label" maxlength="80" autocomplete="off" placeholder="例如：近景特写" />
-            <button class="btn small primary" type="submit">创建</button>
+            <button class="btn small primary" type="submit">创建景别</button>
             <button class="btn small" type="button" data-api-action="cancel-add-spec">取消</button>
           </form>
         </div>
@@ -4564,10 +4554,10 @@
       if (list.dataset.activeVariantId !== variantId) return;
       list.innerHTML = payload.total
         ? payload.items.map(specValueEditor).join("")
-        : '<div class="character-spec-editor-empty">还没有规格。请先点击右上角“添加规格”。</div>';
+        : '<div class="character-spec-editor-empty">还没有景别。请先点击右上角“添加景别”。</div>';
       const sub = modal.querySelector(".character-expanded-sub");
       if (sub) {
-        sub.textContent = `${payload.total} 个规格 · 全局共享 · 当前变体：${variantName || ""}`;
+        sub.textContent = `${payload.total} 个景别 · 当前形象：${variantName || ""}`;
       }
     } catch (error) {
       if (list.dataset.activeVariantId !== variantId) return;
@@ -4587,6 +4577,8 @@
         class="variant-tab${isActive ? " active" : ""}"
         type="button"
         role="tab"
+        draggable="true"
+        title="拖拽排序；右键进行复制、移动或删除"
         data-api-action="select-variant"
         data-variant-id="${escapeHtml(variant.id)}"
         data-variant-name="${escapeHtml(variant.name)}"
@@ -4630,10 +4622,6 @@
             <span>⌕</span>
             <input id="characters-search-input" type="search" value="${escapeHtml(state.q)}" placeholder="搜索人物名称或描述" style="border:0;outline:0;background:transparent;flex:1;font-size:11px;color:#4d576b" />
           </div>
-          <div class="character-tag-filter-wrap" style="display:flex;align-items:center;gap:6px">
-            <input id="character-tag-filter" class="modal-input" type="text" list="character-tag-filter-options" maxlength="40" value="${escapeHtml(state.tag)}" placeholder="标签筛选" style="height:34px;padding:0 8px;font-size:11px;width:140px" />
-            <datalist id="character-tag-filter-options"></datalist>
-          </div>
           <label class="projects-filter-label" style="display:flex;align-items:center;gap:6px;color:#7d8698;font-size:10px">
             <span>排序</span>
             <select id="characters-sort-select" class="modal-input" style="height:34px;padding:0 8px;font-size:11px">
@@ -4644,7 +4632,6 @@
           <button class="btn ${state.archived ? "" : "soft"}" type="button" data-api-action="characters-toggle-archived" aria-pressed="${state.archived ? "true" : "false"}">${state.archived ? "显示活跃" : "显示归档"}</button>
           <button class="btn ${state.trash ? "danger-soft" : ""}" type="button" data-api-action="characters-toggle-trash" aria-pressed="${state.trash ? "true" : "false"}">回收站</button>
           <button class="btn soft" type="button" data-api-action="characters-back-to-active" hidden>返回活跃</button>
-          <button class="btn primary" type="button" data-api-action="open-character-modal">新建人物</button>
         </div>
       </section>
     `;
@@ -4844,7 +4831,8 @@
     const subtitle = header?.querySelector(".page-subtitle");
     const actions = header?.querySelector(".header-actions");
     if (title) title.textContent = "人物库";
-    if (subtitle) subtitle.textContent = "管理全局人物、形象变体与景别规格。";
+    characterListState.tag = "";
+    if (subtitle) subtitle.textContent = "管理人物形象和不同景别的生图参数。";
     if (actions) {
       actions.innerHTML = '<button class="btn primary" type="button" data-api-action="open-character-modal">新建人物</button>';
     }
@@ -7050,65 +7038,13 @@
       : '<span class="character-tags-empty">暂无标签</span>';
   }
 
-  function characterVariantListItem(variant, index, total) {
-    const isDefault = Number(variant.is_default) === 1;
-    const isArchived = Boolean(variant.archived_at);
-    const hasPreview = Boolean(variant.preview_original_path || variant.preview_thumbnail_path);
-    const previewHtml = hasPreview
-      ? `<img src="${API.characterVariantPreviewThumbnail(variant.id)}" alt="${escapeHtml(variant.name)} 预览" loading="lazy" decoding="async" />`
-      : `<span class="character-variant-preview-placeholder">无预览</span>`;
-    return `
-      <article class="character-variant-list-item" data-variant-id="${escapeHtml(variant.id)}" data-variant-name="${escapeHtml(variant.name)}">
-        <div class="character-variant-preview">${previewHtml}</div>
-        <div class="character-variant-info">
-          <div class="character-variant-info-head">
-            <span class="character-variant-info-name">${escapeHtml(variant.name)}</span>
-            ${isDefault ? '<span class="character-variant-default-badge">默认</span>' : ""}
-            ${isArchived ? '<span class="character-variant-archived-badge">已归档</span>' : ""}
-          </div>
-          <div class="character-variant-info-meta">序 ${escapeHtml(String(variant.sort_order || 0))}</div>
-        </div>
-        <div class="character-variant-list-actions">
-          <button class="btn small soft" type="button" data-api-action="upload-variant-preview" data-variant-id="${escapeHtml(variant.id)}" data-variant-name="${escapeHtml(variant.name)}">${hasPreview ? "换预览" : "加预览"}</button>
-          ${hasPreview ? `<button class="btn small danger-soft" type="button" data-api-action="remove-variant-preview" data-variant-id="${escapeHtml(variant.id)}">移除预览</button>` : ""}
-          <button class="btn small" type="button" data-api-action="copy-character-variant" data-variant-id="${escapeHtml(variant.id)}" data-variant-name="${escapeHtml(variant.name)}">复制</button>
-          ${isArchived
-            ? `<button class="btn small soft" type="button" data-api-action="restore-character-variant" data-variant-id="${escapeHtml(variant.id)}" data-variant-name="${escapeHtml(variant.name)}">恢复</button>`
-            : `<button class="btn small soft" type="button" data-api-action="archive-character-variant" data-variant-id="${escapeHtml(variant.id)}" data-variant-name="${escapeHtml(variant.name)}">归档</button>`}
-          <button class="btn small soft" type="button" data-api-action="move-variant-up" data-variant-id="${escapeHtml(variant.id)}" data-character-id="" ${index === 0 ? "disabled" : ""}>上移</button>
-          <button class="btn small soft" type="button" data-api-action="move-variant-down" data-variant-id="${escapeHtml(variant.id)}" data-character-id="" ${index === total - 1 ? "disabled" : ""}>下移</button>
-          <button class="btn small danger-soft" type="button" data-api-action="delete-character-variant" data-variant-id="${escapeHtml(variant.id)}" data-variant-name="${escapeHtml(variant.name)}" data-is-default="${isDefault ? "1" : "0"}">删除</button>
-        </div>
-      </article>
-    `;
-  }
-
-  function characterVariantList(character, variants) {
-    return `
-      <section class="character-variant-list-section">
-        <div class="character-expanded-head">
-          <div>
-            <div class="character-expanded-title">形象变体</div>
-            <div class="character-expanded-sub">${variants.length} 个变体 · 点击「+」添加新变体</div>
-          </div>
-          <button class="btn small soft" type="button" data-api-action="add-variant" data-character-id="${escapeHtml(character.id)}">添加变体</button>
-        </div>
-        <div class="character-variant-list" id="character-variant-list">
-          ${variants.length
-            ? variants.map((v, i) => characterVariantListItem(v, i, variants.length)).join("")
-            : '<div class="character-spec-editor-empty">还没有形象变体，点击下方变体标签栏「+」添加。</div>'}
-        </div>
-      </section>
-    `;
-  }
-
   function characterMatrixSection() {
     return `
       <section class="character-matrix-section">
         <div class="character-expanded-head">
           <div>
-            <div class="character-expanded-title">规格矩阵</div>
-            <div class="character-expanded-sub">横轴为规格，纵轴为变体，可批量编辑。</div>
+            <div class="character-expanded-title">景别矩阵</div>
+            <div class="character-expanded-sub">横轴为景别，纵轴为形象，可批量编辑。</div>
           </div>
           <button class="btn small primary" type="button" data-api-action="save-character-matrix" disabled>保存全部修改</button>
         </div>
@@ -7137,7 +7073,7 @@
           <table class="character-matrix-table">
             <thead>
               <tr>
-                <th class="character-matrix-corner">变体 / 规格</th>
+                <th class="character-matrix-corner">形象 / 景别</th>
                 ${specs.map((spec) => `<th>${escapeHtml(specLabel(spec))}</th>`).join("")}
               </tr>
             </thead>
@@ -7263,19 +7199,23 @@
           ${characterDetailCover(character)}
           <div class="header-name">
             <div class="header-name-text">${escapeHtml(character.name)}</div>
-            <div class="header-name-sub">${stats.variant_count} 个变体 · ${specsPayload.total} 个规格 · 规格 ${stats.spec_filled}/${stats.spec_total}</div>
+            <div class="header-name-sub">${stats.variant_count} 个形象 · ${specsPayload.total} 个景别 · 已填写 ${stats.spec_filled}/${stats.spec_total}</div>
           </div>
           <button class="character-detail-modal-close" type="button" data-api-action="close-character-detail-modal" aria-label="关闭">×</button>
         </div>
         <div class="character-detail-modal-scroll" id="character-detail-modal-scroll">
-          ${characterTagsSection(character)}
-          ${characterVariantList(character, variantsPayload.items)}
           ${characterExpandedPanel(character, variantsPayload.items, specsPayload.items)}
-          ${characterMatrixSection()}
+          <details class="character-advanced-management">
+            <summary>
+              <span><strong>高级管理</strong><small>批量检查和规格矩阵</small></span>
+              <span class="character-advanced-hint">展开</span>
+            </summary>
+            <div class="character-advanced-content">
+              ${characterMatrixSection()}
+            </div>
+          </details>
         </div>
       `;
-      renderCharacterDetailTags(body.querySelector(".character-tags-section"));
-      bindCharacterTagAddInput(body.querySelector(".character-tag-add-input"), characterId);
       if (defaultVariant) {
         await renderVariantSpecValues(defaultVariant.id, defaultVariant.name);
       }
@@ -8102,7 +8042,7 @@
       <section class="atelier-modal" role="dialog" aria-modal="true" aria-labelledby="new-character-title">
         <div class="atelier-modal-icon">CH</div>
         <h2 id="new-character-title">新建人物</h2>
-        <p>输入人物名称。人物创建后会自动附带「默认」形象变体。</p>
+        <p>输入人物名称。创建后会自动附带一个「默认」形象。</p>
         <form id="new-character-form">
           <label class="label" for="new-character-name">人物名称</label>
           <input id="new-character-name" class="modal-input" name="name" maxlength="80" autocomplete="off" placeholder="例如：角色 A" required />
@@ -8324,9 +8264,9 @@
     const context = modal.querySelector("#character-copy-context");
     const title = modal.querySelector("h2");
     const submitBtn = modal.querySelector('button[type="submit"]');
-    if (title) title.textContent = "复制变体";
-    if (context) context.textContent = `将「${currentName}」复制为新变体，包含规格值。`;
-    if (submitBtn) submitBtn.textContent = "复制变体";
+    if (title) title.textContent = "复制形象";
+    if (context) context.textContent = `将「${currentName}」复制为新形象，并保留景别内容。`;
+    if (submitBtn) submitBtn.textContent = "复制形象";
     error.textContent = "";
     nameInput.value = `${currentName} 副本`;
     modal.hidden = false;
@@ -8367,7 +8307,7 @@
       if (target === "variant") {
         const variantId = modal.dataset.variantId;
         if (!variantId) {
-          error.textContent = "未指定要复制的变体。";
+          error.textContent = "未指定要复制的形象。";
           return;
         }
         await request(API.characterVariantCopy(variantId), {
@@ -8376,7 +8316,7 @@
         });
         closeCharacterCopyModal();
         await refreshCharacterDetail();
-        if (typeof showToast === "function") showToast(`变体已复制为「${name}」`);
+        if (typeof showToast === "function") showToast(`形象已复制为「${name}」`);
       } else {
         const characterId = modal.dataset.characterId;
         if (!characterId) {
@@ -8396,7 +8336,7 @@
       nameInput.focus();
     } finally {
       submit.disabled = false;
-      submit.textContent = modal.dataset.copyTarget === "variant" ? "复制变体" : "复制人物";
+      submit.textContent = modal.dataset.copyTarget === "variant" ? "复制形象" : "复制人物";
     }
   }
 
@@ -8461,11 +8401,11 @@
 
   async function deleteCharacterVariant(variantId, name, isDefault) {
     if (isDefault) {
-      if (typeof showToast === "function") showToast("默认形象变体不可删除");
+      if (typeof showToast === "function") showToast("默认形象不可删除");
       return;
     }
     if (!await confirmDialog({
-      title: `删除形象变体「${name}」`,
+      title: `删除形象「${name}」`,
       message: "此操作无法撤销。",
       confirmText: "删除",
       danger: true,
@@ -8475,7 +8415,7 @@
     try {
       await request(API.characterVariant(variantId), { method: "DELETE" });
       await refreshCharacterDetail();
-      if (typeof showToast === "function") showToast(`形象变体「${name}」已删除`);
+      if (typeof showToast === "function") showToast(`形象「${name}」已删除`);
     } catch (requestError) {
       if (typeof showToast === "function") showToast(requestError.message);
     }
@@ -8560,10 +8500,20 @@
     }
   }
 
+  async function persistCharacterVariantOrder(characterId, variantIds) {
+    if (!characterId || !variantIds.length) return;
+    await request(API.characterVariantsReorder(characterId), {
+      method: "PUT",
+      body: JSON.stringify({ variant_ids: variantIds }),
+    });
+    await refreshCharacterDetail();
+    if (typeof showToast === "function") showToast("形象顺序已更新");
+  }
+
   async function reorderCharacterVariants(characterId, variantId, direction) {
     const modal = document.getElementById("character-detail-modal");
     if (!modal || modal.hidden) return;
-    const items = [...modal.querySelectorAll(".character-variant-list-item")];
+    const items = [...modal.querySelectorAll(".variant-tabs .variant-tab[data-variant-id]")];
     const index = items.findIndex((item) => item.dataset.variantId === variantId);
     if (index < 0) return;
     const swapIndex = direction === "up" ? index - 1 : index + 1;
@@ -8571,15 +8521,69 @@
     const variantIds = items.map((item) => item.dataset.variantId);
     [variantIds[index], variantIds[swapIndex]] = [variantIds[swapIndex], variantIds[index]];
     try {
-      await request(API.characterVariantsReorder(characterId), {
-        method: "PUT",
-        body: JSON.stringify({ variant_ids: variantIds }),
-      });
-      await refreshCharacterDetail();
-      if (typeof showToast === "function") showToast("变体顺序已更新");
+      await persistCharacterVariantOrder(characterId, variantIds);
     } catch (error) {
       if (typeof showToast === "function") showToast(error.message);
     }
+  }
+
+  let characterVariantDragState = null;
+
+  function initCharacterVariantDrag() {
+    document.addEventListener("dragstart", (event) => {
+      const tab = event.target.closest(".variant-tab[data-variant-id]");
+      const tabs = tab?.closest(".variant-tabs[data-character-id]");
+      if (!tab || !tabs) return;
+      characterVariantDragState = {
+        tab,
+        tabs,
+        characterId: tabs.dataset.characterId,
+        originalIds: [...tabs.querySelectorAll(".variant-tab[data-variant-id]")].map((item) => item.dataset.variantId),
+      };
+      tab.classList.add("dragging");
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", tab.dataset.variantId);
+    });
+
+    document.addEventListener("dragover", (event) => {
+      const state = characterVariantDragState;
+      const tabs = event.target.closest(".variant-tabs[data-character-id]");
+      if (!state || tabs !== state.tabs) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+      const target = event.target.closest(".variant-tab[data-variant-id]");
+      const addButton = tabs.querySelector(".variant-tab-add");
+      if (!target || target === state.tab) {
+        if (!target && addButton) tabs.insertBefore(state.tab, addButton);
+        return;
+      }
+      const rect = target.getBoundingClientRect();
+      const insertAfter = event.clientX > rect.left + rect.width / 2;
+      tabs.insertBefore(state.tab, insertAfter ? target.nextSibling : target);
+    });
+
+    document.addEventListener("drop", async (event) => {
+      const state = characterVariantDragState;
+      const tabs = event.target.closest(".variant-tabs[data-character-id]");
+      if (!state || tabs !== state.tabs) return;
+      event.preventDefault();
+      const variantIds = [...tabs.querySelectorAll(".variant-tab[data-variant-id]")].map((item) => item.dataset.variantId);
+      state.tab.classList.remove("dragging");
+      characterVariantDragState = null;
+      if (variantIds.join("|") === state.originalIds.join("|")) return;
+      try {
+        await persistCharacterVariantOrder(state.characterId, variantIds);
+      } catch (error) {
+        await refreshCharacterDetail();
+        if (typeof showToast === "function") showToast(error.message);
+      }
+    });
+
+    document.addEventListener("dragend", () => {
+      if (!characterVariantDragState) return;
+      characterVariantDragState.tab.classList.remove("dragging");
+      characterVariantDragState = null;
+    });
   }
 
   async function refreshExpandedOrAll() {
@@ -8652,7 +8656,7 @@
     chapter: "章节",
     "large-scene": "大场景",
     character: "人物",
-    "character-variant": "形象变体",
+    "character-variant": "形象",
     "project-spec": "自定义规格标签",
   };
 
@@ -8824,8 +8828,24 @@
     menu.dataset.contextIsDefault =
       data.isDefault ? "1" : "";
     menu.dataset.contextSpecType = data.specType || "";
+    menu.dataset.contextCharacterId = data.characterId || "";
+    const list = menu.querySelector(".structure-context-menu-list");
+    if (list) {
+      list.innerHTML = type === "character-variant"
+        ? `
+          <li class="structure-context-menu-item" data-menu-action="rename" role="menuitem" tabindex="0">改名</li>
+          <li class="structure-context-menu-item" data-menu-action="copy" role="menuitem" tabindex="0">复制</li>
+          <li class="structure-context-menu-item" data-menu-action="move-up" role="menuitem" tabindex="0">上移</li>
+          <li class="structure-context-menu-item" data-menu-action="move-down" role="menuitem" tabindex="0">下移</li>
+          <li class="structure-context-menu-item danger" data-menu-action="delete" role="menuitem" tabindex="0">删除</li>
+        `
+        : `
+          <li class="structure-context-menu-item" data-menu-action="rename" role="menuitem" tabindex="0">改名</li>
+          <li class="structure-context-menu-item danger" data-menu-action="delete" role="menuitem" tabindex="0">删除</li>
+        `;
+    }
     const menuWidth = 168;
-    const menuHeight = 88;
+    const menuHeight = type === "character-variant" ? 190 : 88;
     const safeX = Math.min(x, window.innerWidth - menuWidth - 8);
     const safeY = Math.min(y, window.innerHeight - menuHeight - 8);
     menu.style.left = `${Math.max(8, safeX)}px`;
@@ -8850,6 +8870,7 @@
       menu.dataset.contextExtra = "";
       menu.dataset.contextIsDefault = "";
       menu.dataset.contextSpecType = "";
+      menu.dataset.contextCharacterId = "";
       menu.style.left = "";
       menu.style.top = "";
     }, 140);
@@ -8897,12 +8918,14 @@
       return true;
     }
     if (type === "character-variant") {
+      const tabs = trigger.closest(".variant-tabs[data-character-id]");
       showContextMenu(
         "character-variant",
         {
           id: trigger.dataset.variantId,
           name: trigger.dataset.name,
           isDefault: trigger.dataset.isDefault === "1",
+          characterId: tabs?.dataset.characterId || "",
         },
         x,
         y
@@ -8985,6 +9008,7 @@
   }
 
   initContextMenu();
+  initCharacterVariantDrag();
 
   // ── 大场景拖动交互 ─────────────────────────────────────────
   let dragState = null;
@@ -11721,6 +11745,7 @@
       const largeSceneCount = Number(menu.dataset.contextExtra || 0);
       const isDefault = menu.dataset.contextIsDefault === "1";
       const specType = menu.dataset.contextSpecType;
+      const characterId = menu.dataset.contextCharacterId;
       hideContextMenu();
       if (action === "rename") {
         if (type === "project-spec" && specType !== "custom") {
@@ -11735,6 +11760,10 @@
         } else {
           openRenameModal(type, id, name);
         }
+      } else if (action === "copy" && type === "character-variant") {
+        openCharacterVariantCopyModal(id, name);
+      } else if ((action === "move-up" || action === "move-down") && type === "character-variant") {
+        await reorderCharacterVariants(characterId, id, action === "move-up" ? "up" : "down");
       } else if (action === "delete") {
         if (type === "chapter") {
           await deleteChapter(id, name, largeSceneCount);
@@ -12972,7 +13001,7 @@
       form.hidden = true;
       form.reset();
       await refreshCharacterDetail();
-      if (typeof showToast === "function") showToast(`形象变体「${name}」已创建`);
+      if (typeof showToast === "function") showToast(`形象「${name}」已创建`);
     } catch (requestError) {
       error.textContent = requestError.message;
       input.focus();
@@ -12988,7 +13017,9 @@
     const submit = form.querySelector('button[type="submit"]');
     const error = submitInlineError(form);
     const specType = select.value;
-    const customLabel = (labelInput.value || "").trim().replace(/\s+/g, " ");
+    const customLabel = labelInput
+      ? (labelInput.value || "").trim().replace(/\s+/g, " ")
+      : "";
     if (specType === "custom" && !customLabel) {
       error.textContent = "自定义规格必须填写标签。";
       labelInput.focus();
@@ -13005,13 +13036,13 @@
       form.hidden = true;
       form.reset();
       await refreshCharacterDetail();
-      if (typeof showToast === "function") showToast("规格已创建");
+      if (typeof showToast === "function") showToast("景别已创建");
     } catch (requestError) {
       error.textContent = requestError.message;
       select.focus();
     } finally {
       submit.disabled = false;
-      submit.textContent = "创建";
+      submit.textContent = "创建景别";
     }
   }
 
@@ -13062,13 +13093,13 @@
       }
       status.textContent = "已保存";
       status.className = "spec-save-status success";
-      if (typeof showToast === "function") showToast("人物规格已保存");
+      if (typeof showToast === "function") showToast("人物景别已保存");
     } catch (requestError) {
       status.textContent = requestError.message;
       status.className = "spec-save-status error";
     } finally {
       submit.disabled = false;
-      submit.textContent = "保存此规格";
+      submit.textContent = "保存此景别";
     }
   }
 
