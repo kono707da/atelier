@@ -11,6 +11,7 @@ from backend.app.app_factory import create_app, PROJECT_ROOT
 
 
 RUNTIME_API_PATH = PROJECT_ROOT / "design" / "ui-preview" / "runtime-api.js"
+STYLES_PATH = PROJECT_ROOT / "design" / "ui-preview" / "styles.css"
 
 
 def _extract_frontend_paths(source: str) -> set[str]:
@@ -105,6 +106,24 @@ class FrontendRouteContractTests(unittest.TestCase):
         self.assertIn(_shape("/api/materials/{param}/pages"), shapes)
         self.assertIn(_shape("/api/material-pages/{param}"), shapes)
         self.assertIn(_shape("/api/materials/{param}/pages/order"), shapes)
+
+    def test_overview_dashboard_has_scoped_layout_and_scroll_styles(self) -> None:
+        styles = STYLES_PATH.read_text(encoding="utf-8")
+        self.assertIn('page.classList.add("overview-dashboard-page")', self.source)
+        self.assertIn(".page-scroll.overview-dashboard-page", styles)
+        self.assertIn(".overview-summary-body", styles)
+        self.assertIn(".overview-stats-grid", styles)
+        self.assertIn(".overview-jump-grid", styles)
+
+    def test_batch_page_uses_user_facing_run_batch_flow(self) -> None:
+        styles = STYLES_PATH.read_text(encoding="utf-8")
+        self.assertIn("创建第一个跑图批次", self.source)
+        self.assertIn("检查跑图列表", self.source)
+        self.assertIn("创建任务并前往开始", self.source)
+        self.assertIn("当前范围没有可创建的任务", self.source)
+        self.assertNotIn("建立第一个批量草稿", self.source)
+        self.assertIn(".stage3-flow-steps", styles)
+        self.assertIn(".stage3-advanced-grid", styles)
 
 
 if __name__ == "__main__":

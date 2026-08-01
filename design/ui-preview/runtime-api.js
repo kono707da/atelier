@@ -1815,6 +1815,7 @@
   async function renderProductionOverview(project) {
     const page = document.querySelector(".page-scroll");
     if (!page) return;
+    page.classList.add("overview-dashboard-page");
     const header = page.querySelector(".page-header");
     [...page.children].forEach((child) => {
       if (child !== header) child.remove();
@@ -1868,15 +1869,16 @@
       "beforeend",
       `
         <section class="panel overview-summary-panel">
-          <div class="panel-body" style="display:flex;flex-wrap:wrap;gap:18px;align-items:center">
-            <div style="min-width:220px;flex:1">
-              <div class="panel-title" style="font-size:14px">${escapeHtml(overviewProject.name || project.name)}</div>
-              <div style="color:#7d8698;font-size:11px;margin-top:6px;line-height:1.6">${
+          <div class="panel-body overview-summary-body">
+            <div class="overview-summary-mark">${escapeHtml((overviewProject.name || project.name || "?").slice(0, 1).toUpperCase())}</div>
+            <div class="overview-summary-copy">
+              <div class="panel-title">${escapeHtml(overviewProject.name || project.name)}</div>
+              <div class="overview-summary-description">${
                 description ? escapeHtml(description) : "暂无项目描述"
               }</div>
-              <div style="color:#a0a7b5;font-size:10px;margin-top:8px">更新于 ${escapeHtml(updated)}</div>
+              <div class="overview-summary-updated">更新于 ${escapeHtml(updated)}</div>
             </div>
-            <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <div class="overview-summary-actions">
               <button class="btn soft" type="button" data-api-action="edit-project" data-project-id="${escapeHtml(project.id)}" data-project-name="${escapeHtml(overviewProject.name || project.name)}" data-project-description="${escapeHtml(overviewProject.description || project.description || "")}">编辑信息</button>
               <a class="btn primary" href="?page=story-canvas&project=${escapeHtml(project.id)}">打开剧本画布</a>
             </div>
@@ -9432,8 +9434,8 @@
       return `
         <section class="stage3-preview-empty">
           <span>PREVIEW</span>
-          <h3>尚未编译预览</h3>
-          <p>先保存配置，再点击“编译预览”。这里会显示实际页面、最终参数、阻塞项和警告。</p>
+          <h3>还没有检查跑图列表</h3>
+          <p>设置页面范围、图片数量和工作流后，点击“检查跑图列表”。这里会显示实际任务、阻塞项和提醒。</p>
         </section>
       `;
     }
@@ -9485,36 +9487,51 @@
         <div class="${blockers.length ? "danger" : ""}"><span>阻塞</span><strong>${blockers.length}</strong></div>
         <div class="${warnings.length ? "warning" : ""}"><span>警告</span><strong>${warnings.length}</strong></div>
       </div>
-      ${issueMarkup ? `<div class="stage3-issues">${issueMarkup}</div>` : '<div class="stage3-success-note">完整性检查通过，没有阻塞项或警告。</div>'}
+      ${!items.length
+        ? '<div class="stage3-empty-preview-note">当前范围没有可创建的任务。请先在剧本画布添加场景页，或调整页面范围。</div>'
+        : issueMarkup
+          ? `<div class="stage3-issues">${issueMarkup}</div>`
+          : '<div class="stage3-success-note">完整性检查通过，没有阻塞项或警告。</div>'}
       <div class="stage3-table-wrap">
         <table class="table stage3-table">
           <thead><tr><th>页面与来源</th><th>分支</th><th>工作流</th><th>尺寸</th><th>实例</th><th>种子</th></tr></thead>
           <tbody>${rows || '<tr><td colspan="6"><div class="stage3-empty-row">当前范围没有可运行页面。</div></td></tr>'}</tbody>
         </table>
       </div>
-      ${items.length > 200 ? `<div class="stage3-table-note">当前显示前 200 项，共 ${items.length} 项；提交时会固化全部项目。</div>` : ""}
+      ${items.length > 200 ? `<div class="stage3-table-note">当前显示前 200 项，共 ${items.length} 项；创建任务时会包含全部项目。</div>` : ""}
     `;
+  }
+
+  function batchFlowSteps(activeStep = 1) {
+    const steps = [
+      ["1", "选择页面", "决定哪些分镜页需要跑图"],
+      ["2", "设置生成", "选择工作流和每页图片数"],
+      ["3", "检查列表", "确认实际任务及阻塞项"],
+      ["4", "创建任务", "前往任务中心后手动开始"],
+    ];
+    return `<div class="stage3-flow-steps">${steps.map(([number, title, note], index) => `<div class="stage3-flow-step ${index + 1 < activeStep ? "done" : index + 1 === activeStep ? "active" : ""}"><span>${number}</span><div><strong>${title}</strong><small>${note}</small></div></div>`).join("")}</div>`;
   }
 
   function batchDraftWorkspace(project, draft) {
     const config = draft.config || {};
     const preview = draft.preview_stale ? null : draft.preview;
+    const activeStep = preview?.items?.length ? 3 : 2;
     return `
       <div class="stage3-layout">
         <aside class="panel stage3-sidebar">
           <div class="panel-header">
-            <div><div class="panel-title">批量草稿</div><div class="panel-sub">保存后可刷新或继续编辑</div></div>
-            <button class="btn small" type="button" data-api-action="batch-new-draft">新建</button>
+            <div><div class="panel-title">未开始的批次</div><div class="panel-sub">可以保存并稍后继续设置</div></div>
+            <button class="btn small" type="button" data-api-action="batch-new-draft">新建批次</button>
           </div>
-          <label class="label" for="batch-draft-select">当前草稿</label>
+          <label class="label" for="batch-draft-select">当前配置</label>
           <select class="field stage3-control" id="batch-draft-select">
-            ${batchUiState.drafts.map((item) => `<option value="${escapeHtml(item.id)}"${item.id === draft.id ? " selected" : ""}>${escapeHtml(item.name || "未命名草稿")}</option>`).join("")}
+            ${batchUiState.drafts.map((item) => `<option value="${escapeHtml(item.id)}"${item.id === draft.id ? " selected" : ""}>${escapeHtml(item.name || "未命名跑图批次")}</option>`).join("")}
           </select>
           <div class="stage3-sidebar-actions">
-            <button class="btn small danger-soft" type="button" data-api-action="batch-delete-draft" data-draft-id="${escapeHtml(draft.id)}">删除草稿</button>
+            <button class="btn small danger-soft" type="button" data-api-action="batch-delete-draft" data-draft-id="${escapeHtml(draft.id)}">删除配置</button>
           </div>
           <div class="stage3-batch-list">
-            <div class="label">已固化批次</div>
+            <div class="label">已创建的任务批次</div>
             ${batchUiState.batches.length
               ? batchUiState.batches.slice(0, 20).map((batch) => `
                 <button type="button" class="stage3-batch-card" data-api-action="open-task-center" data-batch-id="${escapeHtml(batch.id)}">
@@ -9522,64 +9539,53 @@
                   <strong>${escapeHtml(batch.name || "未命名批次")}</strong>
                   <small>${Number(batch.item_count) || 0} 项 · ${stage3Date(batch.created_at)}</small>
                 </button>`).join("")
-              : '<div class="stage3-sidebar-empty">还没有固化批次</div>'}
+              : '<div class="stage3-sidebar-empty">还没有创建任务</div>'}
           </div>
         </aside>
         <main class="stage3-main">
+          ${batchFlowSteps(activeStep)}
           <section class="panel stage3-config-panel">
             <div class="panel-header">
-              <div><div class="panel-title">生成配置</div><div class="panel-sub">修改后需要重新编译预览</div></div>
-              <span class="status ${draft.preview_stale ? "orange" : "green"}"><i class="dot"></i>${draft.preview_stale ? "预览已过期" : "预览已同步"}</span>
+              <div><div class="panel-title">选择页面与生成方式</div><div class="panel-sub">这里的修改只保存配置，不会立即开始跑图</div></div>
+              <span class="status ${draft.preview_stale ? "orange" : "green"}"><i class="dot"></i>${draft.preview_stale ? "需要重新检查" : "列表已检查"}</span>
             </div>
             <div class="stage3-form-grid">
               <div class="stage3-span-2">
-                <label class="label" for="batch-name">草稿名称</label>
+                <label class="label" for="batch-name">批次名称</label>
                 <input class="field stage3-control" id="batch-name" maxlength="120" value="${escapeHtml(draft.name || "")}" />
               </div>
               <div class="stage3-span-2">
-                <label class="label" for="batch-target">生成范围</label>
+                <label class="label" for="batch-target">要跑哪些页面</label>
                 <select class="field stage3-control" id="batch-target">${batchTargetOptions(project, batchUiState.tree, draft.scope, draft.scope_id)}</select>
               </div>
               <div>
-                <label class="label" for="batch-instance-count">每页实例数</label>
+                <label class="label" for="batch-instance-count">每页生成图片数</label>
                 <input class="field stage3-control" id="batch-instance-count" type="number" min="1" max="100" value="${Number(config.instance_count) || 1}" />
               </div>
-              <div>
-                <label class="label" for="batch-seed-strategy">种子策略</label>
-                <select class="field stage3-control" id="batch-seed-strategy">
-                  <option value="fixed"${config.seed_strategy === "fixed" ? " selected" : ""}>固定</option>
-                  <option value="random"${config.seed_strategy === "random" ? " selected" : ""}>随机</option>
-                  <option value="increment"${config.seed_strategy === "increment" ? " selected" : ""}>递增</option>
-                  <option value="reuse_last"${config.seed_strategy === "reuse_last" ? " selected" : ""}>沿用上次</option>
-                </select>
-              </div>
-              <div>
-                <label class="label" for="batch-seed-base">基础种子</label>
-                <input class="field stage3-control" id="batch-seed-base" type="number" min="0" value="${config.seed_base ?? ""}" placeholder="留空使用默认" />
-              </div>
-              <div>
-                <label class="label">输出尺寸</label>
-                <div class="stage3-inline-fields">
-                  <input class="field stage3-control" id="batch-width" type="number" min="64" max="16384" value="${config.width ?? ""}" placeholder="宽" />
-                  <span>×</span>
-                  <input class="field stage3-control" id="batch-height" type="number" min="64" max="16384" value="${config.height ?? ""}" placeholder="高" />
-                </div>
-              </div>
-              <div class="stage3-span-2">
-                <label class="label" for="batch-workflow">工作流版本</label>
+              <div class="stage3-span-3">
+                <label class="label" for="batch-workflow">使用的 ComfyUI 工作流</label>
                 <select class="field stage3-control" id="batch-workflow">${batchWorkflowOptions(batchUiState.workflows, config)}</select>
               </div>
-              <label class="stage3-check"><input id="batch-skip-adopted" type="checkbox"${config.skip_adopted ? " checked" : ""} /><span><strong>跳过已有采用结果的页面</strong><small>不会再次创建这些页面的任务</small></span></label>
-              <label class="stage3-check"><input id="batch-only-failed" type="checkbox"${config.only_failed ? " checked" : ""} /><span><strong>只重新运行失败页面</strong><small>不会复制已经成功的任务</small></span></label>
+              <details class="stage3-advanced stage3-span-4">
+                <summary>高级设置（随机种子、输出尺寸和跳过规则）</summary>
+                <div class="stage3-advanced-grid">
+                  <div><label class="label" for="batch-seed-strategy">随机方式</label><select class="field stage3-control" id="batch-seed-strategy"><option value="fixed"${config.seed_strategy === "fixed" ? " selected" : ""}>所有图片使用同一种子</option><option value="random"${config.seed_strategy === "random" ? " selected" : ""}>每张图片随机</option><option value="increment"${config.seed_strategy === "increment" ? " selected" : ""}>从基础种子依次递增</option><option value="reuse_last"${config.seed_strategy === "reuse_last" ? " selected" : ""}>沿用上次结果</option></select></div>
+                  <div><label class="label" for="batch-seed-base">基础种子</label><input class="field stage3-control" id="batch-seed-base" type="number" min="0" value="${config.seed_base ?? ""}" placeholder="留空使用工作流设置" /></div>
+                  <div><label class="label">覆盖输出尺寸</label><div class="stage3-inline-fields"><input class="field stage3-control" id="batch-width" type="number" min="64" max="16384" value="${config.width ?? ""}" placeholder="宽" /><span>×</span><input class="field stage3-control" id="batch-height" type="number" min="64" max="16384" value="${config.height ?? ""}" placeholder="高" /></div></div>
+                  <label class="stage3-check"><input id="batch-skip-adopted" type="checkbox"${config.skip_adopted ? " checked" : ""} /><span><strong>跳过已有采用图片的页面</strong><small>这些页面不会再次创建任务</small></span></label>
+                  <label class="stage3-check"><input id="batch-only-failed" type="checkbox"${config.only_failed ? " checked" : ""} /><span><strong>只重新运行失败页面</strong><small>不会复制已经成功的任务</small></span></label>
+                </div>
+              </details>
             </div>
             <div class="stage3-config-actions">
-              <button class="btn" type="button" data-api-action="batch-save-draft">保存草稿</button>
-              <button class="btn soft" type="button" data-api-action="batch-preview-draft">编译预览</button>
-              <button class="btn primary" type="button" data-api-action="batch-commit-draft"${preview?.items?.length ? "" : " disabled"}>确认并固化批次</button>
+              <span class="stage3-action-note">创建任务后仍不会自动运行；请在任务中心点击“开始跑图”。</span>
+              <button class="btn" type="button" data-api-action="batch-save-draft">保存配置</button>
+              <button class="btn soft" type="button" data-api-action="batch-preview-draft">检查跑图列表</button>
+              <button class="btn primary" type="button" data-api-action="batch-commit-draft"${preview?.items?.length ? "" : " disabled"}>创建任务并前往开始</button>
             </div>
           </section>
           <section class="panel stage3-preview-panel">
-            <div class="panel-header"><div><div class="panel-title">最终跑图清单</div><div class="panel-sub">提交前看到的是后端实际编译结果</div></div></div>
+            <div class="panel-header"><div><div class="panel-title">跑图列表检查</div><div class="panel-sub">这里会列出将要创建的页面任务、工作流和图片数量</div></div></div>
             <div id="batch-preview-content">${batchPreviewMarkup(preview)}</div>
           </section>
         </main>
@@ -9591,11 +9597,12 @@
     return `
       <section class="panel stage3-first-draft">
         <span class="production-empty-icon">B</span>
-        <h2>建立第一个批量草稿</h2>
-        <p>草稿只保存范围和生成策略，不会立即向 ComfyUI 提交。</p>
+        <h2>创建第一个跑图批次</h2>
+        <p>先给这次跑图命名。创建后再选择页面、每页图片数和工作流；现在不会开始跑图。</p>
+        ${batchFlowSteps(1)}
         <div class="stage3-first-draft-form">
-          <input id="batch-first-name" class="field stage3-control" maxlength="120" placeholder="输入草稿名称" />
-          <button class="btn primary" type="button" data-api-action="batch-create-first-draft" data-project-id="${escapeHtml(project.id)}">创建草稿</button>
+          <input id="batch-first-name" class="field stage3-control" maxlength="120" placeholder="例如：第一章首次跑图" />
+          <button class="btn primary" type="button" data-api-action="batch-create-first-draft" data-project-id="${escapeHtml(project.id)}">创建跑图批次</button>
         </div>
       </section>
     `;
@@ -9607,10 +9614,10 @@
     batchUiState.project = project;
     page.innerHTML = `
       <div class="page-header">
-        <div><h1 class="page-title">批量配置</h1><p class="page-subtitle">从项目结构编译真实跑图清单，确认后再建立任务。</p></div>
+        <div><h1 class="page-title">跑图批次</h1><p class="page-subtitle">选择页面和工作流，检查任务列表，然后前往任务中心开始跑图。</p></div>
         <div class="header-actions"><button class="btn" type="button" data-api-action="open-task-center">任务中心</button></div>
       </div>
-      <section class="stage3-loading"><i></i><span>正在读取草稿、结构和工作流…</span></section>
+      <section class="stage3-loading"><i></i><span>正在读取批次配置、项目页面和工作流…</span></section>
     `;
     const [draftPayload, batchPayload, treePayload, workflowPayload] = await Promise.all([
       request(API.batchDrafts(project.id)),
@@ -9679,7 +9686,7 @@
       return raw === "" || raw === undefined ? null : Number(raw);
     };
     return {
-      name: document.getElementById("batch-name")?.value.trim() || "未命名批量草稿",
+      name: document.getElementById("batch-name")?.value.trim() || "未命名跑图批次",
       scope,
       scope_id: scope === "project" ? null : scopeId,
       config: {
@@ -9700,7 +9707,7 @@
     const nameInput = document.getElementById(inputId);
     const name = nameInput?.value.trim();
     if (!name) {
-      if (typeof showToast === "function") showToast("请先输入草稿名称");
+      if (typeof showToast === "function") showToast("请先输入批次名称");
       nameInput?.focus();
       return;
     }
@@ -9708,7 +9715,7 @@
       method: "POST",
       body: JSON.stringify({ name, scope: "project" }),
     });
-    if (typeof showToast === "function") showToast("批量草稿已创建");
+    if (typeof showToast === "function") showToast("跑图批次配置已创建");
     stage3Navigate("batch", {
       project: batchUiState.project.id,
       draft: payload.draft?.id,
@@ -9721,7 +9728,7 @@
       method: "PATCH",
       body: JSON.stringify(readBatchDraftForm()),
     });
-    if (!quiet && typeof showToast === "function") showToast("批量草稿已保存");
+    if (!quiet && typeof showToast === "function") showToast("跑图批次配置已保存");
     return payload.draft;
   }
 
@@ -9739,7 +9746,7 @@
       if (previewContent) previewContent.innerHTML = batchPreviewMarkup(payload.preview);
       const commitButton = document.querySelector('[data-api-action="batch-commit-draft"]');
       if (commitButton) commitButton.disabled = !(payload.preview?.items?.length);
-      if (typeof showToast === "function") showToast("编译预览已更新");
+      if (typeof showToast === "function") showToast("跑图列表检查完成");
     } catch (error) {
       if (previewContent) {
         previewContent.innerHTML = `<section class="stage3-error"><strong>编译失败</strong><p>${escapeHtml(error.message)}</p><button class="btn small" type="button" data-api-action="batch-preview-draft">重试</button></section>`;
@@ -9751,7 +9758,7 @@
     const draftPayload = await request(API.batchDraft(batchUiState.activeDraftId));
     const preview = draftPayload.draft?.preview;
     if (!preview || draftPayload.draft?.preview_stale || !preview.items?.length) {
-      if (typeof showToast === "function") showToast("请先完成编译预览");
+      if (typeof showToast === "function") showToast("请先检查跑图列表");
       return;
     }
     const blockers = preview.blocking_errors?.length || 0;
@@ -9761,10 +9768,10 @@
       0
     );
     const message =
-      `将固化 ${preview.items.length} 个页面、${taskCount} 个生成任务。` +
+      `将为 ${preview.items.length} 个页面创建 ${taskCount} 个跑图任务。` +
       (blockers ? `\n有 ${blockers} 个阻塞页面不会进入队列。` : "") +
       (warnings ? `\n另有 ${warnings} 条警告，请确认已查看。` : "") +
-      "\n固化后的批次快照不会随草稿修改。是否继续？";
+      "\n创建后将进入任务中心，由你点击“开始跑图”后才会提交到 ComfyUI。是否继续？";
     if (!window.confirm(message)) return;
     const commitPayload = await request(API.batchDraftCommit(batchUiState.activeDraftId), {
       method: "POST",
@@ -9775,7 +9782,7 @@
       method: "POST",
       body: JSON.stringify({ max_attempts: 3 }),
     });
-    if (typeof showToast === "function") showToast("批次和持久化任务已创建");
+    if (typeof showToast === "function") showToast("跑图任务已创建，请确认后开始跑图");
     stage3Navigate("tasks", { project: batchUiState.project.id, batch: batch.id });
   }
 
@@ -11764,11 +11771,11 @@
     }
 
     if (button.dataset.apiAction === "batch-new-draft") {
-      const name = window.prompt("输入新草稿名称", "");
+      const name = window.prompt("输入新的跑图批次名称", "");
       if (name === null) return;
       const trimmed = name.trim();
       if (!trimmed) {
-        if (typeof showToast === "function") showToast("草稿名称不能为空");
+        if (typeof showToast === "function") showToast("批次名称不能为空");
         return;
       }
       const payload = await request(API.batchDrafts(batchUiState.project.id), {
@@ -11783,9 +11790,9 @@
     }
 
     if (button.dataset.apiAction === "batch-delete-draft") {
-      if (!window.confirm("删除这个批量草稿？已固化批次和任务不会受影响。")) return;
+      if (!window.confirm("删除这个尚未开始的批次配置？已经创建的任务不会受影响。")) return;
       await request(API.batchDraft(button.dataset.draftId), { method: "DELETE" });
-      if (typeof showToast === "function") showToast("批量草稿已删除");
+      if (typeof showToast === "function") showToast("跑图批次配置已删除");
       stage3Navigate("batch", { project: batchUiState.project.id });
       return;
     }

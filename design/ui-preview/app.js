@@ -11,7 +11,7 @@ const pages = [
   ["character-matrix", "人物替换矩阵", "制作", "MX"],
   ["workflows", "工作流库", "工作流", "WF"],
   ["workflow-canvas", "工作流画布", "工作流", "WC"],
-  ["batch", "批量配置", "生产", "BG"],
+  ["batch", "跑图批次", "生产", "BG"],
   ["tasks", "任务中心", "生产", "TK"],
   ["review", "项目审片图库", "生产", "RV"],
   ["assembly", "最终作品装配", "成片", "AS"],
@@ -497,7 +497,7 @@ function batchPage() {
     ["04", "室内夜景", "64 页", false],
   ].map((t) => `<div class="mini-list-item" style="${t[3] ? "background:var(--blue-soft)" : ""}"><span class="mini-list-icon">${t[3] ? "✓" : ""}</span><div class="mini-list-text">${t[1]}<div class="mini-list-sub">${t[2]}</div></div>${status(t[3] ? "已选择" : "未选择", t[3] ? "blue" : "")}</div>`).join("");
   return `<div class="page-scroll">
-    ${pageHeader("批量配置", "从已编译的跑图列表选择页面、分支和每页生成实例数。", button("保存为预设") + button("提交 140 个任务", "primary"))}
+    ${pageHeader("跑图批次", "选择页面和工作流，检查任务列表，然后前往任务中心开始跑图。", button("保存配置") + button("检查跑图列表", "primary"))}
     <div class="grid cols-4" style="margin-bottom:13px">${metric("选择页面","140","跨 4 个场景")}${metric("每页实例","6","允许逐页覆盖")}${metric("预计图片","840","约 14.8 GB")}${metric("预计耗时","2h 36m","基于最近速度")}</div>
     <div class="split-2" style="height:calc(100% - 188px)">
       <div class="split-left grid cols-2">

@@ -289,7 +289,7 @@
             </div>
           </main>
           <aside class="panel gap-review-inspector">${reviewInspector(selected)}</aside>
-        </div>` : empty("还没有图片实例", "完成一次真实出图并收集输出后，候选图片会按分镜页出现在这里。", '<button class="btn primary" data-gap-action="open-batch-for-project">前往批量配置</button>')}
+        </div>` : empty("还没有图片实例", "完成一次真实出图并收集输出后，候选图片会按分镜页出现在这里。", '<button class="btn primary" data-gap-action="open-batch-for-project">前往跑图批次</button>')}
     `;
   }
 
