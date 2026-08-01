@@ -156,15 +156,22 @@ class FrontendRouteContractTests(unittest.TestCase):
         self.assertNotIn("function characterVariantList(", self.source)
 
     def test_story_directory_has_context_menus_for_structure_nodes(self) -> None:
-        self.assertIn('data-context-menu="story-root"', self.source)
+        self.assertNotIn('data-context-menu="story-root"', self.source)
         self.assertIn('data-context-menu="chapter"', self.source)
         self.assertIn('data-context-menu="large-scene"', self.source)
         self.assertIn('data-context-menu="small-scene"', self.source)
-        self.assertIn('data-menu-action="add-chapter"', self.source)
         self.assertIn('data-menu-action="add-large-scene"', self.source)
         self.assertIn('data-menu-action="add-small-scene"', self.source)
         self.assertIn('data-menu-action="open-small-scene"', self.source)
         self.assertIn("deleteSmallScene", self.source)
+
+    def test_story_directory_starts_with_chapters_and_supports_large_scene_drag(self) -> None:
+        self.assertNotIn("story-tree-root-row", self.source)
+        self.assertIn("story-large-scene-drop-zone", self.source)
+        self.assertIn("data-large-scene-drag-item", self.source)
+        self.assertIn("data-large-scene-drag-handle", self.source)
+        self.assertIn('data-drop-axis="vertical"', self.source)
+        self.assertIn('data-drop-axis="grid"', self.source)
 
 
 if __name__ == "__main__":

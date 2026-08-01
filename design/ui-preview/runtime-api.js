@@ -2585,71 +2585,70 @@
         </div>
         <div class="story-directory-scroll">
           <ul class="story-tree">
-            <li class="story-tree-branch story-tree-root">
-              <div
-                class="story-tree-row story-tree-root-row"
-                data-context-menu="story-root"
-                data-project-id="${escapeHtml(project.id)}"
-                data-name="${escapeHtml(project.name)}"
-              >
-                <span class="story-tree-chevron">⌄</span>
-                <span class="story-tree-icon root">A</span>
-                <span class="story-tree-name">${escapeHtml(project.name)}</span>
-              </div>
-              <ul class="story-tree-children">
-                ${chapters.map((chapter) => `
-                  <li class="story-tree-branch">
-                    <button
-                      class="story-tree-row story-tree-chapter"
-                      type="button"
-                      data-story-tree-node="chapter"
-                      data-context-menu="chapter"
+            ${chapters.map((chapter) => `
+              <li class="story-tree-branch">
+                <button
+                  class="story-tree-row story-tree-chapter"
+                  type="button"
+                  data-story-tree-node="chapter"
+                  data-context-menu="chapter"
+                  data-chapter-id="${escapeHtml(chapter.id)}"
+                  data-name="${escapeHtml(chapter.name)}"
+                  data-large-scene-count="${chapter.large_scenes.length}"
+                >
+                  <span class="story-tree-chevron">⌄</span>
+                  <span class="story-tree-icon chapter">CH</span>
+                  <span class="story-tree-name">${escapeHtml(chapter.name)}</span>
+                  <span class="story-tree-count">${chapter.large_scenes.length}</span>
+                </button>
+                <ul
+                  class="story-tree-children story-large-scene-drop-zone"
+                  data-drop-zone
+                  data-drop-axis="vertical"
+                  data-chapter-id="${escapeHtml(chapter.id)}"
+                >
+                  ${chapter.large_scenes.map((largeScene) => `
+                    <li
+                      class="story-tree-branch"
+                      data-large-scene-drag-item
+                      data-large-scene-id="${escapeHtml(largeScene.id)}"
                       data-chapter-id="${escapeHtml(chapter.id)}"
-                      data-name="${escapeHtml(chapter.name)}"
-                      data-large-scene-count="${chapter.large_scenes.length}"
                     >
-                      <span class="story-tree-chevron">⌄</span>
-                      <span class="story-tree-icon chapter">CH</span>
-                      <span class="story-tree-name">${escapeHtml(chapter.name)}</span>
-                      <span class="story-tree-count">${chapter.large_scenes.length}</span>
-                    </button>
-                    <ul class="story-tree-children">
-                      ${chapter.large_scenes.map((largeScene) => `
-                        <li class="story-tree-branch">
-                          <button
-                            class="story-tree-row story-tree-large-scene"
-                            type="button"
-                            data-story-tree-node="large-scene"
-                            data-context-menu="large-scene"
-                            data-large-scene-id="${escapeHtml(largeScene.id)}"
-                            data-name="${escapeHtml(largeScene.name)}"
-                          >
-                            <span class="story-tree-chevron">⌄</span>
-                            <span class="story-tree-icon large-scene">LS</span>
-                            <span class="story-tree-name">${escapeHtml(largeScene.name)}</span>
-                            <span class="story-tree-count">${largeScene.small_scenes.length}</span>
-                          </button>
-                          <ul class="story-tree-children">
-                            ${largeScene.small_scenes.map(storyTreeSmallSceneDirectory).join("")}
-                            ${
-                              backendAvailable
-                                ? `<li><button
-                                    class="story-tree-row story-tree-add-row"
-                                    type="button"
-                                    data-story-small-scene-action="create"
-                                    data-large-scene-id="${escapeHtml(largeScene.id)}"
-                                    data-large-scene-name="${escapeHtml(largeScene.name)}"
-                                  ><span class="story-tree-spacer"></span><span class="story-tree-icon add">＋</span><span class="story-tree-name">添加小场景</span></button></li>`
-                                : ""
-                            }
-                          </ul>
-                        </li>
-                      `).join("")}
-                    </ul>
-                  </li>
-                `).join("")}
-              </ul>
-            </li>
+                      <button
+                        class="story-tree-row story-tree-large-scene"
+                        type="button"
+                        data-story-tree-node="large-scene"
+                        data-context-menu="large-scene"
+                        data-large-scene-drag-handle
+                        data-large-scene-id="${escapeHtml(largeScene.id)}"
+                        data-chapter-id="${escapeHtml(chapter.id)}"
+                        data-name="${escapeHtml(largeScene.name)}"
+                        title="拖动调整顺序或移动到其他章节"
+                      >
+                        <span class="story-tree-chevron">⌄</span>
+                        <span class="story-tree-icon large-scene">LS</span>
+                        <span class="story-tree-name">${escapeHtml(largeScene.name)}</span>
+                        <span class="story-tree-count">${largeScene.small_scenes.length}</span>
+                      </button>
+                      <ul class="story-tree-children">
+                        ${largeScene.small_scenes.map(storyTreeSmallSceneDirectory).join("")}
+                        ${
+                          backendAvailable
+                            ? `<li><button
+                                class="story-tree-row story-tree-add-row"
+                                type="button"
+                                data-story-small-scene-action="create"
+                                data-large-scene-id="${escapeHtml(largeScene.id)}"
+                                data-large-scene-name="${escapeHtml(largeScene.name)}"
+                              ><span class="story-tree-spacer"></span><span class="story-tree-icon add">＋</span><span class="story-tree-name">添加小场景</span></button></li>`
+                            : ""
+                        }
+                      </ul>
+                    </li>
+                  `).join("")}
+                </ul>
+              </li>
+            `).join("")}
           </ul>
           ${
             backendAvailable
@@ -2689,17 +2688,20 @@
     return `
       <section
         class="story-large-scene-wrapper scene-type-${escapeHtml(largeScene.scene_type || "content")}"
+        data-large-scene-drag-item
         data-large-scene-id="${escapeHtml(largeScene.id)}"
+        data-chapter-id="${escapeHtml(largeScene.chapter_id)}"
       >
         <header
           class="story-wrapper-heading large-scene-block"
           data-context-menu="large-scene"
+          data-large-scene-drag-handle
           data-large-scene-id="${escapeHtml(largeScene.id)}"
           data-chapter-id="${escapeHtml(largeScene.chapter_id)}"
           data-name="${escapeHtml(largeScene.name)}"
           data-sort-order="${escapeHtml(largeScene.sort_order)}"
           data-scene-type="${escapeHtml(largeScene.scene_type || "content")}"
-          draggable="false"
+          title="拖动调整顺序或移动到其他章节"
         >
           <span class="story-wrapper-index">LS ${String(largeScene.sort_order || 0).padStart(2, "0")}</span>
           <strong>${escapeHtml(largeScene.name)}</strong>
@@ -2738,7 +2740,12 @@
           <strong>${escapeHtml(chapter.name)}</strong>
           <small>${chapter.large_scenes.length} 个大场景</small>
         </header>
-        <div class="story-large-scene-grid">
+        <div
+          class="story-large-scene-grid"
+          data-drop-zone
+          data-drop-axis="grid"
+          data-chapter-id="${escapeHtml(chapter.id)}"
+        >
           ${chapter.large_scenes.map((scene) => storyLargeSceneWrapper(scene, backendAvailable)).join("")}
           <button
             class="story-large-scene-add"
@@ -8899,11 +8906,7 @@
     menu.dataset.contextCharacterId = data.characterId || "";
     const list = menu.querySelector(".structure-context-menu-list");
     if (list) {
-      if (type === "story-root") {
-        list.innerHTML = `
-          <li class="structure-context-menu-item" data-menu-action="add-chapter" role="menuitem" tabindex="0">新建章节</li>
-        `;
-      } else if (type === "chapter") {
+      if (type === "chapter") {
         list.innerHTML = `
           <li class="structure-context-menu-item" data-menu-action="add-large-scene" role="menuitem" tabindex="0">添加大场景</li>
           <li class="structure-context-menu-item" data-menu-action="rename" role="menuitem" tabindex="0">改名</li>
@@ -8972,15 +8975,6 @@
     const trigger = target.closest("[data-context-menu]");
     if (!trigger) return false;
     const type = trigger.dataset.contextMenu;
-    if (type === "story-root") {
-      showContextMenu(
-        "story-root",
-        { id: trigger.dataset.projectId, name: trigger.dataset.name },
-        x,
-        y
-      );
-      return true;
-    }
     if (type === "chapter") {
       showContextMenu(
         "chapter",
@@ -9128,18 +9122,23 @@
 
   function initLargeSceneDrag() {
     document.addEventListener("dragstart", (event) => {
-      const card = event.target.closest?.(".large-scene-block[draggable='true']");
-      if (!card) return;
-      const largeSceneId = card.dataset.largeSceneId;
-      const sourceChapterId = card.dataset.chapterId;
+      const handle = event.target.closest?.(
+        "[data-large-scene-drag-handle][draggable='true'], .large-scene-block[draggable='true']"
+      );
+      if (!handle) return;
+      const item = handle.closest?.("[data-large-scene-drag-item]") || handle;
+      const largeSceneId = handle.dataset.largeSceneId || item.dataset.largeSceneId;
+      const sourceChapterId = handle.dataset.chapterId || item.dataset.chapterId;
       if (!largeSceneId || !sourceChapterId) return;
       dragState = {
         largeSceneId,
         sourceChapterId,
-        card,
+        handle,
+        item,
       };
-      card.classList.add("dragging");
+      item.classList.add("dragging");
       event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", largeSceneId);
       // Set empty image as drag image to use our own visual
       try {
         const dragImage = document.createElement("div");
@@ -9155,7 +9154,7 @@
 
     document.addEventListener("dragend", () => {
       if (!dragState) return;
-      dragState.card?.classList.remove("dragging");
+      dragState.item?.classList.remove("dragging");
       clearDropIndicators();
       dragState = null;
     });
@@ -9168,16 +9167,30 @@
       event.dataTransfer.dropEffect = "move";
       const targetChapterId = dropZone.dataset.chapterId;
       if (!targetChapterId) return;
-      // Compute insertion position within this drop zone
-      const cards = Array.from(
-        dropZone.querySelectorAll(".large-scene-block:not(.dragging)")
+      const cards = Array.from(dropZone.children).filter((child) =>
+        !child.classList.contains("dragging") &&
+        (
+          child.matches("[data-large-scene-drag-item]") ||
+          child.matches(".large-scene-block")
+        )
       );
       let insertIndex = cards.length;
       let insertBeforeEl = null;
+      const axis = dropZone.dataset.dropAxis || "horizontal";
       for (let i = 0; i < cards.length; i++) {
         const rect = cards[i].getBoundingClientRect();
-        const midX = rect.left + rect.width / 2;
-        if (event.clientX < midX) {
+        const before = axis === "vertical"
+          ? event.clientY < rect.top + rect.height / 2
+          : axis === "grid"
+            ? (
+                event.clientY < rect.top + rect.height / 2 ||
+                (
+                  event.clientY <= rect.bottom &&
+                  event.clientX < rect.left + rect.width / 2
+                )
+              )
+            : event.clientX < rect.left + rect.width / 2;
+        if (before) {
           insertIndex = i;
           insertBeforeEl = cards[i];
           break;
@@ -9190,8 +9203,9 @@
       if (insertBeforeEl) {
         dropZone.insertBefore(indicator, insertBeforeEl);
       } else {
-        // Append at end, but before the "add card" if present
-        const addCard = dropZone.querySelector(".large-scene-add-card");
+        const addCard = Array.from(dropZone.children).find((child) =>
+          child.matches(".large-scene-add-card, .story-large-scene-add")
+        );
         if (addCard) {
           dropZone.insertBefore(indicator, addCard);
         } else {
@@ -9219,7 +9233,7 @@
       }
       event.preventDefault();
       const { largeSceneId, sourceChapterId, targetChapterId, targetIndex } = dragState;
-      dragState.card?.classList.remove("dragging");
+      dragState.item?.classList.remove("dragging");
       clearDropIndicators();
       dragState = null;
       if (!targetChapterId) return;
@@ -9253,7 +9267,168 @@
     document.querySelectorAll(".large-scene-drop-indicator").forEach((el) => el.remove());
   }
 
+  function updateLargeSceneDropIndicator(dropZone, clientX, clientY, draggedItem) {
+    const targetChapterId = dropZone?.dataset.chapterId;
+    if (!targetChapterId) return null;
+    const cards = Array.from(dropZone.children).filter((child) =>
+      child !== draggedItem &&
+      !child.classList.contains("dragging") &&
+      (
+        child.matches("[data-large-scene-drag-item]") ||
+        child.matches(".large-scene-block")
+      )
+    );
+    let insertIndex = cards.length;
+    let insertBeforeEl = null;
+    const axis = dropZone.dataset.dropAxis || "horizontal";
+    for (let index = 0; index < cards.length; index += 1) {
+      const hitTarget = axis === "vertical"
+        ? cards[index].querySelector(":scope > [data-large-scene-drag-handle]") || cards[index]
+        : cards[index];
+      const rect = hitTarget.getBoundingClientRect();
+      const before = axis === "vertical"
+        ? clientY < rect.top + rect.height / 2
+        : axis === "grid"
+          ? (
+              clientY < rect.top + rect.height / 2 ||
+              (clientY <= rect.bottom && clientX < rect.left + rect.width / 2)
+            )
+          : clientX < rect.left + rect.width / 2;
+      if (before) {
+        insertIndex = index;
+        insertBeforeEl = cards[index];
+        break;
+      }
+    }
+    clearDropIndicators();
+    const indicator = document.createElement("div");
+    indicator.className = "large-scene-drop-indicator";
+    indicator.setAttribute("aria-hidden", "true");
+    if (insertBeforeEl) {
+      dropZone.insertBefore(indicator, insertBeforeEl);
+    } else {
+      const addCard = Array.from(dropZone.children).find((child) =>
+        child.matches(".large-scene-add-card, .story-large-scene-add")
+      );
+      if (addCard) dropZone.insertBefore(indicator, addCard);
+      else dropZone.appendChild(indicator);
+    }
+    return { targetChapterId, targetIndex: insertIndex };
+  }
+
+  let pointerLargeSceneDrag = null;
+  let suppressLargeSceneClickUntil = 0;
+
+  async function commitLargeScenePointerMove(state) {
+    if (!state?.targetChapterId) return;
+    try {
+      await request(`/api/large-scenes/${state.largeSceneId}/move`, {
+        method: "POST",
+        body: JSON.stringify({
+          target_chapter_id: state.targetChapterId,
+          target_sort_order: Number(state.targetIndex || 0) + 1,
+        }),
+      });
+      const project = await resolveCurrentProject();
+      await renderProductionStoryCanvasV3(project);
+      if (typeof showToast === "function") showToast("大场景已移动");
+    } catch (requestError) {
+      const project = await resolveCurrentProject();
+      await renderProductionStoryCanvasV3(project);
+      if (typeof showToast === "function") showToast("移动失败：" + requestError.message);
+    }
+  }
+
+  function finishLargeScenePointerDrag() {
+    const state = pointerLargeSceneDrag;
+    if (!state) return null;
+    state.item?.classList.remove("dragging");
+    try {
+      if (state.handle?.hasPointerCapture?.(state.pointerId)) {
+        state.handle.releasePointerCapture(state.pointerId);
+      }
+    } catch (_) {
+      // Pointer capture may already be released by the browser.
+    }
+    document.body.classList.remove("is-dragging-large-scene");
+    clearDropIndicators();
+    pointerLargeSceneDrag = null;
+    return state;
+  }
+
+  function initLargeScenePointerDrag() {
+    document.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      const handle = event.target.closest?.("[data-large-scene-drag-handle]");
+      if (!handle) return;
+      const item = handle.closest("[data-large-scene-drag-item]");
+      const largeSceneId = handle.dataset.largeSceneId || item?.dataset.largeSceneId;
+      const sourceChapterId = handle.dataset.chapterId || item?.dataset.chapterId;
+      if (!item || !largeSceneId || !sourceChapterId) return;
+      pointerLargeSceneDrag = {
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        largeSceneId,
+        sourceChapterId,
+        handle,
+        item,
+        started: false,
+        targetChapterId: "",
+        targetIndex: 0,
+      };
+      handle.setPointerCapture?.(event.pointerId);
+    });
+
+    document.addEventListener("pointermove", (event) => {
+      const state = pointerLargeSceneDrag;
+      if (!state || state.pointerId !== event.pointerId) return;
+      if (!state.started) {
+        if (Math.hypot(event.clientX - state.startX, event.clientY - state.startY) < 6) return;
+        state.started = true;
+        state.item.classList.add("dragging");
+        document.body.classList.add("is-dragging-large-scene");
+      }
+      event.preventDefault();
+      const target = document.elementFromPoint(event.clientX, event.clientY);
+      const dropZone = target?.closest?.("[data-drop-zone]");
+      const placement = updateLargeSceneDropIndicator(
+        dropZone,
+        event.clientX,
+        event.clientY,
+        state.item
+      );
+      state.targetChapterId = placement?.targetChapterId || "";
+      state.targetIndex = placement?.targetIndex || 0;
+      if (!placement) clearDropIndicators();
+    }, { passive: false });
+
+    document.addEventListener("pointerup", async (event) => {
+      const state = pointerLargeSceneDrag;
+      if (!state || state.pointerId !== event.pointerId) return;
+      const wasDragging = state.started;
+      const completed = finishLargeScenePointerDrag();
+      if (!wasDragging) return;
+      event.preventDefault();
+      suppressLargeSceneClickUntil = Date.now() + 250;
+      await commitLargeScenePointerMove(completed);
+    });
+
+    document.addEventListener("pointercancel", (event) => {
+      if (pointerLargeSceneDrag?.pointerId !== event.pointerId) return;
+      finishLargeScenePointerDrag();
+    });
+
+    document.addEventListener("click", (event) => {
+      if (Date.now() > suppressLargeSceneClickUntil) return;
+      if (!event.target.closest?.("[data-large-scene-drag-handle]")) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }, true);
+  }
+
   initLargeSceneDrag();
+  initLargeScenePointerDrag();
 
   async function request(path, options) {
     const isFormData = options?.body instanceof FormData;
@@ -11860,9 +12035,7 @@
       const specType = menu.dataset.contextSpecType;
       const characterId = menu.dataset.contextCharacterId;
       hideContextMenu();
-      if (action === "add-chapter" && type === "story-root") {
-        openChapterModal();
-      } else if (action === "add-large-scene" && type === "chapter") {
+      if (action === "add-large-scene" && type === "chapter") {
         openLargeSceneModal(id, name);
       } else if (action === "add-small-scene" && type === "large-scene") {
         openSmallSceneCreateDialog(id, name);

@@ -5481,6 +5481,39 @@ button.story-tree-row:hover {
   color: #6877ca;
 }
 
+[data-large-scene-drag-handle] {
+  cursor: grab;
+  user-select: none;
+}
+
+[data-large-scene-drag-handle]:active {
+  cursor: grabbing;
+}
+
+body.is-dragging-large-scene,
+body.is-dragging-large-scene * {
+  cursor: grabbing !important;
+  user-select: none !important;
+}
+
+[data-large-scene-drag-item].dragging {
+  opacity: 0.38;
+}
+
+.story-large-scene-drop-zone {
+  min-height: 8px;
+}
+
+.story-large-scene-drop-zone > .large-scene-drop-indicator {
+  width: auto;
+  min-height: 4px;
+  margin: 3px 6px 3px 0;
+  border: 0;
+  border-radius: 99px;
+  background: #6f7ed5;
+  box-shadow: 0 0 0 3px rgba(111, 126, 213, 0.14);
+}
+
 .story-directory-backend-note {
   display: flex;
   align-items: flex-start;
@@ -5644,6 +5677,15 @@ button.story-tree-row:hover {
   grid-template-columns: repeat(2, minmax(320px, 1fr));
   gap: 12px;
   margin-top: 11px;
+}
+
+.story-large-scene-grid > .large-scene-drop-indicator {
+  width: auto;
+  min-height: 116px;
+  margin: 0;
+  border: 2px dashed #6f7ed5;
+  border-radius: 18px;
+  background: rgba(111, 126, 213, 0.08);
 }
 
 .story-large-scene-wrapper {
