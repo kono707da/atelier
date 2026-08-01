@@ -801,14 +801,7 @@
   }
 
   function enhanceCharacters() {
-    document.querySelectorAll(".character-expanded[data-character-id]").forEach((panel) => {
-      const advanced = panel.parentElement?.querySelector(".character-advanced-content");
-      if (!advanced || advanced.querySelector("[data-gap-action='character-completeness']")) return;
-      const actions = document.createElement("div");
-      actions.className = "gap-row-actions character-advanced-tools";
-      actions.innerHTML = `<button class="btn small" type="button" data-gap-action="character-completeness" data-character-id="${escapeHtml(panel.dataset.characterId)}">完整性检查</button><button class="btn small" type="button" data-gap-action="character-batch-paste" data-character-id="${escapeHtml(panel.dataset.characterId)}">批量粘贴</button>`;
-      advanced.prepend(actions);
-    });
+    // 人物详情保持极简；批量与完整性工具暂不注入主界面。
   }
 
   async function showCompleteness(characterId) {

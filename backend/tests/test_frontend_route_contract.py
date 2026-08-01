@@ -127,9 +127,13 @@ class FrontendRouteContractTests(unittest.TestCase):
 
     def test_character_library_defaults_to_simple_editor(self) -> None:
         self.assertNotIn('id="character-tag-filter"', self.source)
-        self.assertIn("管理人物形象和不同景别的生图参数", self.source)
-        self.assertIn("添加景别", self.source)
-        self.assertIn("character-advanced-management", self.source)
+        self.assertIn("管理人物形象、规格名称和提示词", self.source)
+        self.assertIn("添加规格", self.source)
+        self.assertIn("规格名称", self.source)
+        self.assertIn("输入这个规格使用的提示词", self.source)
+        self.assertNotIn("character-advanced-management", self.source)
+        self.assertNotIn('name="lora_name"', self.source)
+        self.assertNotIn('data-gap-action="spec-preview-upload"', self.source)
         self.assertNotIn('placeholder="例如：近景特写"', self.source)
         self.assertIn('draggable="true"', self.source)
         self.assertIn('data-menu-action="copy"', self.source)

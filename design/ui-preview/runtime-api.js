@@ -4301,7 +4301,7 @@
       <section class="production-empty-state">
         <span class="production-empty-icon">CH</span>
         <h2>还没有人物</h2>
-        <p>创建人物后，可以为其管理多套形象变体与景别规格。</p>
+        <p>创建人物后，可以为不同形象填写规格和提示词。</p>
         <button class="btn primary" data-api-action="open-character-modal">新建人物</button>
         <small>尚未创建任何人物</small>
       </section>
@@ -4348,9 +4348,9 @@
         </div>
         <div class="character-block-body">
           <div class="character-block-name">${escapeHtml(character.name)}</div>
-          <div class="character-block-meta">${variantCount} 个形象 · ${specCount} 个景别</div>
+          <div class="character-block-meta">${variantCount} 个形象 · ${specCount} 个规格</div>
           <div class="character-block-stats">
-            <span class="stats-pill ${filled > 0 ? "" : "muted"}">景别 ${completeness}</span>
+            <span class="stats-pill ${filled > 0 ? "" : "muted"}">规格 ${completeness}</span>
             <span class="character-card-time">${escapeHtml(characterDate(character.updated_at))}</span>
           </div>
           <div class="character-card-actions">
@@ -4434,61 +4434,38 @@
 
   function specValueEditor(value) {
     const label = specLabel(value);
-    const weight = value.lora_weight === null || value.lora_weight === undefined
-      ? ""
-      : String(value.lora_weight);
-    const filled = Boolean(
-      value.prompt ||
-      value.lora_name ||
-      value.model_override ||
-      value.notes ||
-      weight
-    );
+    const canRename = value.spec_type === "custom";
     return `
       <form
-        class="character-spec-editor"
+        class="character-spec-editor character-spec-simple-editor"
         data-inline-action="save-spec-value"
         data-spec-value-id="${escapeHtml(value.id)}"
+        data-spec-id="${escapeHtml(value.spec_id)}"
+        data-spec-type="${escapeHtml(value.spec_type)}"
+        data-original-name="${escapeHtml(label)}"
       >
-        <div class="character-spec-editor-head">
-          <div
-            class="character-spec-editor-title"
+        <label class="character-spec-field character-spec-name-field">
+          <span>规格名称</span>
+          <input
+            name="spec_name"
+            type="text"
+            maxlength="80"
+            value="${escapeHtml(label)}"
+            ${canRename ? "" : "readonly"}
             data-context-menu="project-spec"
             data-spec-id="${escapeHtml(value.spec_id)}"
             data-name="${escapeHtml(label)}"
             data-spec-type="${escapeHtml(value.spec_type)}"
-          >
-            <strong>${escapeHtml(label)}</strong>
-            <span>${escapeHtml(specTypeLabels[value.spec_type] || value.spec_type)}</span>
-          </div>
-          <span class="spec-fill-state ${filled ? "filled" : ""}">${filled ? "已填写" : "未填写"}</span>
-        </div>
-        <label class="character-spec-field character-spec-field-wide">
-          <span>提示词</span>
-          <textarea name="prompt" rows="3" placeholder="输入当前人物、当前形象在这个景别下使用的提示词">${escapeHtml(value.prompt || "")}</textarea>
+            title="${canRename ? "" : "旧版内置规格名称不可修改"}"
+          />
         </label>
-        <div class="character-spec-field-grid">
-          <label class="character-spec-field">
-            <span>LoRA 文件</span>
-            <input name="lora_name" type="text" value="${escapeHtml(value.lora_name || "")}" placeholder="例如：character.safetensors" />
-          </label>
-          <label class="character-spec-field">
-            <span>LoRA 权重</span>
-            <input name="lora_weight" type="number" min="0" max="2" step="0.01" value="${escapeHtml(weight)}" placeholder="例如：0.8" />
-          </label>
-          <label class="character-spec-field character-spec-field-wide">
-            <span>模型覆盖</span>
-            <input name="model_override" type="text" value="${escapeHtml(value.model_override || "")}" placeholder="留空则使用工作流默认模型" />
-          </label>
-        </div>
-        <label class="character-spec-field character-spec-field-wide">
-          <span>备注</span>
-          <textarea name="notes" rows="2" placeholder="只供自己查看的使用说明">${escapeHtml(value.notes || "")}</textarea>
+        <label class="character-spec-field character-spec-prompt-field">
+          <span>提示词</span>
+          <textarea name="prompt" rows="5" placeholder="输入这个规格使用的提示词">${escapeHtml(value.prompt || "")}</textarea>
         </label>
         <div class="character-spec-editor-actions">
           <span class="spec-save-status" role="status"></span>
-          <button class="btn small" type="button" data-gap-action="spec-preview-upload" data-spec-value-id="${escapeHtml(value.id)}">上传预览</button>
-          <button class="btn small primary" type="submit">保存此景别</button>
+          <button class="btn small primary" type="submit">保存规格</button>
         </div>
       </form>
     `;
@@ -4513,10 +4490,10 @@
         <div class="character-expanded-main">
           <div class="character-expanded-head">
             <div>
-              <div class="character-expanded-title">景别规格</div>
-              <div class="character-expanded-sub">为每种形象分别填写全身、半身或特写参数 · 当前形象：${escapeHtml(defaultVariant ? defaultVariant.name : "无")}</div>
+              <div class="character-expanded-title">规格</div>
+              <div class="character-expanded-sub">当前形象：${escapeHtml(defaultVariant ? defaultVariant.name : "无")}</div>
             </div>
-            <button class="btn small primary" type="button" data-api-action="add-spec" data-project-id="${escapeHtml(character.project_id)}">添加景别</button>
+            <button class="btn small primary" type="button" data-api-action="add-spec" data-project-id="${escapeHtml(character.project_id)}">添加规格</button>
           </div>
           <div
             class="character-spec-editor-list"
@@ -4527,14 +4504,9 @@
               ? '<div class="character-spec-editor-loading">正在读取规格内容…</div>'
               : '<div class="character-spec-editor-empty">请先创建一个形象。</div>'}
           </div>
-          <form class="character-inline-form" data-inline-action="create-spec" data-project-id="${escapeHtml(character.project_id)}" hidden>
-            <label class="label">景别</label>
-            <select class="modal-input" name="spec_type">
-              <option value="full_body">全身</option>
-              <option value="half_body">半身</option>
-              <option value="close_up">特写</option>
-            </select>
-            <button class="btn small primary" type="submit">创建景别</button>
+          <form class="character-inline-form character-simple-spec-create" data-inline-action="create-spec" data-project-id="${escapeHtml(character.project_id)}" hidden>
+            <input class="modal-input" name="custom_label" maxlength="80" autocomplete="off" placeholder="输入规格名称" required />
+            <button class="btn small primary" type="submit">创建规格</button>
             <button class="btn small" type="button" data-api-action="cancel-add-spec">取消</button>
           </form>
         </div>
@@ -4554,10 +4526,10 @@
       if (list.dataset.activeVariantId !== variantId) return;
       list.innerHTML = payload.total
         ? payload.items.map(specValueEditor).join("")
-        : '<div class="character-spec-editor-empty">还没有景别。请先点击右上角“添加景别”。</div>';
+        : '<div class="character-spec-editor-empty">还没有规格。请先点击右上角“添加规格”。</div>';
       const sub = modal.querySelector(".character-expanded-sub");
       if (sub) {
-        sub.textContent = `${payload.total} 个景别 · 当前形象：${variantName || ""}`;
+        sub.textContent = `${payload.total} 个规格 · 当前形象：${variantName || ""}`;
       }
     } catch (error) {
       if (list.dataset.activeVariantId !== variantId) return;
@@ -4587,7 +4559,7 @@
         data-is-default="${isDefault ? "1" : "0"}"
       >
         <span class="variant-tab-name">${escapeHtml(variant.name)}</span>
-        ${isDefault ? '<span class="variant-tab-default">默认</span>' : ""}
+        ${isDefault && variant.name !== "默认" ? '<span class="variant-tab-default">默认</span>' : ""}
       </button>
     `;
   }
@@ -4832,7 +4804,7 @@
     const actions = header?.querySelector(".header-actions");
     if (title) title.textContent = "人物库";
     characterListState.tag = "";
-    if (subtitle) subtitle.textContent = "管理人物形象和不同景别的生图参数。";
+    if (subtitle) subtitle.textContent = "管理人物形象、规格名称和提示词。";
     if (actions) {
       actions.innerHTML = '<button class="btn primary" type="button" data-api-action="open-character-modal">新建人物</button>';
     }
@@ -7199,27 +7171,17 @@
           ${characterDetailCover(character)}
           <div class="header-name">
             <div class="header-name-text">${escapeHtml(character.name)}</div>
-            <div class="header-name-sub">${stats.variant_count} 个形象 · ${specsPayload.total} 个景别 · 已填写 ${stats.spec_filled}/${stats.spec_total}</div>
+            <div class="header-name-sub">${stats.variant_count} 个形象 · ${specsPayload.total} 个规格 · 已填写 ${stats.spec_filled}/${stats.spec_total}</div>
           </div>
           <button class="character-detail-modal-close" type="button" data-api-action="close-character-detail-modal" aria-label="关闭">×</button>
         </div>
         <div class="character-detail-modal-scroll" id="character-detail-modal-scroll">
           ${characterExpandedPanel(character, variantsPayload.items, specsPayload.items)}
-          <details class="character-advanced-management">
-            <summary>
-              <span><strong>高级管理</strong><small>批量检查和规格矩阵</small></span>
-              <span class="character-advanced-hint">展开</span>
-            </summary>
-            <div class="character-advanced-content">
-              ${characterMatrixSection()}
-            </div>
-          </details>
         </div>
       `;
       if (defaultVariant) {
         await renderVariantSpecValues(defaultVariant.id, defaultVariant.name);
       }
-      await renderCharacterMatrix(characterId);
     } catch (error) {
       body.innerHTML = `<div style="padding:24px;color:#c33;">加载失败：${escapeHtml(error.message)}</div>`;
     }
@@ -8265,7 +8227,7 @@
     const title = modal.querySelector("h2");
     const submitBtn = modal.querySelector('button[type="submit"]');
     if (title) title.textContent = "复制形象";
-    if (context) context.textContent = `将「${currentName}」复制为新形象，并保留景别内容。`;
+    if (context) context.textContent = `将「${currentName}」复制为新形象，并保留规格内容。`;
     if (submitBtn) submitBtn.textContent = "复制形象";
     error.textContent = "";
     nameInput.value = `${currentName} 副本`;
@@ -12300,7 +12262,7 @@
       const form = modal && modal.querySelector('form[data-inline-action="create-spec"]');
       if (form) {
         form.hidden = false;
-        form.querySelector("select").focus();
+        form.querySelector("input").focus();
       }
       return;
     }
@@ -13012,16 +12974,12 @@
   }
 
   async function submitInlineSpec(form) {
-    const select = form.querySelector("select");
     const labelInput = form.querySelector('input[name="custom_label"]');
     const submit = form.querySelector('button[type="submit"]');
     const error = submitInlineError(form);
-    const specType = select.value;
-    const customLabel = labelInput
-      ? (labelInput.value || "").trim().replace(/\s+/g, " ")
-      : "";
-    if (specType === "custom" && !customLabel) {
-      error.textContent = "自定义规格必须填写标签。";
+    const customLabel = (labelInput.value || "").trim().replace(/\s+/g, " ");
+    if (!customLabel) {
+      error.textContent = "请输入规格名称。";
       labelInput.focus();
       return;
     }
@@ -13031,75 +12989,60 @@
     try {
       await request(`/api/specs`, {
         method: "POST",
-        body: JSON.stringify({ spec_type: specType, custom_label: customLabel }),
+        body: JSON.stringify({ spec_type: "custom", custom_label: customLabel }),
       });
       form.hidden = true;
       form.reset();
       await refreshCharacterDetail();
-      if (typeof showToast === "function") showToast("景别已创建");
+      if (typeof showToast === "function") showToast(`规格「${customLabel}」已创建`);
     } catch (requestError) {
       error.textContent = requestError.message;
-      select.focus();
+      labelInput.focus();
     } finally {
       submit.disabled = false;
-      submit.textContent = "创建景别";
+      submit.textContent = "创建规格";
     }
   }
 
   async function submitCharacterSpecValue(form) {
     const submit = form.querySelector('button[type="submit"]');
     const status = form.querySelector(".spec-save-status");
-    const weightInput = form.elements.lora_weight;
-    const weightText = weightInput.value.trim();
-    const loraWeight = weightText === "" ? null : Number(weightText);
-    if (
-      loraWeight !== null &&
-      (!Number.isFinite(loraWeight) || loraWeight < 0 || loraWeight > 2)
-    ) {
-      status.textContent = "权重必须在 0 到 2 之间";
+    const nameInput = form.elements.spec_name;
+    const specName = nameInput.value.trim().replace(/\s+/g, " ");
+    if (!specName) {
+      status.textContent = "请输入规格名称";
       status.className = "spec-save-status error";
-      weightInput.focus();
+      nameInput.focus();
       return;
     }
-
-    const payload = {
-      prompt: form.elements.prompt.value,
-      lora_name: form.elements.lora_name.value.trim(),
-      lora_weight: loraWeight,
-      model_override: form.elements.model_override.value.trim(),
-      notes: form.elements.notes.value,
-    };
+    const prompt = form.elements.prompt.value;
 
     submit.disabled = true;
     submit.textContent = "保存中…";
     status.textContent = "";
     status.className = "spec-save-status";
     try {
+      if (form.dataset.specType === "custom" && specName !== form.dataset.originalName) {
+        await request(API.spec(form.dataset.specId), {
+          method: "PATCH",
+          body: JSON.stringify({ custom_label: specName }),
+        });
+        form.dataset.originalName = specName;
+        nameInput.dataset.name = specName;
+      }
       await request(`/api/character-spec-values/${form.dataset.specValueId}`, {
         method: "PATCH",
-        body: JSON.stringify(payload),
+        body: JSON.stringify({ prompt }),
       });
-      const filled = Boolean(
-        payload.prompt ||
-        payload.lora_name ||
-        payload.lora_weight !== null ||
-        payload.model_override ||
-        payload.notes
-      );
-      const fillState = form.querySelector(".spec-fill-state");
-      if (fillState) {
-        fillState.textContent = filled ? "已填写" : "未填写";
-        fillState.classList.toggle("filled", filled);
-      }
       status.textContent = "已保存";
       status.className = "spec-save-status success";
-      if (typeof showToast === "function") showToast("人物景别已保存");
+      if (typeof showToast === "function") showToast(`规格「${specName}」已保存`);
     } catch (requestError) {
       status.textContent = requestError.message;
       status.className = "spec-save-status error";
     } finally {
       submit.disabled = false;
-      submit.textContent = "保存此景别";
+      submit.textContent = "保存规格";
     }
   }
 

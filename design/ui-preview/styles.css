@@ -2581,7 +2581,7 @@ button {
 }
 
 .atelier-modal.character-detail-modal {
-  width: min(980px, calc(100vw - 32px));
+  width: min(860px, calc(100vw - 32px));
   max-height: 90vh;
   display: flex;
   flex-direction: column;
@@ -2962,6 +2962,32 @@ button {
   border-radius: 13px;
   background: #fbfcfe;
   box-shadow: 0 5px 15px rgba(56, 68, 98, 0.04);
+}
+
+.character-spec-simple-editor {
+  grid-template-columns: 1fr;
+  gap: 12px;
+  padding: 16px;
+  background: #fff;
+}
+
+.character-spec-simple-editor .character-spec-name-field,
+.character-spec-simple-editor .character-spec-prompt-field,
+.character-spec-simple-editor .character-spec-editor-actions {
+  grid-column: 1;
+}
+
+.character-spec-simple-editor .character-spec-name-field input {
+  font-weight: 650;
+}
+
+.character-spec-simple-editor .character-spec-name-field input[readonly] {
+  color: #6f788b;
+  background: #f4f5f8;
+}
+
+.character-simple-spec-create .modal-input {
+  min-width: 240px;
 }
 
 .character-spec-editor-head,
