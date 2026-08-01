@@ -4465,6 +4465,7 @@
         </label>
         <div class="character-spec-editor-actions">
           <span class="spec-save-status" role="status"></span>
+          <button class="btn small danger-soft" type="button" data-api-action="delete-character-spec" data-spec-id="${escapeHtml(value.spec_id)}">删除规格</button>
           <button class="btn small primary" type="submit">保存规格</button>
         </div>
       </form>
@@ -4504,11 +4505,6 @@
               ? '<div class="character-spec-editor-loading">正在读取规格内容…</div>'
               : '<div class="character-spec-editor-empty">请先创建一个形象。</div>'}
           </div>
-          <form class="character-inline-form character-simple-spec-create" data-inline-action="create-spec" data-project-id="${escapeHtml(character.project_id)}" hidden>
-            <input class="modal-input" name="custom_label" maxlength="80" autocomplete="off" placeholder="输入规格名称" required />
-            <button class="btn small primary" type="submit">创建规格</button>
-            <button class="btn small" type="button" data-api-action="cancel-add-spec">取消</button>
-          </form>
         </div>
       </section>
     `;
@@ -12258,21 +12254,14 @@
     }
 
     if (button.dataset.apiAction === "add-spec") {
-      const modal = document.getElementById("character-detail-modal");
-      const form = modal && modal.querySelector('form[data-inline-action="create-spec"]');
-      if (form) {
-        form.hidden = false;
-        form.querySelector("input").focus();
-      }
+      await createCharacterSpec(button);
       return;
     }
 
-    if (button.dataset.apiAction === "cancel-add-spec") {
-      const form = button.closest('form[data-inline-action="create-spec"]');
-      if (form) {
-        form.hidden = true;
-        form.reset();
-      }
+    if (button.dataset.apiAction === "delete-character-spec") {
+      const form = button.closest(".character-spec-simple-editor");
+      const currentName = form?.elements.spec_name?.value.trim() || "未命名规格";
+      await deleteProjectSpec(button.dataset.specId, currentName);
       return;
     }
 
@@ -12932,9 +12921,6 @@
     if (action === "create-variant") {
       event.preventDefault();
       await submitInlineVariant(form);
-    } else if (action === "create-spec") {
-      event.preventDefault();
-      await submitInlineSpec(form);
     } else if (action === "save-spec-value") {
       event.preventDefault();
       await submitCharacterSpecValue(form);
@@ -12973,34 +12959,42 @@
     }
   }
 
-  async function submitInlineSpec(form) {
-    const labelInput = form.querySelector('input[name="custom_label"]');
-    const submit = form.querySelector('button[type="submit"]');
-    const error = submitInlineError(form);
-    const customLabel = (labelInput.value || "").trim().replace(/\s+/g, " ");
-    if (!customLabel) {
-      error.textContent = "请输入规格名称。";
-      labelInput.focus();
-      return;
+  async function createCharacterSpec(button) {
+    const modal = document.getElementById("character-detail-modal");
+    if (!modal || modal.hidden) return;
+    const existingNames = new Set(
+      [...modal.querySelectorAll('.character-spec-simple-editor input[name="spec_name"]')]
+        .map((input) => input.value.trim())
+        .filter(Boolean)
+    );
+    let index = 1;
+    let name = "未命名规格";
+    while (existingNames.has(name)) {
+      index += 1;
+      name = `未命名规格 ${index}`;
     }
-    submit.disabled = true;
-    submit.textContent = "正在创建…";
-    error.textContent = "";
+    button.disabled = true;
+    button.textContent = "正在添加…";
     try {
-      await request(`/api/specs`, {
+      const payload = await request(API.specs, {
         method: "POST",
-        body: JSON.stringify({ spec_type: "custom", custom_label: customLabel }),
+        body: JSON.stringify({ spec_type: "custom", custom_label: name }),
       });
-      form.hidden = true;
-      form.reset();
+      const specId = payload.spec?.id;
       await refreshCharacterDetail();
-      if (typeof showToast === "function") showToast(`规格「${customLabel}」已创建`);
+      const input = specId
+        ? document.querySelector(`.character-spec-simple-editor input[data-spec-id="${cssEscape(specId)}"]`)
+        : null;
+      input?.focus();
+      input?.select();
+      if (typeof showToast === "function") showToast("规格已添加，请填写名称和提示词");
     } catch (requestError) {
-      error.textContent = requestError.message;
-      labelInput.focus();
+      if (typeof showToast === "function") showToast(requestError.message);
     } finally {
-      submit.disabled = false;
-      submit.textContent = "创建规格";
+      if (button.isConnected) {
+        button.disabled = false;
+        button.textContent = "添加规格";
+      }
     }
   }
 
