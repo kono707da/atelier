@@ -930,6 +930,7 @@ class CharacterBatchPasteSpecValuesRequest(BaseModel):
 class SetShotPageCharacterRequest(BaseModel):
     character_id: str
     variant_id: str
+    spec_id: str | None = None
 
 
 class CreateCharacterFromRoleRequest(BaseModel):
@@ -5066,11 +5067,18 @@ def create_app(
     ) -> dict[str, object]:
         try:
             reference = manager.set_shot_page_character(
-                shot_page_id, request.character_id, request.variant_id
+                shot_page_id, request.character_id, request.variant_id,
+                request.spec_id,
             )
         except ValueError as error:
-            status_code = 404 if "不存在" in str(error) else 400
-            raise HTTPException(status_code=status_code, detail=str(error)) from error
+            msg = str(error)
+            if "不存在" in msg:
+                code = 404
+            elif "不属于" in msg or "尚未填写" in msg:
+                code = 422
+            else:
+                code = 400
+            raise HTTPException(status_code=code, detail=msg) from error
         return {
             "database_environment": manager.active_environment,
             "shot_page_id": shot_page_id,

@@ -304,7 +304,10 @@ def resolve_slot_value(
     project_config = context.get("project_config", {}) if isinstance(context.get("project_config"), dict) else {}
 
     if slot_type == "positive_prompt":
+        # 稳定顺序(需求 6.3):页级正向 → 人物规格(场景化) → 素材正向(按类型顺序)
         parts: list[str] = []
+        if material_values.get("page_prompt"):
+            parts.append(str(material_values["page_prompt"]))
         if character_values.get("character_prompt"):
             parts.append(str(character_values["character_prompt"]))
         if material_values.get("material_prompt"):

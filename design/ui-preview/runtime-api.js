@@ -2479,6 +2479,8 @@
     tree: null,
     smallSceneBackendAvailable: true,
     smallSceneWorkspace: null,
+    selectedShotPageId: null,
+    shotPageDetail: null, // 当前选中页的详情缓存(含 characterBinding/promptDraft/precheck)
   };
 
   const storyResourceTypeLabels = {
@@ -2921,8 +2923,10 @@
   }
 
   function smallScenePageCard(page, workspace) {
+    const selected = storyWorkspaceState.selectedShotPageId === page.id;
+    const status = shotPageStatusBadge(page, workspace);
     return `
-      <article class="small-scene-page-card" data-scene-page-id="${escapeHtml(page.id)}">
+      <article class="small-scene-page-card ${selected ? "selected" : ""}" data-scene-page-id="${escapeHtml(page.id)}" data-shot-page-select="${escapeHtml(page.id)}">
         <header>
           <span>P${String(page.sort_order || 0).padStart(2, "0")}</span>
           <div class="small-scene-page-actions">
@@ -2935,8 +2939,23 @@
         <strong>${escapeHtml(page.name)}</strong>
         <p>${escapeHtml(page.description || "尚未填写画面描述")}</p>
         <div class="small-scene-page-mappings">${scenePageMappingSummary(page, workspace)}</div>
+        ${status}
       </article>
     `;
+  }
+
+  function shotPageStatusBadge(page, workspace) {
+    // 轻量状态徽章：仅基于本地可见字段判断"未完成/可编译"两档。
+    // 真正的"可跑图"由详情区完成检查(含工作流检查)刷新。
+    const hasName = !!(page.name && page.name.trim());
+    const hasPrompt = !!(page.prompt_text && page.prompt_text.trim());
+    const hasMaterial = (workspace.mappings || []).some(
+      (m) => m.scene_page_id === page.id,
+    );
+    const complete = hasName && hasPrompt && hasMaterial;
+    const label = complete ? "可编译" : "未完成";
+    const cls = complete ? "ready" : "incomplete";
+    return `<span class="shot-page-status-badge ${cls}" data-shot-page-status="${escapeHtml(page.id)}">${escapeHtml(label)}</span>`;
   }
 
   function materialPageMappingButtons(resource, materialPage, workspace) {
@@ -3046,6 +3065,9 @@
                   <span>＋</span><strong>添加场景页</strong>
                 </button>
               </div>
+            </section>
+            <section class="shot-page-detail-section" id="shot-page-detail-section" hidden>
+              <div class="shot-page-detail-loading">正在加载页面详情…</div>
             </section>
             <section class="small-scene-resources-section">
               <div class="small-scene-section-heading">
@@ -3168,6 +3190,13 @@
       if (focus) {
         document.querySelector(`[data-scene-page-id="${CSS.escape(focus.dataset.scenePageFocus)}"]`)
           ?.scrollIntoView({ behavior: "smooth", inline: "center", block: "center" });
+        return;
+      }
+      const selectPage = event.target.closest("[data-shot-page-select]");
+      if (selectPage && !event.target.closest("[data-small-scene-page-action]")) {
+        // 点击页面卡片任意非按钮区域 → 选中该页并展开详情
+        const pageId = selectPage.dataset.shotPageSelect;
+        await selectShotPage(pageId);
         return;
       }
       const pageAction = event.target.closest("[data-small-scene-page-action]");
@@ -3319,6 +3348,703 @@
     });
   }
 
+  // ==================== 场景页详情区(需求 §4) ====================
+
+  async function selectShotPage(pageId) {
+    const workspace = storyWorkspaceState.smallSceneWorkspace;
+    if (!workspace) return;
+    // 切换页前若有未保存提示词，提示用户
+    const cur = storyWorkspaceState.shotPageDetail;
+    if (cur && cur.promptDirty && storyWorkspaceState.selectedShotPageId !== pageId) {
+      const confirmed = await confirmDialog({
+        title: "放弃未保存的提示词？",
+        message: "当前页面提示词已修改但未保存，切换页面将丢失修改。确定切换？",
+        confirmText: "切换并放弃",
+        danger: true,
+      });
+      if (!confirmed) return;
+      cur.promptDirty = false;
+    }
+    const page = (workspace.pages || []).find((p) => p.id === pageId);
+    if (!page) return;
+    storyWorkspaceState.selectedShotPageId = pageId;
+    // 刷新卡片选中态
+    document.querySelectorAll(".small-scene-page-card").forEach((card) => {
+      card.classList.toggle("selected", card.dataset.scenePageId === pageId);
+    });
+    const section = document.getElementById("shot-page-detail-section");
+    if (!section) return;
+    section.hidden = false;
+    section.innerHTML = '<div class="shot-page-detail-loading">正在加载页面详情…</div>';
+    section.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    const detail = await loadShotPageDetail(page);
+    storyWorkspaceState.shotPageDetail = detail;
+    // 加载项目默认工作流状态(需求 §4.5：完成状态区分"未完成/可编译/可跑图")
+    const projectId = storyWorkspaceState.project?.id;
+    if (projectId) {
+      try {
+        const wfRes = await requestOptional(`/api/projects/${projectId}/default-workflow`);
+        if (wfRes && wfRes.workflow) {
+          detail.projectWorkflow = { exists: true, workflow: wfRes.workflow };
+        } else {
+          detail.projectWorkflow = { exists: false };
+        }
+      } catch (e) {
+        detail.projectWorkflow = { exists: false };
+      }
+    }
+    section.innerHTML = renderShotPageDetail(page, workspace, detail);
+    bindShotPageDetailEvents(section, page, workspace);
+  }
+
+  async function loadShotPageDetail(page) {
+    const detail = {
+      binding: null,
+      characters: [],
+      variants: [],
+      specValues: [],
+      specs: [],
+      promptDraft: {
+        prompt_text: page.prompt_text || "",
+        negative_prompt: page.negative_prompt || "",
+      },
+      promptDirty: false,
+      promptEditing: false,
+      precheck: null,
+      projectWorkflow: null, // null=未检查; {exists:false}; {exists:true, ...}
+    };
+    // 并行加载:人物绑定、人物列表、公共规格定义
+    const [bindingRes, charactersRes, specsRes] = await Promise.all([
+      requestOptional(API.shotPageCharacter(page.id)).then(
+        (res) => res,
+        () => null,
+      ),
+      request(`${API.characters}?limit=200&offset=0&sort=name_asc`).then(
+        (res) => res,
+        () => ({ items: [], total: 0 }),
+      ),
+      requestOptional(API.specs).then((res) => res, () => ({ items: [] })),
+    ]);
+    detail.binding = bindingRes?.reference || null;
+    detail.characters = charactersRes?.items || [];
+    detail.specs = specsRes?.items || [];
+    // 如果已有绑定，预加载形象与规格值
+    if (detail.binding) {
+      try {
+        const variantsRes = await request(
+          `${API.characterVariants(detail.binding.character_id)}?include_archived=false`,
+        );
+        detail.variants = variantsRes?.items || [];
+      } catch (e) { detail.variants = []; }
+      if (detail.binding.variant_id) {
+        try {
+          const svRes = await request(
+            API.characterVariantSpecValues(detail.binding.variant_id),
+          );
+          detail.specValues = svRes?.items || [];
+        } catch (e) { detail.specValues = []; }
+      }
+    }
+    return detail;
+  }
+
+  function renderShotPageDetail(page, workspace, detail) {
+    return `
+      <div class="shot-page-detail" data-shot-page-detail="${escapeHtml(page.id)}">
+        <header class="shot-page-detail-header">
+          <div>
+            <small>P${String(page.sort_order || 0).padStart(2, "0")} · 页面详情</small>
+            <strong>${escapeHtml(page.name)}</strong>
+            ${page.description ? `<p>${escapeHtml(page.description)}</p>` : '<p class="muted">尚未填写画面描述</p>'}
+          </div>
+          <button class="btn small" type="button" data-shot-page-action="close">收起</button>
+        </header>
+        <div class="shot-page-detail-body">
+          ${renderShotPageCharacterSection(page, detail)}
+          ${renderShotPagePromptSection(page, detail)}
+          ${renderShotPageMaterialSection(page, workspace)}
+          ${renderShotPageCompletionSection(page, detail)}
+        </div>
+      </div>
+    `;
+  }
+
+  // ── 4.2 主要人物配置 ──────────────────────────────────────
+  function renderShotPageCharacterSection(page, detail) {
+    const b = detail.binding;
+    if (b && !storyWorkspaceState._shotPageEditingCharacter) {
+      // 只读摘要
+      const specLabel = b.spec_id
+        ? (b.spec_name || b.spec_type || "未命名规格")
+        : "未选择规格";
+      return `
+        <section class="shot-page-detail-block" data-shot-page-block="character">
+          <div class="shot-page-block-heading">
+            <div><span>02</span><div><strong>主要人物</strong><small>当前页面绑定的角色与形象</small></div></div>
+            <div class="shot-page-block-actions">
+              <button class="btn small soft" type="button" data-shot-page-action="edit-character">修改</button>
+              <button class="btn small danger" type="button" data-shot-page-action="unbind-character">解除绑定</button>
+            </div>
+          </div>
+          <div class="shot-page-character-summary">
+            <div><label>人物</label><strong>${escapeHtml(b.character_name || "—")}</strong></div>
+            <div><label>形象</label><strong>${escapeHtml(b.variant_name || "—")}</strong></div>
+            <div><label>规格</label><strong>${escapeHtml(specLabel)}</strong></div>
+          </div>
+        </section>
+      `;
+    }
+    // 编辑表单(三级联动)
+    const characters = detail.characters || [];
+    const variants = detail.variants || [];
+    const specValues = detail.specValues || [];
+    const specs = detail.specs || [];
+    // 编辑态：从 detail 暂存的草稿读取，否则从 binding 初始化
+    const draft = storyWorkspaceState._shotPageCharacterDraft || {
+      character_id: b?.character_id || "",
+      variant_id: b?.variant_id || "",
+      spec_id: b?.spec_id || "",
+    };
+    const variantOptions = variants.map((v) =>
+      `<option value="${escapeHtml(v.id)}" ${v.id === draft.variant_id ? "selected" : ""}>${escapeHtml(v.name)}</option>`
+    ).join("");
+    // 规格只显示已填写(prompt 非空)的规格
+    const filledSpecIds = new Set(
+      specValues.filter((sv) => sv.prompt && String(sv.prompt).trim()).map((sv) => sv.spec_id)
+    );
+    const specOptions = specs
+      .filter((s) => filledSpecIds.has(s.id))
+      .map((s) => {
+        const label = s.custom_label || s.spec_type || s.id;
+        return `<option value="${escapeHtml(s.id)}" ${s.id === draft.spec_id ? "selected" : ""}>${escapeHtml(label)}</option>`;
+      })
+      .join("");
+    const hasVariants = variants.length > 0;
+    const hasFilledSpecs = filledSpecIds.size > 0;
+    return `
+      <section class="shot-page-detail-block" data-shot-page-block="character">
+        <div class="shot-page-block-heading">
+          <div><span>02</span><div><strong>主要人物</strong><small>三级联动：人物 → 形象 → 规格</small></div></div>
+          ${b ? `<div class="shot-page-block-actions"><button class="btn small" type="button" data-shot-page-action="cancel-character">取消</button></div>` : ""}
+        </div>
+        <form class="shot-page-character-form" data-shot-page-character-form>
+          <label class="label">人物</label>
+          <select class="modal-input" name="character_id" data-shot-page-cascade="character">
+            <option value="">请选择人物</option>
+            ${characters.map((c) =>
+              `<option value="${escapeHtml(c.id)}" ${c.id === draft.character_id ? "selected" : ""}>${escapeHtml(c.name)}</option>`
+            ).join("")}
+          </select>
+          <label class="label">形象</label>
+          <select class="modal-input" name="variant_id" data-shot-page-cascade="variant" ${hasVariants ? "" : "disabled"}>
+            <option value="">请选择形象</option>
+            ${variantOptions}
+          </select>
+          ${!hasVariants && draft.character_id ? '<p class="shot-page-hint">该人物没有可用形象。</p>' : ""}
+          <label class="label">规格</label>
+          <select class="modal-input" name="spec_id" data-shot-page-cascade="spec" ${hasFilledSpecs ? "" : "disabled"}>
+            <option value="">请选择规格</option>
+            ${specOptions}
+          </select>
+          ${draft.variant_id && !hasFilledSpecs ? '<p class="shot-page-hint">该形象尚未填写任何规格值。</p>' : ""}
+          <div class="modal-error shot-page-character-error" role="alert"></div>
+          <div class="shot-page-form-actions">
+            <button class="btn primary" type="submit">保存人物配置</button>
+            ${b ? '<button class="btn" type="button" data-shot-page-action="cancel-character">取消</button>' : ""}
+          </div>
+        </form>
+      </section>
+    `;
+  }
+
+  // ── 4.3 页级提示词 ──────────────────────────────────────
+  function renderShotPagePromptSection(page, detail) {
+    const draft = detail.promptDraft;
+    const editing = detail.promptEditing;
+    if (editing) {
+      return `
+        <section class="shot-page-detail-block" data-shot-page-block="prompt">
+          <div class="shot-page-block-heading">
+            <div><span>03</span><div><strong>页级提示词</strong><small>只保存当前页专属内容；人物与素材由绑定解析</small></div></div>
+            <div class="shot-page-block-actions">
+              <button class="btn small" type="button" data-shot-page-action="cancel-prompt">取消</button>
+            </div>
+          </div>
+          <form class="shot-page-prompt-form" data-shot-page-prompt-form>
+            <label class="label" for="shot-page-prompt-positive">页级正向提示词</label>
+            <textarea id="shot-page-prompt-positive" class="modal-input shot-page-textarea" name="prompt_text" rows="6">${escapeHtml(draft.prompt_text || "")}</textarea>
+            <label class="label" for="shot-page-prompt-negative">页级负向提示词</label>
+            <textarea id="shot-page-prompt-negative" class="modal-input shot-page-textarea" name="negative_prompt" rows="4">${escapeHtml(draft.negative_prompt || "")}</textarea>
+            <div class="modal-error shot-page-prompt-error" role="alert"></div>
+            <div class="shot-page-form-actions">
+              <button class="btn primary" type="submit">保存提示词</button>
+              <button class="btn" type="button" data-shot-page-action="cancel-prompt">取消</button>
+            </div>
+          </form>
+        </section>
+      `;
+    }
+    // 只读完整展示
+    const pos = (draft.prompt_text || "").trim();
+    const neg = (draft.negative_prompt || "").trim();
+    return `
+      <section class="shot-page-detail-block" data-shot-page-block="prompt">
+        <div class="shot-page-block-heading">
+          <div><span>03</span><div><strong>页级提示词</strong><small>完整展示；点击编辑修改</small></div></div>
+          <div class="shot-page-block-actions">
+            <button class="btn small soft" type="button" data-shot-page-action="edit-prompt">编辑</button>
+          </div>
+        </div>
+        <div class="shot-page-prompt-readonly">
+          <label class="label">页级正向提示词</label>
+          <pre class="shot-page-prompt-text ${pos ? "" : "muted"}">${escapeHtml(pos || "尚未填写")}</pre>
+          <label class="label">页级负向提示词</label>
+          <pre class="shot-page-prompt-text ${neg ? "" : "muted"}">${escapeHtml(neg || "尚未填写")}</pre>
+        </div>
+      </section>
+    `;
+  }
+
+  // ── 4.4 已关联素材及其页映射 ────────────────────────────
+  function renderShotPageMaterialSection(page, workspace) {
+    const mappings = (workspace.mappings || []).filter((m) => m.scene_page_id === page.id);
+    const resources = workspace.resources || [];
+    const rows = mappings.map((m) => {
+      const res = resources.find((r) => r.material_id === m.material_id);
+      const pageLabel = m.material_page_name || (m.material_page_id || "").slice(0, 8);
+      const typeLabel = storyResourceTypeLabels[m.material_type] || m.material_type;
+      return `
+        <div class="shot-page-material-row type-${escapeHtml(m.material_type)}">
+          <span class="shot-page-material-type">${escapeHtml(typeLabel)}</span>
+          <strong>${escapeHtml(res?.name || m.material_name || "素材")}</strong>
+          <small>素材页：${escapeHtml(pageLabel)}</small>
+          <button class="btn small danger" type="button" data-shot-page-action="unmap-material" data-material-type="${escapeHtml(m.material_type)}">解除</button>
+        </div>
+      `;
+    }).join("");
+    return `
+      <section class="shot-page-detail-block" data-shot-page-block="material">
+        <div class="shot-page-block-heading">
+          <div><span>04</span><div><strong>已关联素材</strong><small>该页绑定的素材页映射；下方素材页映射区可管理全部</small></div></div>
+          <div class="shot-page-block-actions">
+            <button class="btn small soft" type="button" data-shot-page-action="scroll-to-resources">管理映射</button>
+          </div>
+        </div>
+        <div class="shot-page-material-list">
+          ${rows || '<p class="muted">该页尚未关联任何素材页。</p>'}
+        </div>
+      </section>
+    `;
+  }
+
+  // ── 4.4 / 4.5 完成状态与默认工作流 ──────────────────────
+  function renderShotPageCompletionSection(page, detail) {
+    const pre = detail.precheck;
+    const wf = detail.projectWorkflow;
+    const checks = computeShotPageChecks(page, detail);
+    const blocking = checks.filter((c) => !c.passed);
+    const wfMissing = wf && wf.exists === false;
+    const statusLabel = blocking.length
+      ? "未完成"
+      : (wfMissing ? "可编译" : (wf && wf.exists ? "可跑图" : "可编译"));
+    const statusCls = blocking.length ? "incomplete" : "ready";
+    return `
+      <section class="shot-page-detail-block" data-shot-page-block="completion">
+        <div class="shot-page-block-heading">
+          <div><span>05</span><div><strong>完成状态</strong><small>检查页面是否可编译或跑图</small></div></div>
+          <div class="shot-page-block-actions">
+            <span class="shot-page-completion-status ${statusCls}">${escapeHtml(statusLabel)}</span>
+            <button class="btn small soft" type="button" data-shot-page-action="run-precheck">重新检查</button>
+          </div>
+        </div>
+        <ul class="shot-page-check-list">
+          ${checks.map((c) => `
+            <li class="${c.passed ? "passed" : "failed"}">
+              <span class="shot-page-check-icon">${c.passed ? "✓" : "✕"}</span>
+              <span class="shot-page-check-label">${escapeHtml(c.label)}</span>
+              ${!c.passed && c.action ? `<button class="btn small soft" type="button" data-shot-page-action="${escapeHtml(c.action)}">${escapeHtml(c.actionLabel || "前往处理")}</button>` : ""}
+            </li>
+          `).join("")}
+        </ul>
+        ${wfMissing ? `
+          <div class="shot-page-workflow-notice">
+            <strong>项目尚未设置默认工作流</strong>
+            <p>页面内容已完整，但当前项目没有默认工作流，暂不能跑图。</p>
+            <button class="btn primary" type="button" data-shot-page-action="goto-workflow">前往工作流</button>
+          </div>
+        ` : ""}
+        ${pre ? `<div class="shot-page-precheck-summary">${renderShotPagePrecheckSummary(pre)}</div>` : ""}
+      </section>
+    `;
+  }
+
+  function computeShotPageChecks(page, detail) {
+    const b = detail.binding;
+    const hasName = !!(page.name && page.name.trim());
+    const hasPrompt = !!(detail.promptDraft && (detail.promptDraft.prompt_text || "").trim());
+    const hasCharacter = !!(b && b.character_id);
+    const hasVariant = !!(b && b.variant_id);
+    const hasSpec = !!(b && b.spec_id);
+    const workspace = storyWorkspaceState.smallSceneWorkspace;
+    const hasMaterial = (workspace?.mappings || []).some((m) => m.scene_page_id === page.id);
+    const wf = detail.projectWorkflow;
+    const hasWorkflow = !!(wf && wf.exists);
+    return [
+      { key: "name", label: "页面名称已填写", passed: hasName, action: "focus-name", actionLabel: "编辑名称" },
+      { key: "prompt", label: "页级正向提示词已填写", passed: hasPrompt, action: "edit-prompt", actionLabel: "编辑提示词" },
+      { key: "character", label: "已绑定主要人物", passed: hasCharacter, action: "edit-character", actionLabel: "绑定人物" },
+      { key: "variant", label: "已选择人物形象", passed: hasVariant, action: "edit-character", actionLabel: "选择形象" },
+      { key: "spec", label: "已选择公共规格", passed: hasSpec, action: "edit-character", actionLabel: "选择规格" },
+      { key: "material", label: "至少关联一个素材页", passed: hasMaterial, action: "scroll-to-resources", actionLabel: "关联素材" },
+      { key: "workflow", label: "项目默认工作流存在且可用", passed: hasWorkflow, action: "goto-workflow", actionLabel: "前往工作流" },
+    ];
+  }
+
+  function renderShotPagePrecheckSummary(pre) {
+    const errors = pre.errors || pre.blockers || [];
+    const warnings = pre.warnings || [];
+    if (!errors.length && !warnings.length) return '<p class="muted">预检查无阻塞项。</p>';
+    const items = [
+      ...errors.map((e) => `<li class="failed"><span>✕</span>${escapeHtml(e.message || e.type || "阻塞错误")}</li>`),
+      ...warnings.map((w) => `<li class="warn"><span>!</span>${escapeHtml(w.message || w.type || "警告")}</li>`),
+    ].join("");
+    return `<ul class="shot-page-precheck-list">${items}</ul>`;
+  }
+
+  function bindShotPageDetailEvents(section, page, workspace) {
+    section.addEventListener("click", async (event) => {
+      const btn = event.target.closest("[data-shot-page-action]");
+      if (!btn) return;
+      const action = btn.dataset.shotPageAction;
+      try {
+        if (action === "close") {
+          storyWorkspaceState.selectedShotPageId = null;
+          storyWorkspaceState.shotPageDetail = null;
+          storyWorkspaceState._shotPageEditingCharacter = false;
+          storyWorkspaceState._shotPageCharacterDraft = null;
+          section.hidden = true;
+          section.innerHTML = "";
+          document.querySelectorAll(".small-scene-page-card").forEach((c) => c.classList.remove("selected"));
+          return;
+        }
+        if (action === "edit-character") {
+          storyWorkspaceState._shotPageEditingCharacter = true;
+          storyWorkspaceState._shotPageCharacterDraft = null;
+          await rerenderShotPageDetail(page, workspace);
+          return;
+        }
+        if (action === "cancel-character") {
+          storyWorkspaceState._shotPageEditingCharacter = false;
+          storyWorkspaceState._shotPageCharacterDraft = null;
+          await rerenderShotPageDetail(page, workspace);
+          return;
+        }
+        if (action === "unbind-character") {
+          const confirmed = await confirmDialog({
+            title: "解除人物绑定",
+            message: `确定解除「${page.name}」的人物绑定吗？人物库与规格数据不会被删除。`,
+            confirmText: "解除绑定",
+            danger: true,
+          });
+          if (!confirmed) return;
+          await request(API.shotPageCharacter(page.id), { method: "DELETE" });
+          storyWorkspaceState._shotPageEditingCharacter = false;
+          storyWorkspaceState._shotPageCharacterDraft = null;
+          await reloadShotPageDetailBinding(page);
+          if (typeof showToast === "function") showToast("已解除人物绑定");
+          return;
+        }
+        if (action === "edit-prompt") {
+          storyWorkspaceState.shotPageDetail.promptEditing = true;
+          await rerenderShotPageDetail(page, workspace);
+          return;
+        }
+        if (action === "cancel-prompt") {
+          if (storyWorkspaceState.shotPageDetail.promptDirty) {
+            const confirmed = await confirmDialog({
+              title: "放弃未保存的提示词？",
+              message: "当前提示词已修改但未保存，确定放弃？",
+              confirmText: "放弃",
+              danger: true,
+            });
+            if (!confirmed) return;
+          }
+          storyWorkspaceState.shotPageDetail.promptEditing = false;
+          storyWorkspaceState.shotPageDetail.promptDirty = false;
+          // 恢复草稿为已保存值
+          const ws = storyWorkspaceState.smallSceneWorkspace;
+          const fresh = (ws.pages || []).find((p) => p.id === page.id);
+          storyWorkspaceState.shotPageDetail.promptDraft = {
+            prompt_text: fresh?.prompt_text || "",
+            negative_prompt: fresh?.negative_prompt || "",
+          };
+          await rerenderShotPageDetail(page, workspace);
+          return;
+        }
+        if (action === "run-precheck") {
+          await runShotPagePrecheck(page);
+          return;
+        }
+        if (action === "goto-workflow") {
+          const params = new URLSearchParams(window.location.search);
+          const projectId = storyWorkspaceState.project?.id;
+          // 跳转到工作流列表页，保留 project 参数以便回到当前项目
+          const next = new URLSearchParams();
+          next.set("page", "workflows");
+          if (projectId) next.set("project", String(projectId));
+          next.set("from", "shotPage");
+          if (params.get("smallScene")) next.set("smallScene", params.get("smallScene"));
+          next.set("shotPage", page.id);
+          window.location.search = `?${next.toString()}`;
+          return;
+        }
+        if (action === "scroll-to-resources") {
+          document.querySelector(".small-scene-resources-section")
+            ?.scrollIntoView({ behavior: "smooth", block: "start" });
+          return;
+        }
+        if (action === "focus-name") {
+          await selectShotPage(page.id);
+          // 触发编辑名称对话框
+          const ws = storyWorkspaceState.smallSceneWorkspace;
+          openStoryEditorDialog({
+            title: "编辑场景页",
+            description: `正在编辑 P${String(page.sort_order).padStart(2, "0")}`,
+            nameLabel: "页面名称",
+            nameValue: page.name || "",
+            descriptionValue: page.description || "",
+            showDescription: true,
+            submitText: "保存修改",
+            onSubmit: async (values) => {
+              await request(`/api/small-scene-pages/${page.id}`, {
+                method: "PATCH",
+                body: JSON.stringify(values),
+              });
+              await refreshSmallSceneWorkspace();
+              // 刷新后重新选中
+              await selectShotPage(page.id);
+            },
+          });
+          return;
+        }
+        if (action === "unmap-material") {
+          const mt = btn.dataset.materialType;
+          await request(API.scenePageMapping(page.id, mt), {
+            method: "PUT",
+            body: JSON.stringify({ material_page_id: null }),
+          });
+          await refreshSmallSceneWorkspace();
+          await selectShotPage(page.id);
+          return;
+        }
+      } catch (error) {
+        if (typeof showToast === "function") showToast(error.message || "操作失败");
+      }
+    });
+
+    // 三级联动
+    const cascade = section.querySelector("[data-shot-page-character-form]");
+    if (cascade) {
+      cascade.addEventListener("change", async (event) => {
+        const sel = event.target;
+        if (!sel.dataset.shotPageCascade) return;
+        const level = sel.dataset.shotPageCascade;
+        const draft = {
+          character_id: cascade.elements.character_id.value,
+          variant_id: cascade.elements.variant_id.value,
+          spec_id: cascade.elements.spec_id.value,
+        };
+        if (level === "character") {
+          // 切换人物 → 清空形象与规格
+          draft.variant_id = "";
+          draft.spec_id = "";
+          storyWorkspaceState._shotPageCharacterDraft = draft;
+          if (draft.character_id) {
+            try {
+              const res = await request(`${API.characterVariants(draft.character_id)}?include_archived=false`);
+              storyWorkspaceState.shotPageDetail.variants = res?.items || [];
+            } catch (e) { storyWorkspaceState.shotPageDetail.variants = []; }
+            storyWorkspaceState.shotPageDetail.specValues = [];
+          } else {
+            storyWorkspaceState.shotPageDetail.variants = [];
+            storyWorkspaceState.shotPageDetail.specValues = [];
+          }
+          await rerenderShotPageDetail(page, workspace);
+          return;
+        }
+        if (level === "variant") {
+          // 切换形象 → 清空规格
+          draft.spec_id = "";
+          storyWorkspaceState._shotPageCharacterDraft = draft;
+          if (draft.variant_id) {
+            try {
+              const res = await request(API.characterVariantSpecValues(draft.variant_id));
+              storyWorkspaceState.shotPageDetail.specValues = res?.items || [];
+            } catch (e) { storyWorkspaceState.shotPageDetail.specValues = []; }
+          } else {
+            storyWorkspaceState.shotPageDetail.specValues = [];
+          }
+          await rerenderShotPageDetail(page, workspace);
+          return;
+        }
+        if (level === "spec") {
+          storyWorkspaceState._shotPageCharacterDraft = draft;
+        }
+      });
+      cascade.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const errorEl = cascade.querySelector(".shot-page-character-error");
+        const submit = cascade.querySelector('[type="submit"]');
+        const draft = {
+          character_id: cascade.elements.character_id.value,
+          variant_id: cascade.elements.variant_id.value,
+          spec_id: cascade.elements.spec_id.value,
+        };
+        if (!draft.character_id || !draft.variant_id) {
+          if (errorEl) errorEl.textContent = "请选择人物与形象。";
+          return;
+        }
+        submit.disabled = true;
+        try {
+          await request(API.shotPageCharacter(page.id), {
+            method: "PUT",
+            body: JSON.stringify(draft),
+          });
+          storyWorkspaceState._shotPageEditingCharacter = false;
+          storyWorkspaceState._shotPageCharacterDraft = null;
+          await reloadShotPageDetailBinding(page);
+          if (typeof showToast === "function") showToast("人物配置已保存");
+        } catch (error) {
+          if (errorEl) errorEl.textContent = error.message || "保存失败";
+        } finally {
+          submit.disabled = false;
+        }
+      });
+    }
+
+    // 提示词表单
+    const promptForm = section.querySelector("[data-shot-page-prompt-form]");
+    if (promptForm) {
+      const positive = promptForm.elements.prompt_text;
+      const negative = promptForm.elements.negative_prompt;
+      const checkDirty = () => {
+        const d = storyWorkspaceState.shotPageDetail.promptDraft;
+        const dirty = (positive.value !== (d.prompt_text || "")) || (negative.value !== (d.negative_prompt || ""));
+        storyWorkspaceState.shotPageDetail.promptDirty = dirty;
+      };
+      positive.addEventListener("input", checkDirty);
+      negative.addEventListener("input", checkDirty);
+      promptForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const errorEl = promptForm.querySelector(".shot-page-prompt-error");
+        const submit = promptForm.querySelector('[type="submit"]');
+        const payload = {
+          prompt_text: positive.value,
+          negative_prompt: negative.value,
+        };
+        submit.disabled = true;
+        try {
+          await request(`/api/small-scene-pages/${page.id}`, {
+            method: "PATCH",
+            body: JSON.stringify(payload),
+          });
+          // 同步 workspace 中的 page 数据
+          const ws = storyWorkspaceState.smallSceneWorkspace;
+          const idx = (ws.pages || []).findIndex((p) => p.id === page.id);
+          if (idx >= 0) {
+            ws.pages[idx].prompt_text = payload.prompt_text;
+            ws.pages[idx].negative_prompt = payload.negative_prompt;
+            page.prompt_text = payload.prompt_text;
+            page.negative_prompt = payload.negative_prompt;
+          }
+          storyWorkspaceState.shotPageDetail.promptDraft = payload;
+          storyWorkspaceState.shotPageDetail.promptDirty = false;
+          storyWorkspaceState.shotPageDetail.promptEditing = false;
+          await rerenderShotPageDetail(page, ws);
+          // 刷新页面卡片状态徽章
+          await refreshPageStripStatus();
+          if (typeof showToast === "function") showToast("提示词已保存");
+        } catch (error) {
+          if (errorEl) errorEl.textContent = error.message || "保存失败";
+        } finally {
+          submit.disabled = false;
+        }
+      });
+    }
+  }
+
+  async function reloadShotPageDetailBinding(page) {
+    const detail = storyWorkspaceState.shotPageDetail;
+    try {
+      const res = await requestOptional(API.shotPageCharacter(page.id));
+      detail.binding = res?.reference || null;
+      if (detail.binding) {
+        const vRes = await request(`${API.characterVariants(detail.binding.character_id)}?include_archived=false`);
+        detail.variants = vRes?.items || [];
+        if (detail.binding.variant_id) {
+          const svRes = await request(API.characterVariantSpecValues(detail.binding.variant_id));
+          detail.specValues = svRes?.items || [];
+        }
+      }
+    } catch (e) {
+      detail.binding = null;
+    }
+    await rerenderShotPageDetail(page, storyWorkspaceState.smallSceneWorkspace);
+    await refreshPageStripStatus();
+  }
+
+  async function rerenderShotPageDetail(page, workspace) {
+    const section = document.getElementById("shot-page-detail-section");
+    if (!section || section.hidden) return;
+    const detail = storyWorkspaceState.shotPageDetail;
+    section.innerHTML = renderShotPageDetail(page, workspace, detail);
+    bindShotPageDetailEvents(section, page, workspace);
+  }
+
+  async function runShotPagePrecheck(page) {
+    const detail = storyWorkspaceState.shotPageDetail;
+    const section = document.getElementById("shot-page-detail-section");
+    const statusEl = section?.querySelector(".shot-page-precheck-summary");
+    if (statusEl) statusEl.innerHTML = '<p class="muted">正在执行预检查…</p>';
+    const projectId = storyWorkspaceState.project?.id;
+    try {
+      const payload = await request(API.projectPrecheck(projectId), {
+        method: "POST",
+        body: JSON.stringify({ scope: "shot_pages", scope_id: page.id }),
+      });
+      detail.precheck = payload;
+    } catch (error) {
+      detail.precheck = { errors: [{ message: error.message || "预检查失败" }], warnings: [] };
+    }
+    // 同时检查项目默认工作流
+    try {
+      const wfRes = await requestOptional(`/api/projects/${projectId}/default-workflow`);
+      detail.projectWorkflow = { exists: true, workflow: wfRes?.workflow };
+    } catch (e) {
+      detail.projectWorkflow = { exists: false };
+    }
+    await rerenderShotPageDetail(page, storyWorkspaceState.smallSceneWorkspace);
+  }
+
+  async function refreshPageStripStatus() {
+    const workspace = storyWorkspaceState.smallSceneWorkspace;
+    if (!workspace) return;
+    document.querySelectorAll(".small-scene-page-card").forEach((card) => {
+      const pageId = card.dataset.scenePageId;
+      const page = (workspace.pages || []).find((p) => p.id === pageId);
+      if (!page) return;
+      const badge = card.querySelector(".shot-page-status-badge");
+      if (!badge) return;
+      const hasName = !!(page.name && page.name.trim());
+      const hasPrompt = !!(page.prompt_text && page.prompt_text.trim());
+      const hasMaterial = (workspace.mappings || []).some((m) => m.scene_page_id === pageId);
+      const complete = hasName && hasPrompt && hasMaterial;
+      badge.textContent = complete ? "可编译" : "未完成";
+      badge.classList.toggle("ready", complete);
+      badge.classList.toggle("incomplete", !complete);
+    });
+  }
+
   async function renderSmallSceneWorkspace(project, smallSceneId) {
     const page = document.querySelector(".page-scroll");
     if (!page) return;
@@ -3344,6 +4070,30 @@
     storyWorkspaceState.smallSceneWorkspace = payload;
     page.insertAdjacentHTML("beforeend", smallSceneWorkspaceShell(project, payload));
     bindSmallSceneWorkspace(project, payload);
+    // 刷新后若仍选中某页，且该页仍存在，则重新打开详情区(保留未保存草稿)
+    const selectedId = storyWorkspaceState.selectedShotPageId;
+    const stillExists = selectedId && (payload.pages || []).some((p) => p.id === selectedId);
+    if (stillExists && storyWorkspaceState.shotPageDetail) {
+      const freshPage = (payload.pages || []).find((p) => p.id === selectedId);
+      // 同步草稿为最新已保存值(若非编辑态)
+      if (!storyWorkspaceState.shotPageDetail.promptEditing) {
+        storyWorkspaceState.shotPageDetail.promptDraft = {
+          prompt_text: freshPage.prompt_text || "",
+          negative_prompt: freshPage.negative_prompt || "",
+        };
+      }
+      // 重新检查项目默认工作流状态
+      try {
+        const wfRes = await requestOptional(`/api/projects/${project.id}/default-workflow`);
+        storyWorkspaceState.shotPageDetail.projectWorkflow = { exists: true, workflow: wfRes?.workflow };
+      } catch (e) {
+        storyWorkspaceState.shotPageDetail.projectWorkflow = { exists: false };
+      }
+      await selectShotPage(selectedId);
+    } else if (!stillExists) {
+      storyWorkspaceState.selectedShotPageId = null;
+      storyWorkspaceState.shotPageDetail = null;
+    }
   }
 
   async function renderProductionStoryCanvasV3(project) {
@@ -4111,8 +4861,9 @@
             <select name="scope" class="modal-input" id="precheck-scope">
               <option value="project">整个项目</option>
               <option value="chapter">指定章节</option>
-              <option value="large-scene">指定大场景</option>
-              <option value="small-scene">指定小场景</option>
+              <option value="large_scene">指定大场景</option>
+              <option value="small_scene">指定小场景</option>
+              <option value="shot_pages">指定场景页</option>
             </select>
             <div id="precheck-target-wrap" hidden>
               <label class="label">目标</label>
@@ -4138,22 +4889,27 @@
         }
         targetWrap.hidden = false;
         const chapters = storyWorkspaceState.tree || [];
+        const ws = storyWorkspaceState.smallSceneWorkspace;
         let options = [];
         if (scope === "chapter") {
           options = chapters.map((ch) => ({ value: ch.id, label: ch.name }));
-        } else if (scope === "large-scene") {
+        } else if (scope === "large_scene") {
           chapters.forEach((ch) => {
             (ch.large_scenes || []).forEach((ls) => {
               options.push({ value: ls.id, label: `${ls.name}（${ch.name}）` });
             });
           });
-        } else if (scope === "small-scene") {
+        } else if (scope === "small_scene") {
           chapters.forEach((ch) => {
             (ch.large_scenes || []).forEach((ls) => {
               (ls.small_scenes || []).forEach((ss) => {
                 options.push({ value: ss.id, label: `${ss.name}（${ls.name}）` });
               });
             });
+          });
+        } else if (scope === "shot_pages") {
+          (ws?.pages || []).forEach((p) => {
+            options.push({ value: p.id, label: `P${String(p.sort_order || 0).padStart(2, "0")} ${p.name || ""}` });
           });
         }
         targetSelect.innerHTML = options.length
@@ -4191,9 +4947,8 @@
     const body = {};
     body.scope = scope;
     if (targetId) {
-      if (scope === "chapter") body.chapter_id = targetId;
-      else if (scope === "large-scene") body.large_scene_id = targetId;
-      else if (scope === "small-scene") body.small_scene_id = targetId;
+      // 后端统一使用 scope_id(下划线 scope 值：project/chapter/large_scene/small_scene/branch/shot_pages)
+      body.scope_id = targetId;
     }
     button.disabled = true;
     button.textContent = "正在检查…";
@@ -13264,6 +14019,15 @@
     if (!materialDetailState.dirty) return;
     event.preventDefault();
     event.returnValue = "";
+  });
+
+  // 场景页详情区：未保存提示词时刷新/离开页面提示
+  window.addEventListener("beforeunload", (event) => {
+    const detail = storyWorkspaceState.shotPageDetail;
+    if (detail && detail.promptDirty) {
+      event.preventDefault();
+      event.returnValue = "";
+    }
   });
 
   document.addEventListener("submit", async (event) => {

@@ -479,9 +479,9 @@ def _compile_page(
                 })
                 return None, blocking, warnings
 
-        # 2. 解析人物绑定
+        # 2. 解析人物绑定（含 spec_id）
         page_char = conn.execute(
-            """SELECT spc.character_id, spc.variant_id,
+            """SELECT spc.character_id, spc.variant_id, spc.spec_id,
                       c.name AS character_name, cv.name AS variant_name,
                       cv.default_prompt, cv.default_lora_name,
                       cv.default_lora_weight, cv.default_model_override
@@ -502,32 +502,41 @@ def _compile_page(
         else:
             field_sources["character"] = "shot_page"
             field_sources["variant"] = "shot_page"
+            if page_char["spec_id"]:
+                field_sources["spec"] = "shot_page"
 
-        # 3. 解析规格值（变体 × 规格）
+        # 3. 解析所选规格值（仅读取页绑定的单个 spec_id，严禁遍历形象下全部规格，
+        #    否则正面全身/侧面/背面/半身/特写会互相冲突）
         spec_values: dict[str, Any] = {}
-        if page_char:
-            spec_rows = conn.execute(
+        selected_spec_id = page_char["spec_id"] if page_char else None
+        selected_spec_value_id: str | None = None
+        if page_char and selected_spec_id:
+            spec_row = conn.execute(
                 """SELECT csv.id, csv.prompt, csv.lora_name, csv.lora_weight,
                           csv.model_override, csv.notes,
-                          s.spec_type, s.custom_label, s.is_required
+                          s.spec_type, s.custom_label, s.is_required, s.sort_order
                    FROM character_spec_values csv
                    JOIN specs s ON s.id = csv.spec_id
-                   WHERE csv.variant_id = ?
-                   ORDER BY s.sort_order""",
-                (page_char["variant_id"],),
-            ).fetchall()
-            for sr in spec_rows:
-                spec_key = sr["custom_label"] or sr["spec_type"]
+                   WHERE csv.variant_id = ? AND csv.spec_id = ?""",
+                (page_char["variant_id"], selected_spec_id),
+            ).fetchone()
+            if spec_row:
+                spec_key = spec_row["custom_label"] or spec_row["spec_type"]
+                selected_spec_value_id = spec_row["id"]
+                scene_prompt, is_unstructured = _extract_scene_spec_prompt(spec_row["prompt"])
                 spec_values[spec_key] = {
-                    "spec_value_id": sr["id"],
-                    "prompt": sr["prompt"],
-                    "lora_name": sr["lora_name"],
-                    "lora_weight": sr["lora_weight"],
-                    "model_override": sr["model_override"],
-                    "notes": sr["notes"],
-                    "is_required": bool(sr["is_required"]),
+                    "spec_id": selected_spec_id,
+                    "spec_value_id": spec_row["id"],
+                    "prompt": spec_row["prompt"],
+                    "scene_prompt": scene_prompt,
+                    "unstructured": is_unstructured,
+                    "lora_name": spec_row["lora_name"],
+                    "lora_weight": spec_row["lora_weight"],
+                    "model_override": spec_row["model_override"],
+                    "notes": spec_row["notes"],
+                    "is_required": bool(spec_row["is_required"]),
                 }
-                if sr["is_required"] and not sr["prompt"] and not sr["lora_name"]:
+                if spec_row["is_required"] and not spec_row["prompt"] and not spec_row["lora_name"]:
                     warnings.append({
                         "type": "missing_required_spec",
                         "entity_type": "shot_page",
@@ -535,6 +544,30 @@ def _compile_page(
                         "entity_name": page["title"],
                         "message": f"必填规格 '{spec_key}' 的提示词和 LoRA 均为空",
                     })
+                if is_unstructured and scene_prompt:
+                    warnings.append({
+                        "type": "unstructured_character_spec",
+                        "entity_type": "shot_page",
+                        "entity_id": page_id,
+                        "entity_name": page["title"],
+                        "message": f"场景页 '{page['title']}' 的人物规格 '{spec_key}' 无分段标记,可能带入构图冲突",
+                    })
+            else:
+                warnings.append({
+                    "type": "missing_spec_value",
+                    "entity_type": "shot_page",
+                    "entity_id": page_id,
+                    "entity_name": page["title"],
+                    "message": f"场景页 '{page['title']}' 选择的规格在该形象下尚无规格值",
+                })
+        elif page_char and not selected_spec_id:
+            warnings.append({
+                "type": "missing_spec",
+                "entity_type": "shot_page",
+                "entity_id": page_id,
+                "entity_name": page["title"],
+                "message": f"场景页 '{page['title']}' 未选择公共规格",
+            })
 
         # 4. 解析素材页映射
         material_mappings: dict[str, dict[str, Any]] = {}
@@ -616,6 +649,10 @@ def _compile_page(
             effective["lora_name"] = page_char["default_lora_name"] or ""
             effective["lora_weight"] = page_char["default_lora_weight"]
             effective["model_override"] = page_char["default_model_override"] or ""
+            # 规格绑定可追溯:记录所选 spec_id 与解析出的 spec_value_id
+            if selected_spec_id:
+                effective["spec_id"] = selected_spec_id
+                effective["spec_value_id"] = selected_spec_value_id or ""
         if width_override is not None:
             effective["width"] = int(width_override)
             field_sources["width"] = "batch_override"
@@ -718,16 +755,70 @@ def _compute_input_hash(item: RenderItem) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
 
+# 素材类型稳定顺序(需求 6.3)
+MATERIAL_ORDER: tuple[str, ...] = (
+    "prompt", "composite_template", "composition", "expression", "scene", "lighting",
+)
+
+
+def _extract_scene_spec_prompt(prompt: str) -> tuple[str, bool]:
+    """从规格提示词中提取场景化人物提示词(需求 6.2)。
+
+    排除训练确认图专用内容:质量/数量/站姿/方向/背景/光线/构图/确认图分段。
+    保留:人物身份/触发词/固定外貌/服装分段(含 -- 标题行原样输出)。
+    按 -- 分段语义提取;无分段则原样返回(标记 unstructured,由调用方产生警告)。
+    不得破坏人物触发词中的下划线。
+    """
+    if not prompt:
+        return "", False
+    lines = prompt.split("\n")
+    has_segment = any(line.strip().startswith("--") for line in lines)
+    if not has_segment:
+        return prompt, True  # 无分段,原样返回(标记 unstructured)
+
+    # 排除分段标题关键词(小写匹配)
+    EXCLUDE_KW = (
+        "quality", "masterpiece", "score", "solo", "1girl", "1boy", "single",
+        "单人", "standing", "站姿", "pose", "background", "背景", "lighting",
+        "光线", "composition", "构图", "reference", "确认图", "from behind",
+        "back view", "side view", "front view",
+        # 中文常见分段标题(训练确认图专用)
+        "质量", "评分", "分数", "姿势", "动作", "方向", "构图", "背景",
+    )
+    result_lines: list[str] = []
+    keeping = True  # 分段前的内容默认保留
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("--"):
+            header_lower = stripped.lower()
+            keeping = not any(kw in header_lower for kw in EXCLUDE_KW)
+        if keeping:
+            result_lines.append(line)
+    return "\n".join(result_lines), False
+
+
+def _dedup_preserve(items: list[str]) -> list[str]:
+    """去重保序:同一文本片段只保留第一次出现(需求 6.3/6.4)。"""
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        if item and item not in seen:
+            seen.add(item)
+            result.append(item)
+    return result
+
+
 def resolve_slots_for_item(
     manager: Any,
     item: RenderItem,
     *,
     environment: str | None = None,
 ) -> list[dict[str, Any]]:
-    """为跑图项解析语义插槽。
+    """为跑图项解析语义插槽(需求 6.3/6.4/6.5)。
 
-    使用工作流版本的语义插槽绑定，结合跑图项的业务上下文，
-    生成每个插槽的解析结果。
+    正向提示词来源(稳定顺序):页级正向 → 人物规格(场景化提取) → 素材正向(按类型顺序)。
+    负向提示词来源:页级负向 → 素材负向(按类型顺序),未绑定人物时也必须能编译。
+    LoRA 优先级:页级/批量覆盖 > 所选规格 > 人物形象默认 > 项目/工作流默认。
     """
     from .workflow_models import NormalizedWorkflow
     from .workflow_slots import resolve_slot_value
@@ -746,38 +837,64 @@ def resolve_slots_for_item(
 
     # 获取语义插槽绑定
     slots = manager.list_semantic_slots(item.workflow_id, environment=environment)
+    effective = item.effective_config
 
-    # 构建业务上下文
+    # 人物规格场景化提取(_compile_page 已只放选中规格,这里最多一项)
+    spec_scene_prompt = ""
+    spec_lora_name = ""
+    spec_lora_weight: float | None = None
+    spec_model_override = ""
+    for _spec_key, spec_val in item.spec_values.items():
+        spec_scene_prompt = spec_val.get("scene_prompt", "") or spec_val.get("prompt", "")
+        if spec_val.get("lora_name"):
+            spec_lora_name = spec_val["lora_name"]
+            spec_lora_weight = spec_val.get("lora_weight")
+        if spec_val.get("model_override"):
+            spec_model_override = spec_val["model_override"]
+        break  # 只用选中规格
+
+    # LoRA 优先级:规格 > 形象
+    lora_name = spec_lora_name or effective.get("lora_name", "") or ""
+    lora_weight = spec_lora_weight if spec_lora_name else effective.get("lora_weight")
+    model_override = spec_model_override or effective.get("model_override", "") or ""
+
     character_values: dict[str, Any] = {}
     if item.character_id:
         character_values["character_name"] = item.character_name or ""
-        character_values["character_prompt"] = item.effective_config.get("character_prompt", "")
-        character_values["lora_name"] = item.effective_config.get("lora_name", "")
-        character_values["lora_weight"] = item.effective_config.get("lora_weight")
-        character_values["negative_prompt"] = item.effective_config.get("negative_prompt", "")
+        character_values["character_prompt"] = spec_scene_prompt or effective.get("character_prompt", "")
+        character_values["lora_name"] = lora_name
+        character_values["lora_weight"] = lora_weight
+        character_values["model_override"] = model_override
 
-    # 从素材映射提取提示词
+    # 负向:页级 + 素材负向(按类型顺序,去重保序)
+    # 未绑定人物时也必须能编译页级和素材负向(需求 6.4),不依附 character_values 是否存在
+    negative_parts: list[str] = []
+    page_negative = effective.get("negative_prompt", "") or ""
+    if page_negative:
+        negative_parts.append(page_negative)
+    for mat_type in MATERIAL_ORDER:
+        mapping = item.material_mappings.get(mat_type)
+        if mapping and mapping.get("negative_prompt"):
+            negative_parts.append(mapping["negative_prompt"])
+    character_values["negative_prompt"] = "\n".join(_dedup_preserve(negative_parts))
+
+    # 正向素材(按类型顺序,去重保序)
     material_prompt_parts: list[str] = []
-    for mat_type, mapping in item.material_mappings.items():
-        if mapping.get("prompt_text"):
+    for mat_type in MATERIAL_ORDER:
+        mapping = item.material_mappings.get(mat_type)
+        if mapping and mapping.get("prompt_text"):
             material_prompt_parts.append(mapping["prompt_text"])
     material_values = {
-        "material_prompt": ", ".join(material_prompt_parts) if material_prompt_parts else "",
+        # 页级正向单独字段,resolve_slot_value 按 页级→规格→素材 顺序拼接
+        "page_prompt": effective.get("prompt_text", "") or "",
+        "material_prompt": "\n".join(_dedup_preserve(material_prompt_parts)),
     }
-
-    # 从规格值提取
-    for spec_key, spec_val in item.spec_values.items():
-        if spec_val.get("prompt"):
-            material_prompt_parts.append(spec_val["prompt"])
-        if spec_val.get("lora_name") and not character_values.get("lora_name"):
-            character_values["lora_name"] = spec_val["lora_name"]
-            character_values["lora_weight"] = spec_val.get("lora_weight")
 
     project_config = {
         "default_seed": item.seed_value,
-        "default_width": item.effective_config.get("width"),
-        "default_height": item.effective_config.get("height"),
-        "default_checkpoint": item.effective_config.get("model_override"),
+        "default_width": effective.get("width"),
+        "default_height": effective.get("height"),
+        "default_checkpoint": model_override,
     }
 
     context = {

@@ -6566,6 +6566,420 @@ body.is-dragging-large-scene * {
   font-size: 9px;
 }
 
+/* 场景页卡片：选中态与状态徽章(需求 §4.1 / §4.4) */
+.small-scene-page-card {
+  cursor: pointer;
+  position: relative;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.small-scene-page-card:hover {
+  border-color: #b9c2e6;
+}
+
+.small-scene-page-card.selected {
+  border-color: #6374d8;
+  box-shadow: 0 0 0 2px rgba(99, 116, 216, 0.25), 0 11px 25px rgba(48, 59, 88, 0.08);
+}
+
+.shot-page-status-badge {
+  position: absolute;
+  top: 9px;
+  right: 9px;
+  padding: 2px 7px;
+  border-radius: 99px;
+  font-size: 7px;
+  font-weight: 760;
+  letter-spacing: 0.2px;
+}
+
+.shot-page-status-badge.incomplete {
+  color: #b56b6b;
+  background: #fbeef0;
+}
+
+.shot-page-status-badge.ready {
+  color: #4f8a7a;
+  background: #e8f5f0;
+}
+
+/* 场景页详情区(需求 §4) */
+.shot-page-detail-section {
+  min-width: 720px;
+  margin-top: 14px;
+  padding: 16px;
+  border: 1px solid rgba(215, 220, 232, 0.92);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 11px 25px rgba(48, 59, 88, 0.05);
+}
+
+.shot-page-detail-loading {
+  padding: 16px;
+  color: #979eac;
+  font-size: 9px;
+  text-align: center;
+}
+
+.shot-page-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.shot-page-detail-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid #eef0f5;
+}
+
+.shot-page-detail-header small {
+  color: #979eac;
+  font-size: 8px;
+  letter-spacing: 0.3px;
+}
+
+.shot-page-detail-header strong {
+  display: block;
+  margin-top: 3px;
+  color: #3e485e;
+  font-size: 13px;
+}
+
+.shot-page-detail-header p {
+  margin: 5px 0 0;
+  color: #8e96a6;
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.shot-page-detail-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.shot-page-detail-block {
+  padding: 12px;
+  border: 1px solid #eef0f6;
+  border-radius: 14px;
+  background: #fcfcfe;
+}
+
+.shot-page-block-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 2px 9px;
+}
+
+.shot-page-block-heading > div {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.shot-page-block-heading > div > span {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  border-radius: 8px;
+  color: #6374d8;
+  font-size: 8px;
+  font-weight: 780;
+  background: #eef1ff;
+}
+
+.shot-page-block-heading > div > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.shot-page-block-heading strong {
+  color: #3e485e;
+  font-size: 11px;
+}
+
+.shot-page-block-heading small {
+  color: #979eac;
+  font-size: 8px;
+}
+
+.shot-page-block-actions {
+  display: flex;
+  gap: 5px;
+  align-items: center;
+}
+
+/* 人物配置：只读摘要 */
+.shot-page-character-summary {
+  display: flex;
+  gap: 18px;
+  flex-wrap: wrap;
+  padding: 6px 4px 2px;
+}
+
+.shot-page-character-summary > div {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.shot-page-character-summary label {
+  color: #979eac;
+  font-size: 8px;
+}
+
+.shot-page-character-summary strong {
+  color: #414b61;
+  font-size: 11px;
+}
+
+/* 人物配置：编辑表单 */
+.shot-page-character-form,
+.shot-page-prompt-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px 2px;
+}
+
+.shot-page-character-form .label,
+.shot-page-prompt-form .label {
+  margin-top: 6px;
+  color: #6b7388;
+  font-size: 8px;
+}
+
+.shot-page-character-form .modal-input,
+.shot-page-prompt-form .modal-input {
+  padding: 7px 10px;
+  font-size: 9px;
+}
+
+.shot-page-textarea {
+  min-height: 90px;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.shot-page-hint {
+  color: #b08a4a;
+  font-size: 8px;
+  margin: 2px 0;
+}
+
+.shot-page-form-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+/* 页级提示词：只读展示 */
+.shot-page-prompt-readonly {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px 2px;
+}
+
+.shot-page-prompt-readonly .label {
+  margin-top: 6px;
+  color: #6b7388;
+  font-size: 8px;
+}
+
+.shot-page-prompt-text {
+  margin: 0;
+  padding: 9px 11px;
+  border-radius: 10px;
+  background: #f6f7fa;
+  color: #414b61;
+  font-size: 9px;
+  line-height: 1.6;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow: auto;
+}
+
+.shot-page-prompt-text.muted {
+  color: #aab0bd;
+  font-style: italic;
+}
+
+/* 已关联素材 */
+.shot-page-material-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px 2px;
+}
+
+.shot-page-material-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 10px;
+  border-radius: 10px;
+  background: #f6f7fa;
+  font-size: 9px;
+}
+
+.shot-page-material-row.type-composition { background: #eef1ff; }
+.shot-page-material-row.type-expression { background: #faedf1; }
+.shot-page-material-row.type-scene { background: #eaf6f3; }
+.shot-page-material-row.type-lighting { background: #fff2df; }
+
+.shot-page-material-type {
+  padding: 2px 7px;
+  border-radius: 99px;
+  color: #6574b5;
+  font-size: 7px;
+  font-weight: 720;
+  background: #fff;
+}
+
+.shot-page-material-row strong {
+  color: #414b61;
+}
+
+.shot-page-material-row small {
+  color: #979eac;
+  margin-left: auto;
+}
+
+/* 完成状态 */
+.shot-page-completion-status {
+  padding: 3px 9px;
+  border-radius: 99px;
+  font-size: 8px;
+  font-weight: 720;
+}
+
+.shot-page-completion-status.incomplete {
+  color: #b56b6b;
+  background: #fbeef0;
+}
+
+.shot-page-completion-status.ready {
+  color: #4f8a7a;
+  background: #e8f5f0;
+}
+
+.shot-page-check-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.shot-page-check-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 9px;
+  border-radius: 9px;
+  background: #f8f9fc;
+  font-size: 9px;
+}
+
+.shot-page-check-list li.passed {
+  color: #4f8a7a;
+}
+
+.shot-page-check-list li.failed {
+  color: #b56b6b;
+  background: #fdf3f4;
+}
+
+.shot-page-check-list li.warn {
+  color: #b08a4a;
+  background: #fdf6e9;
+}
+
+.shot-page-check-icon {
+  display: grid;
+  width: 16px;
+  height: 16px;
+  place-items: center;
+  border-radius: 99px;
+  font-size: 8px;
+  font-weight: 800;
+  background: #fff;
+}
+
+.shot-page-check-label {
+  flex: 1;
+  color: #475066;
+}
+
+.shot-page-workflow-notice {
+  margin-top: 9px;
+  padding: 11px 12px;
+  border: 1px solid #f0d9a8;
+  border-radius: 12px;
+  background: #fff8ec;
+}
+
+.shot-page-workflow-notice strong {
+  display: block;
+  color: #9a6b22;
+  font-size: 10px;
+}
+
+.shot-page-workflow-notice p {
+  margin: 4px 0 8px;
+  color: #8a7042;
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.shot-page-precheck-summary {
+  margin-top: 9px;
+  padding-top: 9px;
+  border-top: 1px dashed #eef0f5;
+}
+
+.shot-page-precheck-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.shot-page-precheck-list li {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  font-size: 8px;
+}
+
+.shot-page-precheck-list li.failed {
+  color: #b56b6b;
+  background: #fdf3f4;
+}
+
+.shot-page-precheck-list li.warn {
+  color: #b08a4a;
+  background: #fdf6e9;
+}
+
 .small-scene-resource-group {
   margin-top: 10px;
   padding: 10px;

@@ -330,6 +330,7 @@ class DatabaseManager:
                     shot_page_id TEXT NOT NULL,
                     character_id TEXT NOT NULL,
                     variant_id TEXT NOT NULL,
+                    spec_id TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY (shot_page_id),
@@ -338,7 +339,9 @@ class DatabaseManager:
                     FOREIGN KEY (character_id)
                         REFERENCES characters(id) ON DELETE CASCADE,
                     FOREIGN KEY (variant_id)
-                        REFERENCES character_variants(id) ON DELETE CASCADE
+                        REFERENCES character_variants(id) ON DELETE CASCADE,
+                    FOREIGN KEY (spec_id)
+                        REFERENCES specs(id) ON DELETE SET NULL
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_shot_page_characters_character
@@ -732,6 +735,10 @@ class DatabaseManager:
                 connection, "v0.9.4", "Gap-fill 2: directory settings, recycle_bin, workflow_validation_runs, transition_blocks, blocking_issues, material_templates, material_page_reference_mode, character_spec_preview, autosave_snapshots",
                 self._migrate_gap_fill_2,
             )
+            self._run_migration(
+                connection, "v0.9.5", "Add spec_id to shot_page_characters for public spec binding",
+                self._migrate_shot_page_characters_spec_id,
+            )
             marker = connection.execute(
                 "SELECT value FROM atelier_meta WHERE key = 'environment'"
             ).fetchone()
@@ -923,6 +930,18 @@ class DatabaseManager:
         connection.execute(
             "ALTER TABLE large_scenes ADD COLUMN scene_type TEXT NOT NULL DEFAULT 'content'"
         )
+
+    def _migrate_shot_page_characters_spec_id(self, connection) -> None:
+        """v0.9.5: 为 shot_page_characters 添加 spec_id 列(公共规格绑定)。
+
+        幂等: 用 PRAGMA table_info 检测列是否存在。旧库通过 ALTER TABLE 补列。
+        SQLite 的 ALTER TABLE ADD COLUMN 无法添加 FK 约束,
+        改由 set_shot_page_character 业务校验保证 spec_id 引用有效。
+        """
+        cols = [row["name"] for row in connection.execute("PRAGMA table_info(shot_page_characters)").fetchall()]
+        if "spec_id" in cols:
+            return
+        connection.execute("ALTER TABLE shot_page_characters ADD COLUMN spec_id TEXT")
 
     def _migrate_v040_tables(self, connection) -> None:
         v040_tables = [
@@ -1614,6 +1633,7 @@ class DatabaseManager:
                 shot_page_id TEXT NOT NULL,
                 character_id TEXT NOT NULL,
                 variant_id TEXT NOT NULL,
+                spec_id TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (shot_page_id),
@@ -1622,7 +1642,9 @@ class DatabaseManager:
                 FOREIGN KEY (character_id)
                     REFERENCES characters(id) ON DELETE CASCADE,
                 FOREIGN KEY (variant_id)
-                    REFERENCES character_variants(id) ON DELETE CASCADE
+                    REFERENCES character_variants(id) ON DELETE CASCADE,
+                FOREIGN KEY (spec_id)
+                    REFERENCES specs(id) ON DELETE SET NULL
             )
             """
         )
@@ -6139,19 +6161,33 @@ class DatabaseManager:
         shot_page_id: str,
         environment: DatabaseEnvironment | None = None,
     ) -> dict[str, object] | None:
-        """Return the character/variant bound to a shot page, or None."""
+        """Return the character/variant/spec bound to a shot page, or None.
+
+        spec_id 为可选绑定;LEFT JOIN specs 与 character_spec_values,
+        spec_value_id 为 variant_id+spec_id 解析出的规格值记录(可能为空)。
+        """
         target_environment = environment or self._active_environment
         with self.connection(target_environment) as connection:
             row = connection.execute(
                 """
                 SELECT spc.shot_page_id, spc.character_id, spc.variant_id,
+                       spc.spec_id,
                        c.name AS character_name,
                        cv.name AS variant_name,
                        cv.default_prompt, cv.default_lora_name,
-                       cv.default_lora_weight, cv.default_model_override
+                       cv.default_lora_weight, cv.default_model_override,
+                       s.spec_type, s.custom_label AS spec_name,
+                       csv.id AS spec_value_id,
+                       csv.prompt AS spec_prompt,
+                       csv.lora_name AS spec_lora_name,
+                       csv.lora_weight AS spec_lora_weight,
+                       csv.model_override AS spec_model_override
                 FROM shot_page_characters spc
                 JOIN characters c ON c.id = spc.character_id
                 JOIN character_variants cv ON cv.id = spc.variant_id
+                LEFT JOIN specs s ON s.id = spc.spec_id
+                LEFT JOIN character_spec_values csv
+                       ON csv.variant_id = spc.variant_id AND csv.spec_id = spc.spec_id
                 WHERE spc.shot_page_id = ?
                 """,
                 (shot_page_id,),
@@ -6163,9 +6199,18 @@ class DatabaseManager:
         shot_page_id: str,
         character_id: str,
         variant_id: str,
+        spec_id: str | None = None,
         environment: DatabaseEnvironment | None = None,
     ) -> dict[str, object]:
-        """Bind a character variant to a shot page (upsert)."""
+        """Bind a character variant (and optional public spec) to a shot page (upsert).
+
+        校验:
+        - 形象 variant 必须存在且属于 character(否则 ValueError)。
+        - spec_id 若提供:必须存在于 specs 表;且 variant 下必须有对应
+          character_spec_values 记录(否则 ValueError,消息含"尚未填写"
+          以便前端展示)。spec_id 缺省时允许保存(兼容旧调用),但页面完成
+          检查会提示补充规格。
+        """
         target_environment = environment or self._active_environment
         # Validate variant belongs to character
         variant = self.get_character_variant(variant_id, target_environment)
@@ -6173,6 +6218,21 @@ class DatabaseManager:
             raise ValueError("形象变体不存在。")
         if variant["character_id"] != character_id:
             raise ValueError("形象变体不属于该人物。")
+        # Validate spec (if provided)
+        if spec_id:
+            with self.connection(target_environment) as conn:
+                spec_row = conn.execute(
+                    "SELECT id FROM specs WHERE id = ?", (spec_id,)
+                ).fetchone()
+                if spec_row is None:
+                    raise ValueError("公共规格不存在。")
+                value_row = conn.execute(
+                    "SELECT id FROM character_spec_values "
+                    "WHERE variant_id = ? AND spec_id = ?",
+                    (variant_id, spec_id),
+                ).fetchone()
+                if value_row is None:
+                    raise ValueError("该形象尚未填写此规格。")
         now = datetime.now(timezone.utc).isoformat()
         with self._lock, self.connection(target_environment) as connection:
             page = connection.execute(
@@ -6183,15 +6243,16 @@ class DatabaseManager:
             connection.execute(
                 """
                 INSERT INTO shot_page_characters(
-                    shot_page_id, character_id, variant_id, created_at, updated_at
+                    shot_page_id, character_id, variant_id, spec_id, created_at, updated_at
                 )
-                VALUES(?, ?, ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?)
                 ON CONFLICT(shot_page_id) DO UPDATE SET
                     character_id = excluded.character_id,
                     variant_id = excluded.variant_id,
+                    spec_id = excluded.spec_id,
                     updated_at = excluded.updated_at
                 """,
-                (shot_page_id, character_id, variant_id, now, now),
+                (shot_page_id, character_id, variant_id, spec_id, now, now),
             )
         result = self.get_shot_page_character(shot_page_id, target_environment)
         if result is None:
@@ -10812,6 +10873,53 @@ class DatabaseManager:
             blocking: list[dict[str, object]] = []
             warnings: list[dict[str, object]] = []
 
+            # Check 0: project default workflow (项目级, 前端可据此区分"缺工作流"状态)
+            wf_row = connection.execute(
+                """SELECT w.id, w.name, w.current_version_id, w.is_archived
+                   FROM project_default_workflows pdw
+                   JOIN workflows w ON w.id = pdw.workflow_id
+                   WHERE pdw.project_id = ?""",
+                (project_id,),
+            ).fetchone()
+            if not wf_row:
+                blocking.append({
+                    "type": "no_workflow",
+                    "entity_type": "project",
+                    "entity_id": project_id,
+                    "entity_name": "",
+                    "message": "项目尚未设置默认工作流",
+                })
+            else:
+                version_id = wf_row["current_version_id"] or ""
+                if not version_id:
+                    blocking.append({
+                        "type": "invalid_workflow_version",
+                        "entity_type": "workflow",
+                        "entity_id": wf_row["id"],
+                        "entity_name": wf_row["name"],
+                        "message": f"工作流 '{wf_row['name']}' 没有当前版本",
+                    })
+                else:
+                    ver = connection.execute(
+                        "SELECT id FROM workflow_versions WHERE id = ?", (version_id,)
+                    ).fetchone()
+                    if not ver:
+                        blocking.append({
+                            "type": "invalid_workflow_version",
+                            "entity_type": "workflow",
+                            "entity_id": wf_row["id"],
+                            "entity_name": wf_row["name"],
+                            "message": f"工作流 '{wf_row['name']}' 的当前版本不存在",
+                        })
+                    elif wf_row["is_archived"]:
+                        blocking.append({
+                            "type": "invalid_workflow_version",
+                            "entity_type": "workflow",
+                            "entity_id": wf_row["id"],
+                            "entity_name": wf_row["name"],
+                            "message": f"工作流 '{wf_row['name']}' 已归档",
+                        })
+
             # Check 1: chapters/large_scenes/small_scenes with no pages
             if small_scene_ids:
                 ph = ",".join("?" * len(small_scene_ids))
@@ -10868,25 +10976,81 @@ class DatabaseManager:
                         "message": f"章节 '{r['name']}' 没有大场景",
                     })
 
-            # Check 2: shot_pages without character binding
+            # Check 2: character binding completeness (细分: 缺人物/形象/规格/规格值/形象归属无效)
             if page_ids:
                 ph = ",".join("?" * len(page_ids))
-                pages_no_char = connection.execute(
-                    f"""SELECT sp.id, sp.title, sp.small_scene_id
-                        FROM shot_pages sp
-                        WHERE sp.id IN ({ph})
-                          AND NOT EXISTS (SELECT 1 FROM shot_page_characters spc WHERE spc.shot_page_id = sp.id)
-                        ORDER BY sp.title""",
+                binding_rows = connection.execute(
+                    f"""SELECT sp.id, sp.title,
+                              spc.character_id, spc.variant_id, spc.spec_id,
+                              c.name AS character_name,
+                              cv.character_id AS variant_owner,
+                              s.id AS spec_exists,
+                              csv.id AS spec_value_exists
+                       FROM shot_pages sp
+                       LEFT JOIN shot_page_characters spc ON spc.shot_page_id = sp.id
+                       LEFT JOIN characters c ON c.id = spc.character_id
+                       LEFT JOIN character_variants cv ON cv.id = spc.variant_id
+                       LEFT JOIN specs s ON s.id = spc.spec_id
+                       LEFT JOIN character_spec_values csv
+                              ON csv.variant_id = spc.variant_id AND csv.spec_id = spc.spec_id
+                       WHERE sp.id IN ({ph})
+                       ORDER BY sp.title""",
                     page_ids,
                 ).fetchall()
-                for r in pages_no_char:
-                    warnings.append({
-                        "type": "missing_character",
-                        "entity_type": "shot_page",
-                        "entity_id": r["id"],
-                        "entity_name": r["title"],
-                        "message": f"场景页 '{r['title']}' 未绑定人物",
-                    })
+                for r in binding_rows:
+                    if not r["character_id"]:
+                        warnings.append({
+                            "type": "missing_character",
+                            "entity_type": "shot_page",
+                            "entity_id": r["id"],
+                            "entity_name": r["title"],
+                            "message": f"场景页 '{r['title']}' 未绑定人物",
+                        })
+                        continue
+                    if not r["variant_id"]:
+                        warnings.append({
+                            "type": "missing_variant",
+                            "entity_type": "shot_page",
+                            "entity_id": r["id"],
+                            "entity_name": r["title"],
+                            "message": f"场景页 '{r['title']}' 绑定缺少形象",
+                        })
+                        continue
+                    if r["variant_owner"] and r["character_id"] != r["variant_owner"]:
+                        warnings.append({
+                            "type": "invalid_character_variant",
+                            "entity_type": "shot_page",
+                            "entity_id": r["id"],
+                            "entity_name": r["title"],
+                            "message": f"场景页 '{r['title']}' 绑定的形象不属于该人物",
+                        })
+                        continue
+                    if not r["spec_id"]:
+                        warnings.append({
+                            "type": "missing_spec",
+                            "entity_type": "shot_page",
+                            "entity_id": r["id"],
+                            "entity_name": r["title"],
+                            "message": f"场景页 '{r['title']}' 未选择公共规格",
+                        })
+                        continue
+                    if r["spec_id"] and not r["spec_exists"]:
+                        warnings.append({
+                            "type": "missing_spec",
+                            "entity_type": "shot_page",
+                            "entity_id": r["id"],
+                            "entity_name": r["title"],
+                            "message": f"场景页 '{r['title']}' 选择的规格已不存在",
+                        })
+                        continue
+                    if r["spec_id"] and not r["spec_value_exists"]:
+                        warnings.append({
+                            "type": "missing_spec_value",
+                            "entity_type": "shot_page",
+                            "entity_id": r["id"],
+                            "entity_name": r["title"],
+                            "message": f"场景页 '{r['title']}' 选择的规格在该形象下尚无规格值",
+                        })
 
                 # Check 3: shot_pages without material mappings
                 pages_no_mapping = connection.execute(
