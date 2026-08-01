@@ -4321,10 +4321,12 @@
 
   function characterCard(character, stats, specCount) {
     stats = stats || character.stats || {};
-    specCount = specCount != null ? specCount : (stats.spec_total || 0);
     const filled = stats.spec_filled || 0;
     const total = stats.spec_total || 0;
     const variantCount = stats.variant_count != null ? stats.variant_count : (character.variant_count || 0);
+    specCount = specCount != null
+      ? specCount
+      : (variantCount > 0 ? Math.floor(total / variantCount) : total);
     const completeness = total > 0 ? `${filled}/${total}` : "0/0";
     const isArchived = Boolean(character.archived_at);
     const hasCover = Boolean(character.cover_path);
@@ -4348,9 +4350,9 @@
         </div>
         <div class="character-block-body">
           <div class="character-block-name">${escapeHtml(character.name)}</div>
-          <div class="character-block-meta">${variantCount} 个形象 · ${specCount} 个规格</div>
+          <div class="character-block-meta">${variantCount} 个形象 · ${specCount} 个公共规格</div>
           <div class="character-block-stats">
-            <span class="stats-pill ${filled > 0 ? "" : "muted"}">规格 ${completeness}</span>
+            <span class="stats-pill ${filled > 0 ? "" : "muted"}">提示词 ${completeness}</span>
             <span class="character-card-time">${escapeHtml(characterDate(character.updated_at))}</span>
           </div>
           <div class="character-card-actions">
@@ -4432,6 +4434,65 @@
     `;
   }
 
+  const characterSpecViewState = {
+    variantId: "",
+    variantName: "",
+    items: [],
+    activeSpecId: "",
+  };
+
+  function characterSpecMiniCard(value, isActive) {
+    const label = specLabel(value);
+    const filled = Boolean((value.prompt || "").trim());
+    return `
+      <button
+        class="character-spec-mini-card${isActive ? " active" : ""}"
+        type="button"
+        role="tab"
+        aria-selected="${isActive ? "true" : "false"}"
+        data-api-action="select-character-spec"
+        data-spec-id="${escapeHtml(value.spec_id)}"
+      >
+        <span class="character-spec-mini-name">${escapeHtml(label)}</span>
+        <span class="character-spec-mini-state${filled ? " filled" : ""}">${filled ? "已填写" : "未填写"}</span>
+      </button>
+    `;
+  }
+
+  function characterSpecWorkspace(items, activeSpecId) {
+    const activeValue = items.find((item) => item.spec_id === activeSpecId) || items[0];
+    return `
+      <div class="character-spec-mini-list" role="tablist" aria-label="规格列表">
+        ${items.map((item) => characterSpecMiniCard(item, item.spec_id === activeValue?.spec_id)).join("")}
+        <button class="character-spec-mini-card add" type="button" data-api-action="add-spec" aria-label="添加规格">
+          <span class="character-spec-mini-add-icon">+</span>
+          <span class="character-spec-mini-name">添加规格</span>
+        </button>
+      </div>
+      <div class="character-spec-detail-panel" data-character-spec-detail>
+        ${activeValue ? specValueEditor(activeValue) : '<div class="character-spec-editor-empty">请选择或添加规格。</div>'}
+      </div>
+    `;
+  }
+
+  function renderSelectedCharacterSpec(specId, editing = false) {
+    const modal = document.getElementById("character-detail-modal");
+    if (!modal) return null;
+    const item = characterSpecViewState.items.find((value) => value.spec_id === specId);
+    const detail = modal.querySelector("[data-character-spec-detail]");
+    if (!item || !detail) return null;
+    characterSpecViewState.activeSpecId = specId;
+    modal.querySelectorAll(".character-spec-mini-card[data-spec-id]").forEach((card) => {
+      const active = card.dataset.specId === specId;
+      card.classList.toggle("active", active);
+      card.setAttribute("aria-selected", active ? "true" : "false");
+    });
+    detail.innerHTML = specValueEditor(item);
+    const form = detail.querySelector(".character-spec-simple-editor");
+    if (form && editing) setCharacterSpecEditorMode(form, true);
+    return form;
+  }
+
   function specValueEditor(value) {
     const label = specLabel(value);
     const canRename = value.spec_type === "custom";
@@ -4506,7 +4567,6 @@
               <div class="character-expanded-title">规格</div>
               <div class="character-expanded-sub">当前形象：${escapeHtml(defaultVariant ? defaultVariant.name : "无")}</div>
             </div>
-            <button class="btn small primary" type="button" data-api-action="add-spec" data-project-id="${escapeHtml(character.project_id)}">添加规格</button>
           </div>
           <div
             class="character-spec-editor-list"
@@ -4522,7 +4582,7 @@
     `;
   }
 
-  async function renderVariantSpecValues(variantId, variantName) {
+  async function renderVariantSpecValues(variantId, variantName, preferredSpecId = "") {
     const modal = document.getElementById("character-detail-modal");
     if (!modal || modal.hidden) return;
     const list = modal.querySelector("[data-variant-spec-values]");
@@ -4532,9 +4592,14 @@
     try {
       const payload = await request(`/api/character-variants/${variantId}/spec-values`);
       if (list.dataset.activeVariantId !== variantId) return;
-      list.innerHTML = payload.total
-        ? payload.items.map(specValueEditor).join("")
-        : '<div class="character-spec-editor-empty">还没有规格。请先点击右上角“添加规格”。</div>';
+      const activeSpecId = payload.items.some((item) => item.spec_id === preferredSpecId)
+        ? preferredSpecId
+        : (payload.items[0]?.spec_id || "");
+      characterSpecViewState.variantId = variantId;
+      characterSpecViewState.variantName = variantName || "";
+      characterSpecViewState.items = payload.items;
+      characterSpecViewState.activeSpecId = activeSpecId;
+      list.innerHTML = characterSpecWorkspace(payload.items, activeSpecId);
       const sub = modal.querySelector(".character-expanded-sub");
       if (sub) {
         sub.textContent = `${payload.total} 个规格 · 当前形象：${variantName || ""}`;
@@ -12265,6 +12330,11 @@
       return;
     }
 
+    if (button.dataset.apiAction === "select-character-spec") {
+      renderSelectedCharacterSpec(button.dataset.specId);
+      return;
+    }
+
     if (button.dataset.apiAction === "add-spec") {
       await createCharacterSpec(button);
       return;
@@ -12983,11 +13053,9 @@
   async function createCharacterSpec(button) {
     const modal = document.getElementById("character-detail-modal");
     if (!modal || modal.hidden) return;
-    const existingNames = new Set(
-      [...modal.querySelectorAll('.character-spec-simple-editor input[name="spec_name"]')]
-        .map((input) => input.value.trim())
-        .filter(Boolean)
-    );
+    const activeVariantId = characterSpecViewState.variantId;
+    const activeVariantName = characterSpecViewState.variantName;
+    const existingNames = new Set(characterSpecViewState.items.map(specLabel).filter(Boolean));
     let index = 1;
     let name = "未命名规格";
     while (existingNames.has(name)) {
@@ -13003,6 +13071,11 @@
       });
       const specId = payload.spec?.id;
       await refreshCharacterDetail();
+      if (activeVariantId && specId) {
+        const tabs = modal.querySelectorAll(".variant-tab[data-variant-id]");
+        tabs.forEach((tab) => tab.classList.toggle("active", tab.dataset.variantId === activeVariantId));
+        await renderVariantSpecValues(activeVariantId, activeVariantName, specId);
+      }
       const input = specId
         ? document.querySelector(`.character-spec-simple-editor input[data-spec-id="${cssEscape(specId)}"]`)
         : null;
@@ -13071,6 +13144,22 @@
       if (promptOutput) {
         promptOutput.textContent = prompt || "尚未填写提示词";
         promptOutput.classList.toggle("is-empty", !prompt.trim());
+      }
+      const stateItem = characterSpecViewState.items.find((item) => item.spec_id === form.dataset.specId);
+      if (stateItem) {
+        stateItem.custom_label = specName;
+        stateItem.prompt = prompt;
+      }
+      const miniCard = document.querySelector(`.character-spec-mini-card[data-spec-id="${cssEscape(form.dataset.specId)}"]`);
+      if (miniCard) {
+        const miniName = miniCard.querySelector(".character-spec-mini-name");
+        const miniState = miniCard.querySelector(".character-spec-mini-state");
+        if (miniName) miniName.textContent = specName;
+        if (miniState) {
+          const filled = Boolean(prompt.trim());
+          miniState.textContent = filled ? "已填写" : "未填写";
+          miniState.classList.toggle("filled", filled);
+        }
       }
       status.textContent = "已保存";
       status.className = "spec-save-status success";
