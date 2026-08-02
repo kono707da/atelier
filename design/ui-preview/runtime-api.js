@@ -11758,27 +11758,48 @@
   }
 
   // 从节点定义中提取 widget 名称列表。
+  // 优先级：后端节点定义 > 本地内置映射表(comfyui-widget-names.json) > 类型推断
   // ComfyUI object_info 的 input.required/optional 中：
   //   - key 是参数名
   //   - value[0] 是类型（字符串如 INT/FLOAT/STRING/BOOLEAN，或数组表示枚举）
   // 可连线输入（在 node.inputs 中有对应 name）的 key 不作为 widget。
   // 返回 widget 名称数组，顺序对应 widgets_values。
+  let builtinWidgetNames = null; // 懒加载的本地映射表缓存
+  async function loadBuiltinWidgetNames() {
+    if (builtinWidgetNames !== null) return builtinWidgetNames;
+    try {
+      const resp = await fetch("./comfyui-widget-names.json?v=20260802-1");
+      if (resp.ok) {
+        builtinWidgetNames = await resp.json();
+        return builtinWidgetNames;
+      }
+    } catch (_) { /* ignore */ }
+    builtinWidgetNames = {};
+    return builtinWidgetNames;
+  }
+
   function workflowWidgetNamesForNode(node) {
     const nodeType = node?.type;
     if (!nodeType) return [];
+    // 优先：后端同步的节点定义
     const defEntry = workflowCanvasState.nodeDefinitions?.[nodeType];
-    if (!defEntry || !defEntry.definition) return [];
-    const inputDef = defEntry.definition.input;
-    if (!inputDef || typeof inputDef !== "object") return [];
-    const required = (inputDef.required && typeof inputDef.required === "object") ? inputDef.required : {};
-    const optional = (inputDef.optional && typeof inputDef.optional === "object") ? inputDef.optional : {};
-    // 合并 required + optional，保持顺序
-    const allKeys = [...Object.keys(required), ...Object.keys(optional)];
-    // 获取节点已有输入端口名称（这些不是 widget）
-    const inputNames = new Set((Array.isArray(node.inputs) ? node.inputs : []).map((inp) => inp?.name).filter(Boolean));
-    // 过滤掉可连线输入，保留 widget
-    const widgetKeys = allKeys.filter((k) => !inputNames.has(k));
-    return widgetKeys;
+    if (defEntry && defEntry.definition) {
+      const inputDef = defEntry.definition.input;
+      if (inputDef && typeof inputDef === "object") {
+        const required = (inputDef.required && typeof inputDef.required === "object") ? inputDef.required : {};
+        const optional = (inputDef.optional && typeof inputDef.optional === "object") ? inputDef.optional : {};
+        const allKeys = [...Object.keys(required), ...Object.keys(optional)];
+        const inputNames = new Set((Array.isArray(node.inputs) ? node.inputs : []).map((inp) => inp?.name).filter(Boolean));
+        const widgetKeys = allKeys.filter((k) => !inputNames.has(k));
+        if (widgetKeys.length > 0) return widgetKeys;
+      }
+    }
+    // 后备：本地内置映射表（从 ComfyUI 192.168.3.5:8188 导出）
+    const builtin = (builtinWidgetNames && typeof builtinWidgetNames === "object") ? builtinWidgetNames : null;
+    if (builtin && Array.isArray(builtin[nodeType])) {
+      return builtin[nodeType];
+    }
+    return [];
   }
 
   // 当节点定义不可用时，根据 widget 值类型推断一个有意义的名称（不使用"参数0"）。
@@ -12165,6 +12186,13 @@
     const draft = response.draft || response;
     // 并行加载工作流所需节点定义（用于提取 widget 名称），失败不阻塞画布渲染
     loadWorkflowNodeDefinitions(workflowId);
+    // 预加载本地内置 widget 名称映射表，加载完成后刷新画布显示真实参数名
+    loadBuiltinWidgetNames().then((names) => {
+      if (names && Object.keys(names).length > 0) {
+        const canvas = document.getElementById("workflow-canvas-area");
+        if (canvas) refreshWorkflowCanvasAndInspector();
+      }
+    });
     // 工作流名称不在 draft 中，通过工作流详情 API 获取（如果有的话）。
     if (!workflowCanvasState.workflowName || workflowCanvasState.workflowName === "工作流画布") {
       try {
