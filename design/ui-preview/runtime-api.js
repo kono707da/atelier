@@ -11953,12 +11953,14 @@
     // 当前节点绑定的插槽
     const boundSlots = slots.filter((s) => String(s.node_id) === String(node.id));
 
+    const widgetNames = workflowWidgetNamesForNode(node);
     const widgetsHTML = widgets.map((w, i) => {
       const value = w === null || w === undefined ? "" : String(w);
       const isNumber = value !== "" && !isNaN(Number(value)) && value.length < 12;
+      const widgetLabel = widgetNames[i] || workflowInferWidgetName(w, i);
       return `
         <div style="margin-bottom:8px">
-          <label class="label">参数 ${i}</label>
+          <label class="label">${escapeHtml(widgetLabel)}</label>
           <input class="modal-input" type="${isNumber ? "number" : "text"}" value="${escapeHtml(value)}" data-widget-index="${i}" style="width:100%;height:32px;font-size:11px" />
         </div>
       `;
