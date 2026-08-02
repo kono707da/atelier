@@ -977,7 +977,7 @@
       <section class="atelier-modal" role="dialog" aria-modal="true" aria-labelledby="workflow-import-title">
         <div class="atelier-modal-icon">WF</div>
         <h2 id="workflow-import-title">导入工作流 JSON</h2>
-        <p>粘贴 ComfyUI 导出的工作流 JSON，选择来源格式后导入。</p>
+        <p>上传或粘贴 ComfyUI 导出的工作流 JSON，选择来源格式后导入。</p>
         <form id="workflow-import-form">
           <label class="label" for="workflow-import-name">工作流名称</label>
           <input id="workflow-import-name" class="modal-input" name="name" maxlength="120" autocomplete="off" placeholder="给工作流命名" required />
@@ -987,7 +987,12 @@
             <option value="ui">UI 格式（画布节点）</option>
           </select>
           <label class="label" for="workflow-import-json">工作流 JSON</label>
-          <textarea id="workflow-import-json" class="modal-input" name="json" rows="8" placeholder="在此粘贴 JSON 内容" style="resize:vertical;min-height:140px;font-family:monospace;font-size:11px" required></textarea>
+          <div class="workflow-import-file-row">
+            <button class="btn small" type="button" id="workflow-import-file-btn">选择文件</button>
+            <span class="workflow-import-file-name" id="workflow-import-file-name">未选择文件，可粘贴 JSON 或选择 .json 文件</span>
+            <input type="file" id="workflow-import-file" accept=".json,application/json" hidden />
+          </div>
+          <textarea id="workflow-import-json" class="modal-input" name="json" rows="8" placeholder="在此粘贴 JSON 内容，或点击上方"选择文件"按钮上传" style="resize:vertical;min-height:140px;font-family:monospace;font-size:11px" required></textarea>
           <div class="modal-error" id="workflow-import-error" role="alert"></div>
           <div class="modal-actions">
             <button class="btn" type="button" data-api-action="close-workflow-import-modal">取消</button>
@@ -1001,6 +1006,26 @@
       if (event.target === modal) closeWorkflowImportModal();
     });
     modal.querySelector("form").addEventListener("submit", submitWorkflowImport);
+    // 文件选择：读取 .json 文件内容填入 textarea
+    const fileInput = modal.querySelector("#workflow-import-file");
+    const fileNameLabel = modal.querySelector("#workflow-import-file-name");
+    const fileBtn = modal.querySelector("#workflow-import-file-btn");
+    const jsonTextarea = modal.querySelector("#workflow-import-json");
+    fileBtn.addEventListener("click", () => fileInput.click());
+    fileInput.addEventListener("change", () => {
+      const file = fileInput.files && fileInput.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        jsonTextarea.value = String(reader.result || "");
+        fileNameLabel.textContent = file.name;
+        jsonTextarea.focus();
+      };
+      reader.onerror = () => {
+        fileNameLabel.textContent = "读取文件失败，请重试";
+      };
+      reader.readAsText(file);
+    });
     return modal;
   }
 
@@ -1011,6 +1036,10 @@
     modal.querySelector('input[name="name"]').value = "";
     modal.querySelector('textarea[name="json"]').value = "";
     modal.querySelector('select[name="format"]').value = "api";
+    const fileInput = modal.querySelector("#workflow-import-file");
+    if (fileInput) fileInput.value = "";
+    const fileNameLabel = modal.querySelector("#workflow-import-file-name");
+    if (fileNameLabel) fileNameLabel.textContent = "未选择文件，可粘贴 JSON 或选择 .json 文件";
     modal.hidden = false;
     requestAnimationFrame(() => {
       modal.classList.add("show");
