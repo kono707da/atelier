@@ -1181,6 +1181,17 @@
         }
         throw importError;
       }
+      // API JSON 格式没有节点位置信息，导入后自动计算布局
+      if (sourceFormat === "api_json") {
+        try {
+          await request(API.workflowDraftLayoutCompute(workflowId), {
+            method: "POST",
+            body: "{}",
+          });
+        } catch (_) {
+          // 布局失败不阻断导入流程，用户可在画布中手动触发"自动整理"
+        }
+      }
       closeWorkflowImportModal();
       await loadWorkflowsList(false);
       if (typeof showToast === "function") showToast(`工作流「${name}」已导入`);
@@ -12013,6 +12024,24 @@
 
     try {
       await loadWorkflowCanvasData(workflowId);
+      // 如果所有节点都堆在 (0,0)（如 API JSON 导入后），自动计算布局
+      const nodes = workflowCanvasState.graph.nodes || [];
+      const allAtOrigin = nodes.length > 1 && nodes.every((n) => {
+        const x = Array.isArray(n.position) ? Number(n.position[0]) || 0 : 0;
+        const y = Array.isArray(n.position) ? Number(n.position[1]) || 0 : 0;
+        return x === 0 && y === 0;
+      });
+      if (allAtOrigin) {
+        try {
+          await request(API.workflowDraftLayoutCompute(workflowId), {
+            method: "POST",
+            body: "{}",
+          });
+          await loadWorkflowCanvasData(workflowId);
+        } catch (_) {
+          // 布局失败不阻断渲染，用户可手动触发"自动整理"
+        }
+      }
       // 更新 header
       const title = header?.querySelector(".page-title");
       const subtitle = header?.querySelector(".page-subtitle");
