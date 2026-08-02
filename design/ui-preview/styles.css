@@ -7682,3 +7682,11 @@ body.is-dragging-large-scene * {
 @media(max-width:1180px){.gap-review-layout{grid-template-columns:190px minmax(0,1fr)}.gap-review-inspector{grid-column:1/-1}.gap-gallery-filter{grid-template-columns:repeat(3,minmax(0,1fr))}.gap-maintenance-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.gap-import-tabs{grid-template-columns:1fr}.gap-settings-grid{grid-template-columns:1fr}}
 @media(max-width:780px){.gap-review-layout,.gap-assembly-layout,.gap-export-layout,.gap-image-detail-layout,.gap-story-tools-grid{grid-template-columns:1fr}.gap-review-grid{max-height:none}.gap-gallery-grid{grid-template-columns:repeat(2,minmax(0,1fr));contain:content}.gap-gallery-filter,.gap-directory-form,.gap-system-metrics,.gap-template-form,.gap-two-fields{grid-template-columns:1fr}.span-2,.gap-directory-form>.btn{grid-column:auto}.gap-maintenance-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.gap-sequence-item{grid-template-columns:36px 70px minmax(0,1fr)}.gap-sequence-actions{grid-column:1/-1}.gap-blocker-form{grid-template-columns:1fr}.gap-recycle-list article{grid-template-columns:36px minmax(0,1fr)}.gap-recycle-list article>.btn{grid-column:auto}.gap-import-tabs{padding:8px}}
 .workflow-group-create-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px;margin:8px 0}
+
+/* 画布拖拽平移与节点拖拽交互样式 */
+#workflow-canvas-area.workflow-pannable{cursor:grab;touch-action:none}
+#workflow-canvas-area.workflow-panning{cursor:grabbing;user-select:none}
+#workflow-canvas-area .node-card{cursor:grab}
+#workflow-canvas-area .node-card.workflow-dragging{cursor:grabbing;opacity:.92;box-shadow:0 14px 30px rgba(50,61,88,.18),0 0 0 3px rgba(82,104,235,.22);z-index:30;user-select:none}
+#workflow-canvas-area .node-port{cursor:crosshair}
+#workflow-canvas-area.workflow-panning .node-card{cursor:grabbing}
