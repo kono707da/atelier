@@ -11539,6 +11539,39 @@
     return { nodes: [], links: [], groups: [], metadata: {} };
   }
 
+  // 检测画布节点位置是否散乱到需要自动整理。
+  // 触发条件（满足任一）：
+  //   1. 节点数 > 1 且全在 (0,0)（如 API JSON 导入后未推导坐标）
+  //   2. 存在负坐标节点（前端 .canvas { overflow:auto } 无法滚动到负区域）
+  //   3. X 跨度过大（maxX - minX > 5000px，远超合理画布尺寸）
+  //   4. 多个节点同位置（重复位置 ≥2 组，常因导入错误或重复添加）
+  function shouldAutoLayoutWorkflow(graph) {
+    const nodes = (graph && Array.isArray(graph.nodes)) ? graph.nodes : [];
+    if (nodes.length <= 1) return false;
+    let hasNegative = false;
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let allAtOrigin = true;
+    const posCounts = new Map();
+    for (const n of nodes) {
+      const x = Array.isArray(n.position) ? Number(n.position[0]) || 0 : 0;
+      const y = Array.isArray(n.position) ? Number(n.position[1]) || 0 : 0;
+      if (x < 0 || y < 0) hasNegative = true;
+      if (x !== 0 || y !== 0) allAtOrigin = false;
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      const k = `${x},${y}`;
+      posCounts.set(k, (posCounts.get(k) || 0) + 1);
+    }
+    if (allAtOrigin) return true;
+    if (hasNegative) return true;
+    if (maxX - minX > 5000) return true;
+    let dupGroups = 0;
+    posCounts.forEach((c) => { if (c > 1) dupGroups++; });
+    if (dupGroups >= 2) return true;
+    return false;
+  }
+
   // 解析草稿中的 semantic_slots_json，容错处理。
   function parseWorkflowSlots(draft) {
     if (!draft) return [];
@@ -12024,14 +12057,9 @@
 
     try {
       await loadWorkflowCanvasData(workflowId);
-      // 如果所有节点都堆在 (0,0)（如 API JSON 导入后），自动计算布局
-      const nodes = workflowCanvasState.graph.nodes || [];
-      const allAtOrigin = nodes.length > 1 && nodes.every((n) => {
-        const x = Array.isArray(n.position) ? Number(n.position[0]) || 0 : 0;
-        const y = Array.isArray(n.position) ? Number(n.position[1]) || 0 : 0;
-        return x === 0 && y === 0;
-      });
-      if (allAtOrigin) {
+      // 检测节点位置散乱：负坐标 / X 跨度过大 / 重复位置 / 全在原点
+      // 满足任一条件时自动调用后端 layout/compute 整理布局
+      if (shouldAutoLayoutWorkflow(workflowCanvasState.graph)) {
         try {
           await request(API.workflowDraftLayoutCompute(workflowId), {
             method: "POST",
@@ -12119,6 +12147,8 @@
     `;
     bindWorkflowInspectorEvents();
     bindWorkflowPaletteSearch();
+    // 画布 DOM 重新生成后需要重新绑定拖拽平移事件
+    bindWorkflowCanvasPanAndDrag();
   }
 
   // 仅刷新节点库面板（object_info 加载完成后调用）。
@@ -12139,6 +12169,8 @@
     if (canvasPanel) {
       const state = workflowCanvasState;
       canvasPanel.innerHTML = `${workflowCanvasToolbarHTML(state)}${workflowCanvasStageHTML(state.graph, state.selectedNodeId)}`;
+      // 画布 DOM 被替换后需要重新绑定拖拽平移事件
+      bindWorkflowCanvasPanAndDrag();
     }
     const inspector = document.getElementById("workflow-inspector");
     if (inspector) {
@@ -12265,6 +12297,12 @@
         if (patch.title != null) merged.title = patch.title;
         if (patch.mode != null) merged.mode = patch.mode;
         if (patch.widgets_values != null) merged.widgets_values = patch.widgets_values;
+        if (patch.position_x != null || patch.position_y != null) {
+          const cur = Array.isArray(merged.position) ? merged.position : [0, 0];
+          const newX = patch.position_x != null ? patch.position_x : (Number(cur[0]) || 0);
+          const newY = patch.position_y != null ? patch.position_y : (Number(cur[1]) || 0);
+          merged.position = [newX, newY];
+        }
         nodes[idx] = merged;
       }
       workflowCanvasState.isDirty = true;
@@ -12272,11 +12310,188 @@
       const canvasPanel = document.getElementById("workflow-canvas-panel");
       if (canvasPanel) {
         canvasPanel.innerHTML = `${workflowCanvasToolbarHTML(workflowCanvasState)}${workflowCanvasStageHTML(workflowCanvasState.graph, workflowCanvasState.selectedNodeId)}`;
+        // 画布 DOM 被替换后需要重新绑定拖拽平移事件
+        bindWorkflowCanvasPanAndDrag();
       }
       if (typeof showToast === "function") showToast("节点已更新");
     } catch (error) {
       if (typeof showToast === "function") showToast(error.message);
     }
+  }
+
+  // 重绘画布中的 SVG 连线（保留当前 DOM，仅替换 SVG 内容）。
+  // 用于节点拖拽过程中实时更新连线，避免重渲整个画布丢失 scroll 位置。
+  function redrawWorkflowLinks() {
+    const svg = document.querySelector("#workflow-canvas-area .wf-connections");
+    if (!svg) return;
+    svg.innerHTML = workflowLinksSVG(workflowCanvasState.graph)
+      .replace(/^<svg[^>]*>/, "")
+      .replace(/<\/svg>$/, "");
+  }
+
+  // 仅更新工具栏的"未保存修改"标记，不重渲画布。
+  function refreshWorkflowDirtyBadge() {
+    const toolbar = document.querySelector("#workflow-canvas-panel .toolbar");
+    if (!toolbar) return;
+    const dirtyBadge = toolbar.querySelector(".workflow-dirty-badge");
+    if (dirtyBadge) {
+      dirtyBadge.style.display = workflowCanvasState.isDirty ? "" : "none";
+    }
+  }
+
+  // 异步保存节点位置到后端，并更新本地状态。失败时回滚位置。
+  // 不重新渲染整个画布，只更新连线 SVG 和未保存标记，保留 scrollLeft/scrollTop。
+  async function updateWorkflowNodePosition(nodeId, newX, newY) {
+    const nodes = workflowCanvasState.graph.nodes || [];
+    const node = nodes.find((n) => String(n.id) === String(nodeId));
+    if (!node) return;
+    const oldX = Array.isArray(node.position) ? Number(node.position[0]) || 0 : 0;
+    const oldY = Array.isArray(node.position) ? Number(node.position[1]) || 0 : 0;
+    if (oldX === newX && oldY === newY) return;
+    node.position = [newX, newY];
+    redrawWorkflowLinks();
+    workflowCanvasState.isDirty = true;
+    refreshWorkflowDirtyBadge();
+    try {
+      await request(API.workflowDraftNode(workflowCanvasState.workflowId, nodeId), {
+        method: "PUT",
+        body: JSON.stringify({ position_x: newX, position_y: newY }),
+      });
+    } catch (error) {
+      // 回滚位置
+      node.position = [oldX, oldY];
+      redrawWorkflowLinks();
+      // 同步 DOM
+      const card = document.querySelector(`.node-card[data-node-id="${CSS.escape(String(nodeId))}"]`);
+      if (card) card.style.left = `${oldX}px`, card.style.top = `${oldY}px`;
+      if (typeof showToast === "function") showToast("节点位置保存失败：" + error.message);
+    }
+  }
+
+  // 绑定画布拖拽平移 (pan) 和节点拖拽 (drag) 事件。
+  // - 在画布空白处按下并拖动：平移画布 (修改 scrollLeft/scrollTop)
+  // - 在节点卡片上按下并拖动：移动节点位置，松开时按 20px 网格对齐
+  // 每次画布重新渲染后需重新调用（因为 DOM 被替换）。
+  // 全局 document 监听器只在拖拽进行中响应，避免误触。
+  function bindWorkflowCanvasPanAndDrag() {
+    const canvas = document.getElementById("workflow-canvas-area");
+    if (!canvas || canvas.dataset.panBound === "1") return;
+    canvas.dataset.panBound = "1";
+    canvas.classList.add("workflow-pannable");
+
+    // 拖拽状态：null 或 { type: 'pan'|'node', ... }
+    let drag = null;
+
+    // 全局 mousemove：仅在拖拽中响应
+    function onMove(event) {
+      if (!drag) return;
+      const dx = event.clientX - drag.startClientX;
+      const dy = event.clientY - drag.startClientY;
+      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) drag.moved = true;
+
+      if (drag.type === "pan") {
+        canvas.scrollLeft = drag.startScrollLeft - dx;
+        canvas.scrollTop = drag.startScrollTop - dy;
+      } else if (drag.type === "node") {
+        // 节点位置受 zoom 影响：拖拽 1px 屏幕位移 = 1/zoom px 画布位移
+        const newX = Math.round(drag.origX + dx / drag.zoom);
+        const newY = Math.round(drag.origY + dy / drag.zoom);
+        drag.card.style.left = `${newX}px`;
+        drag.card.style.top = `${newY}px`;
+        // 实时更新本地节点位置并重绘连线
+        const node = (workflowCanvasState.graph.nodes || []).find((n) => String(n.id) === String(drag.nodeId));
+        if (node) {
+          node.position = [newX, newY];
+          redrawWorkflowLinks();
+        }
+        drag.lastX = newX;
+        drag.lastY = newY;
+      }
+    }
+
+    // 全局 mouseup：结束拖拽
+    async function onUp(event) {
+      if (!drag) return;
+      const finishedDrag = drag;
+      drag = null;
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+
+      if (finishedDrag.type === "pan") {
+        canvas.classList.remove("workflow-panning");
+        canvas.classList.add("workflow-pannable");
+        return;
+      }
+
+      if (finishedDrag.type === "node") {
+        finishedDrag.card.classList.remove("workflow-dragging");
+        // 没有真正拖动：让 click 事件正常触发节点选中
+        if (!finishedDrag.moved) return;
+        // 方格对齐：20px 网格
+        const GRID = 20;
+        const alignedX = Math.round((finishedDrag.lastX ?? finishedDrag.origX) / GRID) * GRID;
+        const alignedY = Math.round((finishedDrag.lastY ?? finishedDrag.origY) / GRID) * GRID;
+        // 应用对齐位置到 DOM 和本地状态
+        finishedDrag.card.style.left = `${alignedX}px`;
+        finishedDrag.card.style.top = `${alignedY}px`;
+        const node = (workflowCanvasState.graph.nodes || []).find((n) => String(n.id) === String(finishedDrag.nodeId));
+        if (node) {
+          node.position = [alignedX, alignedY];
+          redrawWorkflowLinks();
+        }
+        // 异步保存（不阻塞 UI，失败回滚）
+        await updateWorkflowNodePosition(finishedDrag.nodeId, alignedX, alignedY);
+      }
+    }
+
+    canvas.addEventListener("mousedown", (event) => {
+      // 仅响应左键
+      if (event.button !== 0) return;
+      // 忽略点击端口、连线删除按钮等可交互元素
+      const target = event.target;
+      if (target.closest(".node-port")) return;
+      if (target.closest('[data-api-action="delete-workflow-link"]')) return;
+
+      const card = target.closest(".node-card");
+      const zoom = workflowCanvasState.zoom || 1;
+      if (card) {
+        // 节点拖拽
+        const nodeId = card.dataset.nodeId;
+        const node = (workflowCanvasState.graph.nodes || []).find((n) => String(n.id) === String(nodeId));
+        if (!node) return;
+        const origX = Array.isArray(node.position) ? Number(node.position[0]) || 0 : 0;
+        const origY = Array.isArray(node.position) ? Number(node.position[1]) || 0 : 0;
+        drag = {
+          type: "node",
+          nodeId,
+          card,
+          startClientX: event.clientX,
+          startClientY: event.clientY,
+          origX,
+          origY,
+          moved: false,
+          zoom,
+        };
+        card.classList.add("workflow-dragging");
+        event.preventDefault();
+      } else if (target.closest(".workflow-stage") || target === canvas || target.closest(".canvas")) {
+        // 画布平移
+        drag = {
+          type: "pan",
+          startClientX: event.clientX,
+          startClientY: event.clientY,
+          startScrollLeft: canvas.scrollLeft,
+          startScrollTop: canvas.scrollTop,
+        };
+        canvas.classList.add("workflow-panning");
+        canvas.classList.remove("workflow-pannable");
+        event.preventDefault();
+      }
+      if (drag) {
+        document.addEventListener("mousemove", onMove);
+        document.addEventListener("mouseup", onUp);
+      }
+    });
   }
 
   // 保存草稿：PUT 整个 normalized_graph 到后端。

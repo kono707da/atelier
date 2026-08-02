@@ -524,6 +524,8 @@ class UpdateNodeRequest(BaseModel):
     mode: int | None = Field(default=None, ge=0)
     flags: dict | None = None
     properties: dict | None = None
+    position_x: int | None = Field(default=None)
+    position_y: int | None = Field(default=None)
 
 class CreateLinkRequest(BaseModel):
     source_node: str = Field(min_length=1)
@@ -2953,6 +2955,11 @@ def create_app(
             current_props = target.get("properties", {}) if isinstance(target.get("properties"), dict) else {}
             current_props.update(request.properties)
             target["properties"] = current_props
+        if request.position_x is not None or request.position_y is not None:
+            current_pos = target.get("position", [0, 0]) if isinstance(target.get("position"), list) else [0, 0]
+            new_x = request.position_x if request.position_x is not None else (int(current_pos[0]) if len(current_pos) > 0 else 0)
+            new_y = request.position_y if request.position_y is not None else (int(current_pos[1]) if len(current_pos) > 1 else 0)
+            target["position"] = [new_x, new_y]
         serialized = serialize_workflow(normalized)
         updated_draft = manager.save_workflow_draft(
             workflow_id,
