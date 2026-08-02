@@ -8190,3 +8190,9 @@ body.is-dragging-large-scene * {
 #workflow-canvas-area .node-card.workflow-dragging{cursor:grabbing;opacity:.92;box-shadow:0 14px 30px rgba(50,61,88,.18),0 0 0 3px rgba(82,104,235,.22);z-index:30;user-select:none}
 #workflow-canvas-area .node-port{cursor:crosshair}
 #workflow-canvas-area.workflow-panning .node-card{cursor:grabbing}
+
+/* 未激活节点（禁用/旁路）置灰显示 */
+.node-card.workflow-node-inactive{opacity:.42;filter:saturate(.4);pointer-events:auto}
+.node-card.workflow-node-inactive .node-head{background:linear-gradient(90deg,#f0f1f5,#f5f6f9)}
+.node-card.workflow-node-inactive .node-head::after{content:"禁用";margin-left:auto;padding:2px 6px;color:#8a90a0;background:#e8eaf0;border-radius:6px;font-size:8px;font-weight:600}
+.node-card.workflow-node-inactive[data-mode="4"] .node-head::after{content:"旁路";color:#7a6418;background:#f5e9c8}

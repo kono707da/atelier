@@ -110,6 +110,7 @@
     workflowVersions: (id) => `/api/workflows/${id}/versions`,
     workflowSlots: (id) => `/api/workflows/${id}/semantic-slots`,
     workflowSlot: (workflowId, slotName) => `/api/workflows/${workflowId}/semantic-slots/${slotName}`,
+    workflowNodeDefinitions: (id) => `/api/workflows/${id}/node-definitions`,
     workflowDraftNodes: (id) => `/api/workflows/${id}/draft/nodes`,
     workflowDraftNode: (id, nodeId) => `/api/workflows/${id}/draft/nodes/${nodeId}`,
     workflowDraftNodeDuplicate: (id, nodeId) => `/api/workflows/${id}/draft/nodes/${nodeId}/duplicate`,
@@ -11483,6 +11484,8 @@
     slots: [],
     objectInfo: null,
     objectInfoLoaded: false,
+    nodeDefinitions: {}, // {node_class: definition} 从 batch API 获取，用于提取 widget 名称
+    nodeDefinitionsLoaded: false,
     selectedNodeId: null,
     pendingLinkFrom: null, // 新增连线时暂存输出端口 {nodeId, slot}
     loading: false,
@@ -11754,6 +11757,44 @@
     `;
   }
 
+  // 从节点定义中提取 widget 名称列表。
+  // ComfyUI object_info 的 input.required/optional 中：
+  //   - key 是参数名
+  //   - value[0] 是类型（字符串如 INT/FLOAT/STRING/BOOLEAN，或数组表示枚举）
+  // 可连线输入（在 node.inputs 中有对应 name）的 key 不作为 widget。
+  // 返回 widget 名称数组，顺序对应 widgets_values。
+  function workflowWidgetNamesForNode(node) {
+    const nodeType = node?.type;
+    if (!nodeType) return [];
+    const defEntry = workflowCanvasState.nodeDefinitions?.[nodeType];
+    if (!defEntry || !defEntry.definition) return [];
+    const inputDef = defEntry.definition.input;
+    if (!inputDef || typeof inputDef !== "object") return [];
+    const required = (inputDef.required && typeof inputDef.required === "object") ? inputDef.required : {};
+    const optional = (inputDef.optional && typeof inputDef.optional === "object") ? inputDef.optional : {};
+    // 合并 required + optional，保持顺序
+    const allKeys = [...Object.keys(required), ...Object.keys(optional)];
+    // 获取节点已有输入端口名称（这些不是 widget）
+    const inputNames = new Set((Array.isArray(node.inputs) ? node.inputs : []).map((inp) => inp?.name).filter(Boolean));
+    // 过滤掉可连线输入，保留 widget
+    const widgetKeys = allKeys.filter((k) => !inputNames.has(k));
+    return widgetKeys;
+  }
+
+  // 当节点定义不可用时，根据 widget 值类型推断一个有意义的名称（不使用"参数0"）。
+  function workflowInferWidgetName(value, index) {
+    if (value === true || value === false) return "开关";
+    if (typeof value === "number") return Number.isInteger(value) ? "数值" : "小数";
+    if (typeof value === "string") {
+      if (value === "") return "文本";
+      // 枚举值（如 "euler", "euler_ancestral"）通常是英文标识符
+      if (/^[a-z][a-z0-9_]*$/i.test(value) && value.length <= 32) return "选项";
+      return "文本";
+    }
+    if (Array.isArray(value)) return "列表";
+    return "值";
+  }
+
   // 渲染单个节点卡片，包含端口和字段。
   function workflowNodeCardHTML(node, isSelected) {
     const color = workflowNodeColor(node);
@@ -11765,6 +11806,8 @@
     const inputs = Array.isArray(node.inputs) ? node.inputs : [];
     const outputs = Array.isArray(node.outputs) ? node.outputs : [];
     const id = escapeHtml(node.id);
+    const nodeMode = Number(node.mode) || 0;
+    const isInactive = nodeMode === 2 || nodeMode === 4;
 
     // 输入端口
     const inputPorts = inputs.map((input, i) => {
@@ -11777,11 +11820,13 @@
       return `<i class="node-port out" style="top:${portY - 5}px" data-api-action="add-workflow-link-from" data-node-id="${id}" data-slot="${i}" title="${escapeHtml(output.name || "")}:${escapeHtml(output.type || "")}"></i>`;
     }).join("");
 
-    // 字段：显示 widgets_values
+    // 字段：显示 widgets_values，使用节点定义中的 widget 名称
+    const widgetNames = workflowWidgetNamesForNode(node);
     const fields = widgets.map((w, i) => {
       const value = w === null || w === undefined ? "" : String(w);
       const display = value.length > 24 ? `${value.slice(0, 24)}…` : value;
-      return `<div class="node-field"><span class="node-field-name">参数${i}</span><span class="node-value">${escapeHtml(display)}</span></div>`;
+      const name = widgetNames[i] || workflowInferWidgetName(w, i);
+      return `<div class="node-field"><span class="node-field-name">${escapeHtml(name)}</span><span class="node-value">${escapeHtml(display)}</span></div>`;
     }).join("");
 
     const isDimmed = Array.isArray(workflowCanvasState.focus?.dimmed)
@@ -11789,7 +11834,7 @@
     const isUnknown = Boolean(node.is_unknown);
     const isCollapsed = Boolean(node.flags?.collapsed);
     return `
-      <div class="node-card ${isSelected ? "selected" : ""} ${isDimmed ? "workflow-node-dimmed" : ""} ${isUnknown ? "workflow-node-unknown" : ""} ${isCollapsed ? "workflow-node-collapsed" : ""}" style="left:${x}px;top:${y}px" data-api-action="select-workflow-node" data-node-id="${id}">
+      <div class="node-card ${isSelected ? "selected" : ""} ${isDimmed ? "workflow-node-dimmed" : ""} ${isUnknown ? "workflow-node-unknown" : ""} ${isCollapsed ? "workflow-node-collapsed" : ""} ${isInactive ? "workflow-node-inactive" : ""}" style="left:${x}px;top:${y}px" data-mode="${nodeMode}" data-api-action="select-workflow-node" data-node-id="${id}">
         <div class="node-head"><i class="node-type ${color}"></i>${title}</div>
         <div class="node-body">${isUnknown ? '<div class="node-field"><span class="node-field-name">状态</span><span class="node-value">未知节点 · 只读保留</span></div>' : (fields || `<div class="node-field"><span class="node-field-name">类型</span><span class="node-value">${type}</span></div>`)}</div>
         ${inputPorts}${outputPorts}
@@ -12090,6 +12135,25 @@
   }
 
   // 加载工作流草稿数据并更新本地状态。
+  // 加载工作流所需的所有节点定义（用于提取 widget 名称）。
+  // 异步加载，成功后刷新画布以显示真实参数名；失败不阻塞。
+  async function loadWorkflowNodeDefinitions(workflowId) {
+    if (!workflowId) return;
+    try {
+      const payload = await request(API.workflowNodeDefinitions(workflowId));
+      const defs = (payload && payload.definitions) || {};
+      workflowCanvasState.nodeDefinitions = defs;
+      workflowCanvasState.nodeDefinitionsLoaded = true;
+      // 仅当画布已渲染时刷新（避免在初次加载时重复渲染）
+      const canvas = document.getElementById("workflow-canvas-area");
+      if (canvas && Object.keys(defs).length > 0) {
+        refreshWorkflowCanvasAndInspector();
+      }
+    } catch (_) {
+      workflowCanvasState.nodeDefinitionsLoaded = true;
+    }
+  }
+
   async function loadWorkflowCanvasData(workflowId) {
     const [response, slotResponse] = await Promise.all([
       request(API.workflowDraft(workflowId)),
@@ -12097,6 +12161,8 @@
     ]);
     // API 返回 {database_environment, draft: {...}}，提取 draft 对象。
     const draft = response.draft || response;
+    // 并行加载工作流所需节点定义（用于提取 widget 名称），失败不阻塞画布渲染
+    loadWorkflowNodeDefinitions(workflowId);
     // 工作流名称不在 draft 中，通过工作流详情 API 获取（如果有的话）。
     if (!workflowCanvasState.workflowName || workflowCanvasState.workflowName === "工作流画布") {
       try {
