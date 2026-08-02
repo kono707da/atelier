@@ -647,7 +647,6 @@ class CreateChapterRequest(BaseModel):
 
 class CreateLargeSceneRequest(BaseModel):
     name: str = Field(min_length=1, max_length=80)
-    scene_type: Literal["content", "transition"] = "content"
 
     @field_validator("name")
     @classmethod
@@ -659,7 +658,6 @@ class CreateLargeSceneRequest(BaseModel):
 
 class UpdateLargeSceneRequest(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=80)
-    scene_type: Literal["content", "transition"] | None = None
     chapter_id: str | None = None
 
     @field_validator("name")
@@ -671,7 +669,7 @@ class UpdateLargeSceneRequest(BaseModel):
 
     @model_validator(mode="after")
     def at_least_one_field(self):
-        if self.name is None and self.scene_type is None and self.chapter_id is None:
+        if self.name is None and self.chapter_id is None:
             raise ValueError("至少需要提供一个更新字段。")
         return self
 
@@ -4276,7 +4274,7 @@ def create_app(
             raise HTTPException(status_code=404, detail="章节不存在。")
         try:
             large_scene = manager.create_large_scene(
-                chapter_id, request.name, request.scene_type
+                chapter_id, request.name
             )
         except ValueError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
@@ -4295,7 +4293,6 @@ def create_app(
             large_scene = manager.update_large_scene(
                 large_scene_id,
                 name=request.name,
-                scene_type=request.scene_type,
                 chapter_id=request.chapter_id,
             )
         except ValueError as error:

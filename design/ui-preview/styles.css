@@ -1185,11 +1185,6 @@ button {
   transform: translateY(-2px);
 }
 
-.large-scene-block.scene-type-transition {
-  border-style: dashed;
-  background: rgba(252, 252, 254, 0.98);
-}
-
 .real-chapter-block.canvas-node-selected,
 .large-scene-block.canvas-node-selected {
   border-color: #6177e7;
@@ -1216,27 +1211,6 @@ button {
 .large-scene-meta {
   color: #969dac;
   font-size: 8px;
-}
-
-/* 大场景类型徽标 — 内容段突出（蓝），过渡段低调（灰） */
-.large-scene-type-badge {
-  display: inline-block;
-  margin-top: 6px;
-  padding: 2px 8px;
-  border-radius: 99px;
-  font-size: 8px;
-  font-weight: 700;
-  letter-spacing: 0.4px;
-}
-
-.large-scene-type-badge[data-scene-type="content"] {
-  background: rgba(111, 126, 213, 0.18);
-  color: #5463c4;
-}
-
-.large-scene-type-badge[data-scene-type="transition"] {
-  background: rgba(144, 152, 168, 0.18);
-  color: #6b7280;
 }
 
 /* 拖动中状态 */
@@ -5131,16 +5105,6 @@ button.palette-item:disabled {
     0 14px 27px rgba(56, 66, 120, 0.17);
 }
 
-.story-canvas-center-panel .story-block.scene-type-transition {
-  border-color: #efc08a;
-  border-style: solid;
-}
-
-.story-canvas-center-panel .large-scene-type-badge {
-  margin: 0;
-  padding: 2px 7px;
-}
-
 .story-canvas-center-panel .chapter-scene-connector {
   width: 30px;
   height: 112px;
@@ -5696,11 +5660,6 @@ body.is-dragging-large-scene * {
   background: rgba(255, 255, 255, 0.88);
 }
 
-.story-large-scene-wrapper.scene-type-transition {
-  border-style: dashed;
-  background: rgba(253, 251, 248, 0.9);
-}
-
 .story-large-scene-wrapper .large-scene-block {
   width: auto;
   min-height: 34px;
@@ -5715,10 +5674,6 @@ body.is-dragging-large-scene * {
 .story-large-scene-wrapper .large-scene-block:hover {
   box-shadow: none;
   transform: none;
-}
-
-.story-large-scene-wrapper .large-scene-type-badge {
-  margin: 0 0 0 auto;
 }
 
 .story-small-scene-grid {

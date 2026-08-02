@@ -235,26 +235,28 @@ class LargeSceneOrganizeApiTests(unittest.TestCase):
         scene = self._scene(str(self.chapter_a["id"]), "内容1")
         self.assertEqual(scene["scene_type"], "content")
 
-    def test_create_with_scene_type_transition(self) -> None:
-        scene = self._scene(
-            str(self.chapter_a["id"]), "过渡1", scene_type="transition"
-        )
-        self.assertEqual(scene["scene_type"], "transition")
+    def test_create_rejects_transition_scene_type(self) -> None:
+        with self.assertRaises(ValueError):
+            self.manager.create_large_scene(
+                str(self.chapter_a["id"]), "过渡1", scene_type="transition"
+            )
 
     def test_create_with_invalid_scene_type_returns_422(self) -> None:
         response = self.client.post(
             f"/api/chapters/{self.chapter_a['id']}/large-scenes",
             json={"name": "非法", "scene_type": "invalid"},
         )
-        self.assertEqual(response.status_code, 422)
+        # scene_type is no longer a field on CreateLargeSceneRequest, so the
+        # extra key is ignored and the scene is created successfully (201).
+        self.assertEqual(response.status_code, 201)
 
     def test_list_returns_scene_type(self) -> None:
         self._scene(str(self.chapter_a["id"]), "内容1", "content")
-        self._scene(str(self.chapter_a["id"]), "过渡1", "transition")
+        self._scene(str(self.chapter_a["id"]), "内容2", "content")
         items = self.client.get(
             f"/api/chapters/{self.chapter_a['id']}/large-scenes"
         ).json()["items"]
-        self.assertEqual([i["scene_type"] for i in items], ["content", "transition"])
+        self.assertEqual([i["scene_type"] for i in items], ["content", "content"])
 
     def test_legacy_db_migration_adds_scene_type_with_default_content(self) -> None:
         # Simulate pre-v0.2.0 schema: drop & recreate large_scenes without scene_type
@@ -291,23 +293,25 @@ class LargeSceneOrganizeApiTests(unittest.TestCase):
     # ── 5.2 PATCH 三字段可选 update ────────────────────────────
 
     def test_update_name_only_preserves_sort_and_type(self) -> None:
-        scene = self._scene(str(self.chapter_a["id"]), "旧名", "transition")
+        scene = self._scene(str(self.chapter_a["id"]), "旧名", "content")
         response = self.client.patch(
             f"/api/large-scenes/{scene['id']}", json={"name": "新名"}
         )
         self.assertEqual(response.status_code, 200)
         body = response.json()["large_scene"]
         self.assertEqual(body["name"], "新名")
-        self.assertEqual(body["scene_type"], "transition")
+        self.assertEqual(body["scene_type"], "content")
         self.assertEqual(body["sort_order"], 1)
 
-    def test_update_scene_type_only(self) -> None:
+    def test_update_scene_type_ignored_by_api(self) -> None:
         scene = self._scene(str(self.chapter_a["id"]), "场景1", "content")
         response = self.client.patch(
             f"/api/large-scenes/{scene['id']}", json={"scene_type": "transition"}
         )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["large_scene"]["scene_type"], "transition")
+        # scene_type is no longer a field on UpdateLargeSceneRequest; the extra
+        # key is ignored, but at_least_one_field raises because no valid field
+        # was provided.
+        self.assertEqual(response.status_code, 422)
 
     def test_update_chapter_moves_to_end_of_target(self) -> None:
         a1 = self._scene(str(self.chapter_a["id"]), "A1")
