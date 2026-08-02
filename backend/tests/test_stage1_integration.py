@@ -162,9 +162,9 @@ class Stage1IntegrationTests(unittest.TestCase):
         refs["chapters"] = [ch1, ch2]
 
         # 3. 创建多场景
-        # 第一章下 2 个大场景（其中一个 transition）
+        # 第一章下 2 个大场景（大场景不再支持 transition 类型，统一为 content）
         ls_a = self._create_large_scene(ch1["id"], "场景A", scene_type="content")
-        ls_b = self._create_large_scene(ch1["id"], "场景B", scene_type="transition")
+        ls_b = self._create_large_scene(ch1["id"], "场景B", scene_type="content")
         # 第二章下 1 个大场景
         ls_c = self._create_large_scene(ch2["id"], "场景C", scene_type="content")
         refs["large_scenes"] = [ls_a, ls_b, ls_c]

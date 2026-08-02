@@ -739,6 +739,10 @@ class DatabaseManager:
                 connection, "v0.9.5", "Add spec_id to shot_page_characters for public spec binding",
                 self._migrate_shot_page_characters_spec_id,
             )
+            self._run_migration(
+                connection, "v0.10.0", "Migrate transition large_scenes to small_scenes; large_scenes.scene_type fixed to content",
+                self._migrate_transition_large_scenes_to_small_scenes,
+            )
             marker = connection.execute(
                 "SELECT value FROM atelier_meta WHERE key = 'environment'"
             ).fetchone()
@@ -2788,6 +2792,132 @@ class DatabaseManager:
                 "ALTER TABLE material_pages ADD COLUMN reference_mode TEXT NOT NULL DEFAULT 'independent'"
             )
 
+    def _migrate_transition_large_scenes_to_small_scenes(self, connection) -> None:
+        """v0.10.0: 将 scene_type='transition' 的大场景迁移为小场景。
+
+        迁移规则（需求文档 §3.1）：
+        1. 查询所有 large_scenes.scene_type='transition' 记录。
+        2. 对每条 transition 大场景，在所属 chapter 内查找第一个 scene_type='content'
+           的大场景作为父级。
+        3. 在父级大场景下新建 small_scene：
+           - scene_type='transition'
+           - name 沿用原 transition 大场景名（必要时加序号避免重名）
+           - sort_order=1，并将父级下所有现有小场景 sort_order +1
+        4. 删除原 transition 大场景（CASCADE 自动清理 transitions 表）。
+        5. 重排 chapter 内剩余大场景的 sort_order（1, 2, 3, ...）。
+        6. 兜底：将所有 large_scenes.scene_type != 'content' 的记录改为 'content'。
+
+        幂等：若 large_scenes.scene_type='transition' 已无记录，则仅执行兜底
+        scene_type='content' 修正，重复执行不产生副作用。
+        """
+        now = datetime.now(timezone.utc).isoformat()
+
+        # 1. 查询所有 transition 大场景
+        transition_rows = connection.execute(
+            """
+            SELECT id, chapter_id, name, sort_order
+            FROM large_scenes
+            WHERE scene_type = 'transition'
+            ORDER BY chapter_id, sort_order
+            """
+        ).fetchall()
+
+        for trow in transition_rows:
+            t_id = trow["id"]
+            t_chapter_id = trow["chapter_id"]
+            t_name = trow["name"]
+
+            # 2. 在同 chapter 内找第一个 content 大场景（按 sort_order 升序，排除自身）
+            target_row = connection.execute(
+                """
+                SELECT id FROM large_scenes
+                WHERE chapter_id = ? AND scene_type = 'content' AND id != ?
+                ORDER BY sort_order
+                LIMIT 1
+                """,
+                (t_chapter_id, t_id),
+            ).fetchone()
+
+            if target_row is None:
+                # 无 content 大场景：将 transition 大场景就地转为 content 大场景，
+                # 保留为内容大场景，不删除，避免数据丢失
+                connection.execute(
+                    "UPDATE large_scenes SET scene_type = 'content', updated_at = ? WHERE id = ?",
+                    (now, t_id),
+                )
+                continue
+
+            target_large_scene_id = target_row["id"]
+
+            # 3. 名称冲突检查：父级下若已有同名小场景，加序号
+            base_name = t_name
+            new_name = base_name
+            counter = 1
+            while True:
+                exists = connection.execute(
+                    "SELECT 1 FROM small_scenes WHERE large_scene_id = ? AND name = ?",
+                    (target_large_scene_id, new_name),
+                ).fetchone()
+                if exists is None:
+                    break
+                counter += 1
+                new_name = f"{base_name}（{counter}）"
+
+            # 4. 父级下现有小场景 sort_order +1（为新 transition 小场景腾出第一位）
+            connection.execute(
+                "UPDATE small_scenes SET sort_order = sort_order + 1 WHERE large_scene_id = ?",
+                (target_large_scene_id,),
+            )
+
+            # 5. 新建 transition 小场景，sort_order=1
+            new_small_scene_id = str(uuid4())
+            connection.execute(
+                """
+                INSERT INTO small_scenes (
+                    id, large_scene_id, name, scene_type, description,
+                    sort_order, created_at, updated_at
+                ) VALUES (?, ?, ?, 'transition', '', 1, ?, ?)
+                """,
+                (new_small_scene_id, target_large_scene_id, new_name, now, now),
+            )
+
+            # 6. 删除原 transition 大场景
+            #    branches 表无 FK CASCADE，手动清理引用
+            connection.execute(
+                "DELETE FROM branches WHERE parent_type = 'large_scene' AND parent_id = ?",
+                (t_id,),
+            )
+            #    transitions 表 FK ON DELETE CASCADE 会自动清理，但显式删除避免外键未启用场景
+            connection.execute(
+                "DELETE FROM transitions WHERE large_scene_id = ?",
+                (t_id,),
+            )
+            connection.execute(
+                "DELETE FROM large_scenes WHERE id = ?",
+                (t_id,),
+            )
+
+        # 7. 重排每个 chapter 内剩余大场景的 sort_order（1, 2, 3, ...）
+        chapter_rows = connection.execute(
+            "SELECT DISTINCT chapter_id FROM large_scenes"
+        ).fetchall()
+        for crow in chapter_rows:
+            chapter_id = crow["chapter_id"]
+            rows = connection.execute(
+                "SELECT id FROM large_scenes WHERE chapter_id = ? ORDER BY sort_order, name",
+                (chapter_id,),
+            ).fetchall()
+            for idx, row in enumerate(rows, start=1):
+                connection.execute(
+                    "UPDATE large_scenes SET sort_order = ? WHERE id = ?",
+                    (idx, row["id"]),
+                )
+
+        # 8. 兜底：所有 large_scenes.scene_type 改为 'content'
+        connection.execute(
+            "UPDATE large_scenes SET scene_type = 'content' WHERE scene_type != 'content'"
+        )
+
     def _migrate_comfyui_instances(self, connection) -> None:
         """v0.8.0: 新增 comfyui_instances 表，支持多实例管理。
 
@@ -4119,8 +4249,8 @@ class DatabaseManager:
     ) -> dict[str, object]:
         """Create a large scene at the end of a chapter's ordered scene list."""
         target_environment = environment or self._active_environment
-        if scene_type not in ("content", "transition"):
-            raise ValueError("大场景类型必须是 content 或 transition。")
+        if scene_type not in ("content",):
+            raise ValueError("大场景类型必须是 content。")
         clean_name = " ".join(name.split())
         if not clean_name:
             raise ValueError("大场景名称不能为空。")
@@ -4199,8 +4329,8 @@ class DatabaseManager:
         target_environment = environment or self._active_environment
         if name is None and scene_type is None and chapter_id is None:
             raise ValueError("至少需要提供一个更新字段。")
-        if scene_type is not None and scene_type not in ("content", "transition"):
-            raise ValueError("大场景类型必须是 content 或 transition。")
+        if scene_type is not None and scene_type not in ("content",):
+            raise ValueError("大场景类型必须是 content。")
         clean_name = " ".join(name.split()) if name is not None else None
         if clean_name is not None:
             if not clean_name:

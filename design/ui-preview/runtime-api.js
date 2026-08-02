@@ -2043,15 +2043,12 @@
   }
 
   function largeSceneBlock(largeScene) {
-    const sceneType = largeScene.scene_type || "content";
-    const typeLabel = sceneType === "transition" ? "过渡段" : "内容段";
     return `
       <article
-        class="story-block large-scene-block scene-type-${sceneType}"
+        class="story-block large-scene-block"
         data-large-scene-id="${escapeHtml(largeScene.id)}"
         data-chapter-id="${escapeHtml(largeScene.chapter_id)}"
         data-chapter-name="${escapeHtml(largeScene.chapter_name || "")}"
-        data-scene-type="${escapeHtml(sceneType)}"
         data-sort-order="${escapeHtml(largeScene.sort_order)}"
         data-inspector-kind="large-scene"
         data-context-menu="large-scene"
@@ -2063,9 +2060,6 @@
         <div class="block-kicker">大场景 ${String(largeScene.sort_order).padStart(2, "0")}</div>
         <div class="block-title">${escapeHtml(largeScene.name)}</div>
         <div class="block-meta">尚未添加小场景</div>
-        <div class="block-footer">
-          <span class="large-scene-type-badge" data-scene-type="${escapeHtml(sceneType)}">${typeLabel}</span>
-        </div>
       </article>
     `;
   }
@@ -2222,14 +2216,13 @@
     const isChapter = kind === "chapter";
     const chapterId = isChapter ? id : node.dataset.chapterId;
     const chapterName = isChapter ? name : node.dataset.chapterName || "";
-    const typeLabel = node.dataset.sceneType === "transition" ? "过渡段" : "内容段";
     inspector.innerHTML = `
       <div class="panel-header">
         <div>
           <div class="panel-title">${escapeHtml(name)}</div>
           <div class="panel-sub">${isChapter ? "章节" : "大场景"} ${String(order).padStart(2, "0")} · 当前选中</div>
         </div>
-        <span class="status blue">${isChapter ? "章节" : escapeHtml(typeLabel)}</span>
+        <span class="status blue">${isChapter ? "章节" : "大场景"}</span>
       </div>
       <div class="inspector-section">
         <div class="form-group">
@@ -2248,10 +2241,6 @@
               <div class="form-group">
                 <label class="label">所属章节</label>
                 <div class="field">${escapeHtml(chapterName)}</div>
-              </div>
-              <div class="form-group">
-                <label class="label">场景类型</label>
-                <div class="field">${escapeHtml(typeLabel)}</div>
               </div>
             `
         }
@@ -2795,10 +2784,9 @@
   }
 
   function storyLargeSceneWrapper(largeScene, backendAvailable) {
-    const typeLabel = largeScene.scene_type === "transition" ? "过渡段" : "内容段";
     return `
       <section
-        class="story-large-scene-wrapper scene-type-${escapeHtml(largeScene.scene_type || "content")}"
+        class="story-large-scene-wrapper"
         data-large-scene-drag-item
         data-large-scene-id="${escapeHtml(largeScene.id)}"
         data-chapter-id="${escapeHtml(largeScene.chapter_id)}"
@@ -2811,12 +2799,10 @@
           data-chapter-id="${escapeHtml(largeScene.chapter_id)}"
           data-name="${escapeHtml(largeScene.name)}"
           data-sort-order="${escapeHtml(largeScene.sort_order)}"
-          data-scene-type="${escapeHtml(largeScene.scene_type || "content")}"
           title="拖动调整顺序或移动到其他章节"
         >
           <span class="story-wrapper-index">LS ${String(largeScene.sort_order || 0).padStart(2, "0")}</span>
           <strong>${escapeHtml(largeScene.name)}</strong>
-          <span class="large-scene-type-badge" data-scene-type="${escapeHtml(largeScene.scene_type || "content")}">${typeLabel}</span>
         </header>
         <div class="story-small-scene-grid">
           ${largeScene.small_scenes.map(storySmallSceneCard).join("")}
@@ -8733,11 +8719,6 @@
         <form id="new-large-scene-form">
           <label class="label" for="new-large-scene-name">大场景名称</label>
           <input id="new-large-scene-name" class="modal-input" name="name" maxlength="80" autocomplete="off" placeholder="例如：公共沙滩" required />
-          <label class="label" for="new-large-scene-type">类型</label>
-          <select id="new-large-scene-type" class="modal-input" name="scene_type">
-            <option value="content">内容段</option>
-            <option value="transition">过渡段</option>
-          </select>
           <div class="modal-error" id="new-large-scene-error" role="alert"></div>
           <div class="modal-actions">
             <button class="btn" type="button" data-api-action="close-large-scene-modal">取消</button>
@@ -8758,13 +8739,11 @@
     const modal = ensureLargeSceneModal();
     const error = modal.querySelector(".modal-error");
     const input = modal.querySelector("input");
-    const select = modal.querySelector("select");
     const context = modal.querySelector("#new-large-scene-context");
     modal.dataset.chapterId = chapterId;
     context.textContent = `添加到章节「${chapterName}」，并按照创建顺序排列。`;
     error.textContent = "";
     input.value = "";
-    if (select) select.value = "content";
     modal.hidden = false;
     requestAnimationFrame(() => {
       modal.classList.add("show");
@@ -8792,15 +8771,10 @@
         <section class="atelier-modal size-md" role="dialog" aria-modal="true" aria-labelledby="large-scene-edit-title">
           <div class="atelier-modal-icon scene">SC</div>
           <h2 id="large-scene-edit-title">编辑大场景</h2>
-          <p id="large-scene-edit-context">修改大场景的名称、类型或所属章节。</p>
+          <p id="large-scene-edit-context">修改大场景的名称或所属章节。</p>
           <form id="large-scene-edit-form">
             <label class="label" for="large-scene-edit-name">大场景名称</label>
             <input id="large-scene-edit-name" class="modal-input" name="name" maxlength="80" autocomplete="off" required />
-            <label class="label" for="large-scene-edit-type">类型</label>
-            <select id="large-scene-edit-type" class="modal-input" name="scene_type">
-              <option value="content">内容段</option>
-              <option value="transition">过渡段</option>
-            </select>
             <label class="label" for="large-scene-edit-chapter">所属章节</label>
             <select id="large-scene-edit-chapter" class="modal-input" name="chapter_id"></select>
             <div class="modal-error" id="large-scene-edit-error" role="alert"></div>
@@ -8820,7 +8794,6 @@
     modal.dataset.largeSceneId = largeSceneId;
     const error = modal.querySelector(".modal-error");
     const nameInput = modal.querySelector("#large-scene-edit-name");
-    const typeSelect = modal.querySelector("#large-scene-edit-type");
     const chapterSelect = modal.querySelector("#large-scene-edit-chapter");
     const context = modal.querySelector("#large-scene-edit-context");
     const submitBtn = modal.querySelector('button[type="submit"]');
@@ -8836,7 +8809,6 @@
         request(`/api/projects/${project.id}/chapters`),
       ]);
       const scene = sceneRes.large_scene || sceneRes;
-      typeSelect.value = scene.scene_type || "content";
       chapterSelect.innerHTML = chaptersRes.items
         .map(
           (ch) =>
@@ -8869,21 +8841,19 @@
     const form = event.currentTarget;
     const modal = form.closest(".atelier-modal-backdrop");
     const nameInput = form.querySelector("#large-scene-edit-name");
-    const typeSelect = form.querySelector("#large-scene-edit-type");
     const chapterSelect = form.querySelector("#large-scene-edit-chapter");
     const submit = form.querySelector('button[type="submit"]');
     const error = form.querySelector(".modal-error");
     const largeSceneId = modal.dataset.largeSceneId;
     const originalChapterId = modal.dataset.currentChapterId;
     const name = nameInput.value.trim().replace(/\s+/g, " ");
-    const sceneType = typeSelect.value;
     const chapterId = chapterSelect.value;
     if (!name) {
       error.textContent = "请输入大场景名称。";
       nameInput.focus();
       return;
     }
-    const body = { name, scene_type: sceneType };
+    const body = { name };
     if (chapterId && chapterId !== originalChapterId) {
       body.chapter_id = chapterId;
     }
@@ -8913,11 +8883,9 @@
     const form = event.currentTarget;
     const modal = form.closest(".atelier-modal-backdrop");
     const input = form.querySelector("input");
-    const select = form.querySelector("select");
     const submit = form.querySelector('button[type="submit"]');
     const error = form.querySelector(".modal-error");
     const name = input.value.trim().replace(/\s+/g, " ");
-    const sceneType = select ? select.value : "content";
     const chapterId = modal.dataset.chapterId;
     if (!name) {
       error.textContent = "请输入大场景名称。";
@@ -8934,7 +8902,7 @@
     try {
       await request(`/api/chapters/${chapterId}/large-scenes`, {
         method: "POST",
-        body: JSON.stringify({ name, scene_type: sceneType }),
+        body: JSON.stringify({ name }),
       });
       closeLargeSceneModal();
       const project = await resolveCurrentProject();
@@ -9994,9 +9962,11 @@
       const largeSceneId = handle.dataset.largeSceneId || item.dataset.largeSceneId;
       const sourceChapterId = handle.dataset.chapterId || item.dataset.chapterId;
       if (!largeSceneId || !sourceChapterId) return;
+      const sourceSortOrder = Number(handle.dataset.sortOrder || item.dataset.sortOrder || 0);
       dragState = {
         largeSceneId,
         sourceChapterId,
+        sourceSortOrder,
         handle,
         item,
       };
@@ -10096,13 +10066,15 @@
         return;
       }
       event.preventDefault();
-      const { largeSceneId, sourceChapterId, targetChapterId, targetIndex } = dragState;
+      const { largeSceneId, sourceChapterId, sourceSortOrder, targetChapterId, targetIndex } = dragState;
       dragState.item?.classList.remove("dragging");
       clearDropIndicators();
       dragState = null;
       if (!targetChapterId) return;
       // targetIndex is 0-based; convert to 1-based sort_order for API
       const targetSortOrder = (targetIndex ?? 0) + 1;
+      // No-op: same chapter and same sort order — skip API call, no refresh, no toast
+      if (sourceChapterId === targetChapterId && sourceSortOrder === targetSortOrder) return;
       try {
         await request(`/api/large-scenes/${largeSceneId}/move`, {
           method: "POST",
@@ -10185,12 +10157,15 @@
 
   async function commitLargeScenePointerMove(state) {
     if (!state?.targetChapterId) return;
+    const targetSortOrder = Number(state.targetIndex || 0) + 1;
+    // No-op: same chapter and same sort order — skip API call, no refresh, no toast
+    if (state.sourceChapterId === state.targetChapterId && state.sourceSortOrder === targetSortOrder) return;
     try {
       await request(`/api/large-scenes/${state.largeSceneId}/move`, {
         method: "POST",
         body: JSON.stringify({
           target_chapter_id: state.targetChapterId,
-          target_sort_order: Number(state.targetIndex || 0) + 1,
+          target_sort_order: targetSortOrder,
         }),
       });
       const project = await resolveCurrentProject();
@@ -10229,12 +10204,14 @@
       const largeSceneId = handle.dataset.largeSceneId || item?.dataset.largeSceneId;
       const sourceChapterId = handle.dataset.chapterId || item?.dataset.chapterId;
       if (!item || !largeSceneId || !sourceChapterId) return;
+      const sourceSortOrder = Number(handle.dataset.sortOrder || item.dataset.sortOrder || 0);
       pointerLargeSceneDrag = {
         pointerId: event.pointerId,
         startX: event.clientX,
         startY: event.clientY,
         largeSceneId,
         sourceChapterId,
+        sourceSortOrder,
         handle,
         item,
         started: false,

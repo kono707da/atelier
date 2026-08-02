@@ -19,3 +19,5 @@ data/character-database/*.sqlite3-shm
 data/character-database/*.sqlite3-wal
 data/character-database/*.sqlite3.tmp
 data/materials/
+.idea/
+backend/atelier.db
