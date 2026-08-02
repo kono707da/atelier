@@ -976,27 +976,33 @@
     modal.innerHTML = `
       <section class="atelier-modal" role="dialog" aria-modal="true" aria-labelledby="workflow-import-title">
         <div class="atelier-modal-icon">WF</div>
-        <h2 id="workflow-import-title">导入工作流 JSON</h2>
-        <p>上传或粘贴 ComfyUI 导出的工作流 JSON，选择来源格式后导入。</p>
+        <h2 id="workflow-import-title">导入工作流</h2>
+        <p>选择 ComfyUI 导出的工作流 JSON 文件，系统自动识别格式。</p>
         <form id="workflow-import-form">
           <label class="label" for="workflow-import-name">工作流名称</label>
           <input id="workflow-import-name" class="modal-input" name="name" maxlength="120" autocomplete="off" placeholder="给工作流命名" required />
-          <label class="label" for="workflow-import-format">来源格式</label>
-          <select id="workflow-import-format" class="modal-input" name="format" style="height:36px">
-            <option value="api">API 格式（prompt 链路）</option>
-            <option value="ui">UI 格式（画布节点）</option>
-          </select>
-          <label class="label" for="workflow-import-json">工作流 JSON</label>
-          <div class="workflow-import-file-row">
-            <button class="btn small" type="button" id="workflow-import-file-btn">选择文件</button>
-            <span class="workflow-import-file-name" id="workflow-import-file-name">未选择文件，可粘贴 JSON 或选择 .json 文件</span>
+          <label class="label">工作流文件</label>
+          <div class="workflow-import-dropzone" id="workflow-import-dropzone">
             <input type="file" id="workflow-import-file" accept=".json,application/json" hidden />
+            <div class="workflow-import-dropzone-empty" id="workflow-import-dropzone-empty">
+              <div class="workflow-import-dropzone-icon">JSON</div>
+              <div class="workflow-import-dropzone-text">
+                <strong>点击选择文件</strong>
+                <small>支持 ComfyUI UI/API 格式，自动识别</small>
+              </div>
+            </div>
+            <div class="workflow-import-dropzone-filled" id="workflow-import-dropzone-filled" hidden>
+              <div class="workflow-import-file-info">
+                <strong id="workflow-import-file-name">—</strong>
+                <small id="workflow-import-file-meta">—</small>
+              </div>
+              <button class="btn small" type="button" id="workflow-import-reselect">重新选择</button>
+            </div>
           </div>
-          <textarea id="workflow-import-json" class="modal-input" name="json" rows="8" placeholder="在此粘贴 JSON 内容，或点击上方"选择文件"按钮上传" style="resize:vertical;min-height:140px;font-family:monospace;font-size:11px" required></textarea>
           <div class="modal-error" id="workflow-import-error" role="alert"></div>
           <div class="modal-actions">
             <button class="btn" type="button" data-api-action="close-workflow-import-modal">取消</button>
-            <button class="btn primary" type="submit">导入工作流</button>
+            <button class="btn primary" type="submit" id="workflow-import-submit">导入工作流</button>
           </div>
         </form>
       </section>
@@ -1006,27 +1012,99 @@
       if (event.target === modal) closeWorkflowImportModal();
     });
     modal.querySelector("form").addEventListener("submit", submitWorkflowImport);
-    // 文件选择：读取 .json 文件内容填入 textarea
+    // 文件选择：读取 .json 文件，自动识别格式，文件名填入工作流名称
     const fileInput = modal.querySelector("#workflow-import-file");
+    const dropzone = modal.querySelector("#workflow-import-dropzone");
+    const dropzoneEmpty = modal.querySelector("#workflow-import-dropzone-empty");
+    const dropzoneFilled = modal.querySelector("#workflow-import-dropzone-filled");
     const fileNameLabel = modal.querySelector("#workflow-import-file-name");
-    const fileBtn = modal.querySelector("#workflow-import-file-btn");
-    const jsonTextarea = modal.querySelector("#workflow-import-json");
-    fileBtn.addEventListener("click", () => fileInput.click());
-    fileInput.addEventListener("change", () => {
-      const file = fileInput.files && fileInput.files[0];
+    const fileMetaLabel = modal.querySelector("#workflow-import-file-meta");
+    const nameInput = modal.querySelector("#workflow-import-name");
+    const reselectBtn = modal.querySelector("#workflow-import-reselect");
+    const submitBtn = modal.querySelector("#workflow-import-submit");
+    const errorBox = modal.querySelector("#workflow-import-error");
+
+    function handleFile(file) {
       if (!file) return;
       const reader = new FileReader();
       reader.onload = () => {
-        jsonTextarea.value = String(reader.result || "");
+        const text = String(reader.result || "");
+        let parsed;
+        try {
+          parsed = JSON.parse(text);
+        } catch (e) {
+          errorBox.textContent = "JSON 格式错误，无法解析";
+          return;
+        }
+        // 自动识别格式
+        const format = detectWorkflowFormat(parsed);
+        if (!format) {
+          errorBox.textContent = "无法识别工作流格式，请检查文件内容";
+          return;
+        }
+        errorBox.textContent = "";
+        // 暂存解析结果
+        dropzone._parsedJson = parsed;
+        dropzone._sourceFormat = format;
+        // 切换为已选择状态
+        dropzoneEmpty.hidden = true;
+        dropzoneFilled.hidden = false;
         fileNameLabel.textContent = file.name;
-        jsonTextarea.focus();
+        const formatLabel = format === "ui_json" ? "UI 格式" : "API 格式";
+        const sizeKb = Math.max(1, Math.round(text.length / 1024));
+        fileMetaLabel.textContent = `${formatLabel} · ${sizeKb} KB`;
+        // 文件名（去掉 .json 扩展名）填入工作流名称（仅当名称为空时）
+        if (!nameInput.value.trim()) {
+          const baseName = file.name.replace(/\.json$/i, "").replace(/[_-]+/g, " ").trim();
+          if (baseName) nameInput.value = baseName;
+        }
       };
       reader.onerror = () => {
-        fileNameLabel.textContent = "读取文件失败，请重试";
+        errorBox.textContent = "读取文件失败，请重试";
       };
       reader.readAsText(file);
+    }
+
+    dropzone.addEventListener("click", (e) => {
+      // 不在"重新选择"按钮上时才触发
+      if (!e.target.closest("#workflow-import-reselect")) {
+        fileInput.click();
+      }
+    });
+    reselectBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      fileInput.click();
+    });
+    fileInput.addEventListener("change", () => {
+      const file = fileInput.files && fileInput.files[0];
+      handleFile(file);
+      fileInput.value = ""; // 允许重复选择同一文件
+    });
+    // 拖拽支持
+    dropzone.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      dropzone.classList.add("drag-over");
+    });
+    dropzone.addEventListener("dragleave", () => {
+      dropzone.classList.remove("drag-over");
+    });
+    dropzone.addEventListener("drop", (e) => {
+      e.preventDefault();
+      dropzone.classList.remove("drag-over");
+      const file = e.dataTransfer?.files?.[0];
+      if (file) handleFile(file);
     });
     return modal;
+  }
+
+  // 自动识别工作流格式：UI JSON 有 nodes 数组，API JSON 值含 class_type
+  function detectWorkflowFormat(raw) {
+    if (!raw || typeof raw !== "object") return null;
+    if (Array.isArray(raw.nodes)) return "ui_json";
+    for (const value of Object.values(raw)) {
+      if (value && typeof value === "object" && "class_type" in value) return "api_json";
+    }
+    return null;
   }
 
   function openWorkflowImportModal() {
@@ -1034,12 +1112,13 @@
     const error = modal.querySelector(".modal-error");
     error.textContent = "";
     modal.querySelector('input[name="name"]').value = "";
-    modal.querySelector('textarea[name="json"]').value = "";
-    modal.querySelector('select[name="format"]').value = "api";
-    const fileInput = modal.querySelector("#workflow-import-file");
-    if (fileInput) fileInput.value = "";
-    const fileNameLabel = modal.querySelector("#workflow-import-file-name");
-    if (fileNameLabel) fileNameLabel.textContent = "未选择文件，可粘贴 JSON 或选择 .json 文件";
+    const dropzone = modal.querySelector("#workflow-import-dropzone");
+    if (dropzone) {
+      dropzone._parsedJson = null;
+      dropzone._sourceFormat = null;
+    }
+    modal.querySelector("#workflow-import-dropzone-empty").hidden = false;
+    modal.querySelector("#workflow-import-dropzone-filled").hidden = true;
     modal.hidden = false;
     requestAnimationFrame(() => {
       modal.classList.add("show");
@@ -1060,44 +1139,33 @@
     event.preventDefault();
     const form = event.currentTarget;
     const nameInput = form.querySelector('input[name="name"]');
-    const jsonInput = form.querySelector('textarea[name="json"]');
-    const formatSelect = form.querySelector('select[name="format"]');
     const submit = form.querySelector('button[type="submit"]');
     const error = form.querySelector(".modal-error");
+    const dropzone = form.querySelector("#workflow-import-dropzone");
     const name = nameInput.value.trim().replace(/\s+/g, " ");
-    const rawJson = jsonInput.value.trim();
     if (!name) {
-      error.textContent = "请输入工作流名称。";
+      error.textContent = "请输入工作流名称";
       nameInput.focus();
       return;
     }
-    if (!rawJson) {
-      error.textContent = "请粘贴工作流 JSON 内容。";
-      jsonInput.focus();
-      return;
-    }
-    let parsed;
-    try {
-      parsed = JSON.parse(rawJson);
-    } catch (parseError) {
-      error.textContent = "JSON 格式错误，无法解析。";
-      jsonInput.focus();
+    const parsed = dropzone?._parsedJson;
+    const sourceFormat = dropzone?._sourceFormat;
+    if (!parsed || !sourceFormat) {
+      error.textContent = "请先选择工作流 JSON 文件";
       return;
     }
     submit.disabled = true;
     submit.textContent = "正在导入…";
     error.textContent = "";
     try {
-      const sourceFormat = formatSelect.value === "ui" ? "ui_json" : "api_json";
       // 分两步：先创建空工作流，再导入 JSON 到草稿。
-      // 后端 create_workflow 不接受 graph 参数，必须用独立 import 接口。
       const createResp = await request(API.workflows, {
         method: "POST",
         body: JSON.stringify({ name, source_type: sourceFormat }),
       });
       const workflowId = createResp.workflow?.id;
       if (!workflowId) {
-        throw new Error("创建工作流失败：未返回工作流 ID。");
+        throw new Error("创建工作流失败，未返回工作流 ID");
       }
       try {
         await request(API.workflowImport(workflowId), {
@@ -1105,7 +1173,7 @@
           body: JSON.stringify({ raw_json: parsed, source_format: sourceFormat }),
         });
       } catch (importError) {
-        // 导入失败时删除刚创建的空工作流，避免残留垃圾数据。
+        // 导入失败时删除刚创建的空工作流
         try {
           await request(API.workflow(workflowId), { method: "DELETE" });
         } catch (_) {

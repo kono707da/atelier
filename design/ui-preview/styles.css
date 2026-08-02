@@ -1491,22 +1491,90 @@ button {
   box-shadow: 0 0 0 4px rgba(91, 111, 230, 0.11);
 }
 
-/* 工作流导入弹窗：文件选择行 */
-.workflow-import-file-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
+/* 工作流导入弹窗：拖拽上传区 */
+.workflow-import-dropzone {
+  border: 2px dashed #d9dee9;
+  border-radius: 12px;
+  padding: 20px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 140ms ease, background 140ms ease;
+  background: #fafbfc;
+  margin-bottom: 4px;
 }
 
-.workflow-import-file-name {
+.workflow-import-dropzone:hover {
+  border-color: #8698ef;
+  background: #f5f7ff;
+}
+
+.workflow-import-dropzone.drag-over {
+  border-color: #5873ef;
+  background: #eef1ff;
+}
+
+.workflow-import-dropzone-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+.workflow-import-dropzone-icon {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  background: linear-gradient(145deg, #5873ef, #8667e8);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 760;
+}
+
+.workflow-import-dropzone-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.workflow-import-dropzone-text strong {
+  color: #394358;
+  font-size: 12px;
+}
+
+.workflow-import-dropzone-text small {
   color: #7d8698;
   font-size: 9px;
-  line-height: 1.4;
+}
+
+.workflow-import-dropzone-filled {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.workflow-import-file-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: left;
+  overflow: hidden;
+}
+
+.workflow-import-file-info strong {
+  color: #394358;
+  font-size: 11px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  flex: 1;
+  max-width: 220px;
+}
+
+.workflow-import-file-info small {
+  color: #5873ef;
+  font-size: 9px;
 }
 
 .modal-error {
